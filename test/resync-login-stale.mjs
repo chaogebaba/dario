@@ -30,6 +30,7 @@ function header(label) {
 // Temp home + env override must happen BEFORE importing accounts.
 const tmpHome = await mkdtemp(join(tmpdir(), 'dario-resync-test-'));
 process.env.HOME = tmpHome;
+process.env.DARIO_IGNORE_CC_CREDENTIALS = '1';
 process.env.USERPROFILE = tmpHome;
 const dariDir = join(tmpHome, '.dario');
 const accountsDir = join(dariDir, 'accounts');

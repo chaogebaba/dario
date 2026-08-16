@@ -39,6 +39,7 @@ function header(label) {
 // test, because DARIO_DIR is evaluated at import time.
 const tmpHome = await mkdtemp(join(tmpdir(), 'dario-migrate-test-'));
 process.env.HOME = tmpHome;
+process.env.DARIO_IGNORE_CC_CREDENTIALS = '1';
 process.env.USERPROFILE = tmpHome;
 const dariDir = join(tmpHome, '.dario');
 const accountsDir = join(dariDir, 'accounts');
