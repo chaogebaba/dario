@@ -28,7 +28,7 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { lookup } from 'node:dns/promises';
-import type { Duplex } from 'node:stream';
+import { pipeline, type Duplex } from 'node:stream';
 
 /** SOCKS5 reply codes (RFC 1928 §6), mapped to operator-legible text. */
 const REPLY_TEXT: Record<number, string> = {
@@ -77,14 +77,21 @@ class ByteReader {
   private buf: Buffer = Buffer.alloc(0);
   private want: { n: number; resolve: (b: Buffer) => void; reject: (e: Error) => void } | null = null;
   private failure: Error | null = null;
+  private readonly sock: Socket;
+
+  private readonly onData = (d: Buffer): void => {
+    this.buf = this.buf.length === 0 ? d : Buffer.concat([this.buf, d]);
+    this.pump();
+  };
+  private readonly onError = (e: Error): void => this.fail(e);
+  private readonly onClose = (): void =>
+    this.fail(new Error('SOCKS5 proxy closed the connection during the handshake'));
 
   constructor(sock: Socket) {
-    sock.on('data', (d: Buffer) => {
-      this.buf = this.buf.length === 0 ? d : Buffer.concat([this.buf, d]);
-      this.pump();
-    });
-    sock.on('error', (e: Error) => this.fail(e));
-    sock.on('close', () => this.fail(new Error('SOCKS5 proxy closed the connection during the handshake')));
+    this.sock = sock;
+    sock.on('data', this.onData);
+    sock.on('error', this.onError);
+    sock.on('close', this.onClose);
   }
 
   private pump(): void {
@@ -112,9 +119,26 @@ class ByteReader {
     });
   }
 
-  /** Bytes buffered past the handshake — must be replayed into the tunnel. */
-  get leftover(): Buffer {
-    return this.buf;
+  /**
+   * Hand the socket back for tunnelling and return whatever arrived past
+   * the handshake, so the caller can replay it into the tunnel.
+   *
+   * Detaching is not housekeeping — it is load-bearing. A reader left
+   * attached keeps appending every tunnelled byte to `buf`, so a streamed
+   * response is retained in full *and* re-copied on each chunk: 24 MiB
+   * through the tunnel cost 137 MiB of RSS before this existed. Pausing
+   * matters too: with the last `data` listener gone the socket is still
+   * in flowing mode, and anything read before `pipe()` resumes it would
+   * be emitted to nobody and lost.
+   */
+  detach(): Buffer {
+    this.sock.off('data', this.onData);
+    this.sock.off('error', this.onError);
+    this.sock.off('close', this.onClose);
+    this.sock.pause();
+    const rest = this.buf;
+    this.buf = Buffer.alloc(0);
+    return rest;
   }
 }
 
@@ -170,19 +194,25 @@ async function socks5Connect(
   sock.setNoDelay(true);
 
   const reader = new ByteReader(sock);
-  let timer: ReturnType<typeof setTimeout> | undefined;
 
-  const guard = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`SOCKS5 handshake to ${opts.host}:${opts.port} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    if (typeof timer.unref === 'function') timer.unref();
-  });
+  // Destroying the socket on timeout beats racing a rejection against the
+  // handshake: the loser of a Promise.race never settles, so a rejecting
+  // guard would leak one pending promise per tunnel. Tearing down the
+  // socket makes the handshake reject on its own; `expired` just supplies
+  // the better message.
+  let expired: Error | null = null;
+  const timer = setTimeout(() => {
+    expired = new Error(`SOCKS5 handshake to ${opts.host}:${opts.port} timed out after ${timeoutMs}ms`);
+    sock.destroy();
+  }, timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
 
   const handshake = (async () => {
     await new Promise<void>((resolve, reject) => {
-      sock.once('connect', resolve);
-      sock.once('error', reject);
+      const onConnect = (): void => { sock.off('error', onError); resolve(); };
+      const onError = (e: Error): void => { sock.off('connect', onConnect); reject(e); };
+      sock.once('connect', onConnect);
+      sock.once('error', onError);
     });
 
     // ── Greeting ───────────────────────────────────────────────
@@ -241,16 +271,16 @@ async function socks5Connect(
       throw new Error(`SOCKS5 reply used unsupported address type 0x${atyp.toString(16)}`);
     }
 
-    return { socket: sock, leftover: reader.leftover };
+    return { socket: sock, leftover: reader.detach() };
   })();
 
   try {
-    return await Promise.race([handshake, guard]);
+    return await handshake;
   } catch (err) {
     sock.destroy();
-    throw err;
+    throw expired ?? err;
   } finally {
-    if (timer) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }
 
@@ -270,7 +300,35 @@ export function startSocks5Bridge(opts: Socks5BridgeOptions): Promise<Socks5Brid
     res.end('dario SOCKS5 bridge accepts CONNECT only (upstream traffic is HTTPS).\n');
   });
 
+  // CONNECT sockets are detached from the http server, so nothing else
+  // tracks them: `server.close()` would return while tunnels stayed open,
+  // and closeAllConnections() does not reach them either.
+  const tunnels = new Set<Duplex>();
+
   server.on('connect', (req, clientSocket: Duplex, head: Buffer) => {
+    let upstream: Socket | null = null;
+    const teardown = (): void => {
+      tunnels.delete(clientSocket);
+      upstream?.destroy();
+      clientSocket.destroy();
+    };
+    // Attach before anything can fail. Node hands the socket over bare —
+    // its own 'error' handler is removed when this event fires — and an
+    // unhandled 'error' on a bare socket is an uncaught exception. A
+    // client that aborts while the SOCKS handshake is still in flight
+    // would otherwise take the whole proxy down.
+    //
+    // 'close' (not 'end') drives teardown, so a half-close still gets
+    // forwarded by pipe's end:true. This has to be explicit now that the
+    // reader detaches and pauses: a paused socket never reads the peer's
+    // FIN, so allowHalfOpen=false can no longer auto-close it. The
+    // explicit version is also the correct one — if the client walks away
+    // while the origin is still streaming, nothing else would ever close
+    // the SOCKS half.
+    clientSocket.on('error', teardown);
+    clientSocket.on('close', teardown);
+    tunnels.add(clientSocket);
+
     const raw = req.url ?? '';
     const idx = raw.lastIndexOf(':');
     const destHost = idx > 0 ? raw.slice(0, idx).replace(/^\[|\]$/g, '') : '';
@@ -282,20 +340,25 @@ export function startSocks5Bridge(opts: Socks5BridgeOptions): Promise<Socks5Brid
     }
 
     socks5Connect(opts, destHost, destPort).then(
-      ({ socket: upstream, leftover }) => {
+      ({ socket: sock, leftover }) => {
+        upstream = sock;
         if (clientSocket.destroyed) {
-          upstream.destroy();
+          sock.destroy();
           return;
         }
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (leftover.length) clientSocket.write(leftover);
-        if (head?.length) upstream.write(head);
+        if (head?.length) sock.write(head);
 
-        const drop = () => { upstream.destroy(); clientSocket.destroy(); };
-        upstream.on('error', drop);
-        clientSocket.on('error', drop);
-        upstream.pipe(clientSocket);
-        clientSocket.pipe(upstream);
+        // pipeline(), not pipe(): it reports completion as well as error,
+        // and flushes the destination before calling back. Relying on
+        // pipe() plus allowHalfOpen left the socket pair alive whenever
+        // the *origin* closed first — the response finished, both halves
+        // stayed open, and one SOCKS connection leaked per request.
+        // Either direction finishing ends the tunnel; a CONNECT tunnel
+        // has no use for half-open once one side is done.
+        pipeline(sock, clientSocket, teardown);
+        pipeline(clientSocket, sock, teardown);
       },
       (err: Error) => {
         if (!clientSocket.destroyed) {
@@ -319,7 +382,11 @@ export function startSocks5Bridge(opts: Socks5BridgeOptions): Promise<Socks5Brid
       resolve({
         port: addr.port,
         url: `http://127.0.0.1:${addr.port}`,
-        close: () => new Promise<void>((done) => server.close(() => done())),
+        close: () => new Promise<void>((done) => {
+          for (const t of tunnels) t.destroy();
+          tunnels.clear();
+          server.close(() => done());
+        }),
       });
     });
   });

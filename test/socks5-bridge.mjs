@@ -21,8 +21,22 @@ function check(name, cond, detail) {
 }
 function header(n) { console.log(`\n${'='.repeat(70)}\n  ${n}\n${'='.repeat(70)}`); }
 
-const listen = (server, port = 0) => new Promise((res) => server.listen(port, '127.0.0.1', () => res(server.address().port)));
-const close = (server) => new Promise((res) => server.close(() => res()));
+// Fixtures get torn down, not drained. server.close() waits on every
+// accepted socket, so one straggler wedges the whole file after the last
+// assertion has already passed — a hang with a green transcript. Track
+// what we accept and destroy it; net.Server has no closeAllConnections()
+// (that one is http.Server-only, in Bun and Node alike).
+const accepted = new WeakMap();
+const listen = (server, port = 0) => {
+  const socks = new Set();
+  accepted.set(server, socks);
+  server.on('connection', (s) => { socks.add(s); s.on('close', () => socks.delete(s)); });
+  return new Promise((res) => server.listen(port, '127.0.0.1', () => res(server.address().port)));
+};
+const close = (server) => new Promise((res) => {
+  for (const s of accepted.get(server) ?? []) s.destroy();
+  server.close(() => res());
+});
 
 /** Echo server standing in for the origin behind the proxy. */
 function startEcho() {
@@ -119,12 +133,17 @@ function startFakeSocks5(opts = {}) {
           upstream.pipe(sock);
         });
         upstream.on('error', () => sock.destroy());
+        // Real proxies drop both halves together. Without this the origin
+        // side survives the client going away, and the stand-in server's
+        // close() never resolves — the suite passes every assertion and
+        // then hangs on teardown.
+        sock.on('close', () => upstream.destroy());
         phase = 'tunnel';
       }
     });
     sock.on('error', () => {});
   });
-  return listen(server).then((port) => ({ port, state, close: () => close(server) }));
+  return listen(server).then((port) => ({ port, state, server, close: () => close(server) }));
 }
 
 /** Speak HTTP CONNECT to the bridge; resolve with status line + tunnel socket. */
@@ -297,6 +316,72 @@ header('unreachable proxy fails fast rather than hanging');
   check('dead proxy → 502', r.status.includes('502'));
   r.sock.destroy();
   await bridge.close();
+}
+
+// ======================================================================
+header('tunnel teardown and buffering');
+{
+  const echo = await startEcho();
+  const proxy = await startFakeSocks5({ forwardPort: echo.port });
+  const bridge = await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true });
+
+  // The client half closing must take the SOCKS half with it. Without
+  // that, every abandoned tunnel leaks an fd until the proxy times it
+  // out — and fetch's connection pool abandons tunnels constantly.
+  const { sock } = await connectThroughBridge(bridge.port, 'api.anthropic.com:443');
+  await roundTrip(sock, 'x');
+  sock.destroy();
+  const live = await new Promise((resolve) => {
+    const deadline = Date.now() + 3000;
+    const poll = () => proxy.server.getConnections((_e, n) => {
+      if (n === 0 || Date.now() > deadline) resolve(n);
+      else setTimeout(poll, 25);
+    });
+    poll();
+  });
+  check('client close tears down the upstream SOCKS socket', live === 0, `${live} still open`);
+
+  // The handshake reader must let go of the socket once the tunnel is
+  // up. Left attached it re-buffers every buffered byte on each chunk —
+  // O(n^2) copying and full retention of the transfer (24 MiB in cost
+  // 137 MiB of RSS). Memory must not track transfer size. The transfer
+  // is deliberately large so the constant cost of socket buffers stays
+  // small next to the ~4-5x growth the bug produced.
+  const BYTES = 128 * 1024 * 1024;
+  const blob = Buffer.alloc(64 * 1024, 0x61);
+  const blaster = createNetServer((s) => {
+    let sent = 0;
+    const pump = () => {
+      while (sent < BYTES) { sent += blob.length; if (!s.write(blob)) return; }
+      s.end();
+    };
+    s.on('drain', pump); s.on('error', () => {}); s.resume(); pump();
+  });
+  const blasterPort = await listen(blaster);
+  const bulkProxy = await startFakeSocks5({ forwardPort: blasterPort });
+  const bulkBridge = await startSocks5Bridge({ host: '127.0.0.1', port: bulkProxy.port, remoteDns: true });
+
+  global.gc?.();
+  const rssBefore = process.memoryUsage().rss;
+  const { sock: bulk } = await connectThroughBridge(bulkBridge.port, 'api.anthropic.com:443');
+  let got = 0;
+  await new Promise((resolve, reject) => {
+    bulk.on('data', (d) => { got += d.length; });
+    bulk.on('close', resolve);
+    bulk.on('error', reject);
+    setTimeout(() => reject(new Error('bulk transfer timed out')), 30_000).unref?.();
+  });
+  global.gc?.();
+  const grew = process.memoryUsage().rss - rssBefore;
+  check('bulk transfer completes', got >= BYTES, `${got} of ${BYTES}`);
+  // Generous ceiling: the point is that growth is bounded by socket
+  // buffers, not proportional to the transfer. Pre-fix this was ~5.7x.
+  check('memory does not track transfer size', grew < BYTES / 2,
+    `RSS grew ${(grew / 1048576).toFixed(1)} MiB on a ${(BYTES / 1048576).toFixed(0)} MiB transfer`);
+
+  bulk.destroy();
+  await bulkBridge.close(); await bulkProxy.close(); await close(blaster);
+  await bridge.close(); await proxy.close(); await echo.close();
 }
 
 console.log(`\n${'='.repeat(70)}\n  ${pass} pass, ${fail} fail\n${'='.repeat(70)}`);

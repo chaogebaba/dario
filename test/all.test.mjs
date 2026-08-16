@@ -133,6 +133,24 @@ function tailBuffer(limit) {
   };
 }
 
+// Per-suite wall-clock cap. Without one, a single suite that wedges (a
+// socket that never closes, an unref'd guard timer that can never fire)
+// hangs the whole run — and CI — indefinitely, with no output to say
+// which file did it. 120s is ~20x the slowest honest suite. Override
+// with TEST_TIMEOUT_MS.
+const TIMEOUT_MS = Math.max(1000, Number(process.env['TEST_TIMEOUT_MS'] || 120_000));
+
+// Children outlive the driver if it dies mid-run (Ctrl-C, OOM kill),
+// which is how the machine ended up with a pile of orphaned test
+// processes. Track them and take them down on the way out.
+const live = new Set();
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    for (const p of live) p.kill('SIGKILL');
+    process.exit(130);
+  });
+}
+
 /** Run one suite file to completion. Resolves with its outcome. */
 function runSuite(file, argv) {
   const started = Date.now();
@@ -142,14 +160,34 @@ function runSuite(file, argv) {
       // Inherited env plus the pinned template cache (see above).
       env: childEnv,
     });
+    live.add(proc);
     const buf = tailBuffer(MAX_CAPTURE);
     proc.stdout.on('data', d => buf.push(d));
     proc.stderr.on('data', d => buf.push(d));
-    proc.on('close', code => {
-      // Only failures keep their output; passing suites release it now.
-      resolve({ file, code, out: code === 0 ? '' : buf.value(), ms: Date.now() - started });
-    });
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill('SIGKILL');
+    }, TIMEOUT_MS);
+
+    const finish = (code, extra) => {
+      clearTimeout(timer);
+      live.delete(proc);
+      const failed = timedOut || code !== 0;
+      resolve({
+        file,
+        // A SIGKILLed child reports code null; that must not read as pass.
+        code: timedOut ? 'timeout' : (code ?? 'signal'),
+        out: failed ? `${extra ?? ''}${buf.value()}` : '',
+        ms: Date.now() - started,
+      });
+    };
+
+    proc.on('close', code => finish(code, timedOut ? `TIMED OUT after ${TIMEOUT_MS}ms — killed.\n` : ''));
     proc.on('error', err => {
+      clearTimeout(timer);
+      live.delete(proc);
       resolve({ file, code: 1, out: String(err?.stack || err), ms: Date.now() - started });
     });
   });
