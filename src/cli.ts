@@ -19,7 +19,7 @@
 
 import { unlink } from 'node:fs/promises';
 import { realpathSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 import { pathToFileURL } from 'node:url';
 import { startAutoOAuthFlow, startManualOAuthFlow, detectHeadlessEnvironment, getStatus, refreshTokens, loadCredentials } from './oauth.js';
@@ -2106,6 +2106,7 @@ async function upgrade() {
   const { spawnSync } = await import('node:child_process');
   const { fileURLToPath } = await import('node:url');
   const { readFile: rf } = await import('node:fs/promises');
+  const { existsSync } = await import('node:fs');
   const dir = join(fileURLToPath(import.meta.url), '..', '..');
   let currentVersion = 'unknown';
   try {
@@ -2119,19 +2120,55 @@ async function upgrade() {
   console.log('');
   console.log(`  Current: v${currentVersion}`);
 
+  // `bun add --global` writes to bun's global prefix, which is not
+  // necessarily where the running dario lives. Upgrading a copy other
+  // than the one that just ran is worse than doing nothing: it reports
+  // success, `dario --version` is unchanged, and on a PATH where bun's
+  // bin comes first the freshly installed release silently shadows what
+  // was there. A checkout is the case that matters — `dario upgrade`
+  // there would replace the developer's own build with a registry one.
+  //
+  // `dir` is not reliably the checkout: dist/ is often a symlink to a
+  // build directory elsewhere, which makes dir that build directory.
+  // package.json is the anchor that survives it — every layout keeps one
+  // next to dist/, so following it to its real location lands on the
+  // actual project root.
+  let projectRoot = dir;
+  try {
+    projectRoot = dirname(realpathSync(join(dir, 'package.json')));
+  } catch { /* no package.json to follow — dir is the best guess */ }
+
+  if (existsSync(join(projectRoot, '.git')) || existsSync(join(projectRoot, 'src', 'cli.ts'))) {
+    console.log('');
+    console.log(`  This dario runs from a source checkout: ${projectRoot}`);
+    console.log('  `bun add --global` would install a separate release copy and leave');
+    console.log('  this one untouched — and shadow it if bun\'s bin directory comes');
+    console.log('  first on PATH. Upgrade the checkout instead:');
+    console.log('');
+    console.log(`    cd ${projectRoot} && git pull && bun run build`);
+    console.log('');
+    return;
+  }
+
   // Registry metadata endpoint; 3s budget keeps the pre-flight short.
   let latestVersion: string | null = null;
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), 3000);
-    const res = await fetch('https://registry.npmjs.org/@askalf%2Fdario/latest', {
-      signal: ctl.signal,
-      headers: { accept: 'application/json' },
-    });
-    clearTimeout(t);
-    if (res.ok) {
-      const body = await res.json() as { version?: string };
-      latestVersion = typeof body.version === 'string' ? body.version : null;
+    try {
+      const res = await fetch('https://registry.npmjs.org/@askalf%2Fdario/latest', {
+        signal: ctl.signal,
+        headers: { accept: 'application/json' },
+      });
+      if (res.ok) {
+        const body = await res.json() as { version?: string };
+        latestVersion = typeof body.version === 'string' ? body.version : null;
+      }
+    } finally {
+      // In a finally, not after the await: a non-abort rejection (DNS,
+      // TLS, offline) skipped it and left a live 3s timer holding the
+      // event loop open past the command's own exit.
+      clearTimeout(t);
     }
   } catch { /* offline or registry down — fall through and install anyway */ }
 
@@ -2145,6 +2182,19 @@ async function upgrade() {
       console.log('');
       return;
     }
+  }
+
+  // Same trap for a non-bun global install (npm i -g). Warn with both
+  // paths rather than refuse — the user may genuinely be migrating to a
+  // bun-managed install, and only they know which copy they want.
+  const bunBin = spawnSync('bun', ['pm', '--global', 'bin'], { encoding: 'utf-8' });
+  const bunRoot = bunBin.status === 0 ? dirname(bunBin.stdout.trim()) : null;
+  if (bunRoot && !projectRoot.startsWith(bunRoot)) {
+    console.log('');
+    console.log(`  Note: this dario lives in ${projectRoot},`);
+    console.log(`  but \`bun add --global\` installs under ${bunRoot}.`);
+    console.log('  The copy you just ran will not change; the new one takes over only');
+    console.log('  if its directory comes first on PATH.');
   }
 
   console.log('');
