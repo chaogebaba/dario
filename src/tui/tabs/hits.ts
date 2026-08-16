@@ -85,10 +85,19 @@ export const HitsTab: Tab<HitsState> = {
             subscribed: true,
             connectionError: null,
           };
-          // If user was at top (newest), keep them there. -1 means "no
-          // selection yet"; auto-select newest on first record.
-          if (s.selectedIdx === -1 || s.selectedIdx === 0) {
+          // selectedIdx is an offset into the reversed (newest-first) view.
+          // A new record prepends to that view, pushing every existing item
+          // down by 1. If the user was at idx 0 (newest), keep them there so
+          // they auto-follow. If they scrolled down (idx > 0), shift to keep
+          // the same record selected. -1 means "no selection yet"; auto-select
+          // newest on first record.
+          if (s.selectedIdx <= 0) {
             next.selectedIdx = 0;
+          } else {
+            // The new record went to the front of newestFirst, so the
+            // previously-selected record moved from idx to idx+1.
+            const max = next.buffer.length - 1;
+            next.selectedIdx = Math.min(s.selectedIdx + 1, max);
           }
           return next;
         });
@@ -103,22 +112,22 @@ export const HitsTab: Tab<HitsState> = {
 
   onKey(state, key) {
     if (state.buffer.length === 0) return undefined;
-    // ↑ — go to OLDER (toward higher index in our reversed display)
+    // ↑ — move cursor UP on screen = toward NEWER (lower selectedIdx)
     if (key.name === 'up') {
+      return { ...state, selectedIdx: Math.max(state.selectedIdx - 1, 0) };
+    }
+    // ↓ — move cursor DOWN on screen = toward OLDER (higher selectedIdx)
+    if (key.name === 'down') {
       const max = state.buffer.length - 1;
       return { ...state, selectedIdx: Math.min(state.selectedIdx + 1, max) };
     }
-    // ↓ — go to NEWER
-    if (key.name === 'down') {
-      return { ...state, selectedIdx: Math.max(state.selectedIdx - 1, 0) };
-    }
     // PgUp / PgDn — step by 10
     if (key.name === 'pageup') {
-      const max = state.buffer.length - 1;
-      return { ...state, selectedIdx: Math.min(state.selectedIdx + 10, max) };
+      return { ...state, selectedIdx: Math.max(state.selectedIdx - 10, 0) };
     }
     if (key.name === 'pagedown') {
-      return { ...state, selectedIdx: Math.max(state.selectedIdx - 10, 0) };
+      const max = state.buffer.length - 1;
+      return { ...state, selectedIdx: Math.min(state.selectedIdx + 10, max) };
     }
     // Home — jump to newest
     if (key.name === 'home') {

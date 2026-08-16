@@ -398,11 +398,11 @@ header('Hits tab — empty / connecting / populated / selected');
   check('populated: shows live marker',    r3.includes('live'));
   check('populated: detail section',       r3.includes('Selected') || r3.includes('Tokens'));
 
-  // Up/down navigation
-  const moved = HitsTab.onKey(populated, { name: 'up', ch: '', ctrl: false, shift: false, meta: false });
-  check('up arrow moves selectedIdx',      moved && moved.selectedIdx === 1);
-  const moved2 = HitsTab.onKey(moved, { name: 'down', ch: '', ctrl: false, shift: false, meta: false });
-  check('down arrow moves selectedIdx',    moved2 && moved2.selectedIdx === 0);
+  // Up/down navigation — Down moves toward older (higher idx), Up toward newer (lower idx)
+  const moved = HitsTab.onKey(populated, { name: 'down', ch: '', ctrl: false, shift: false, meta: false });
+  check('down arrow moves selectedIdx',    moved && moved.selectedIdx === 1);
+  const moved2 = HitsTab.onKey(moved, { name: 'up', ch: '', ctrl: false, shift: false, meta: false });
+  check('up arrow moves selectedIdx',      moved2 && moved2.selectedIdx === 0);
 }
 
 // ─────────────────────────────────────────────────────────────
