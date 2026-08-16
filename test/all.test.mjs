@@ -56,6 +56,13 @@ const files = readdirSync(__dirname)
   .filter(f => f.endsWith('.mjs') && !EXCLUDED.has(f))
   .sort();
 
+// Shell-level suites (packaging/installer). Run through bash rather than
+// the JS runtime, but reported alongside everything else so a broken
+// installer fails `npm test` like any other regression.
+const shellFiles = readdirSync(__dirname)
+  .filter(f => f.endsWith('.test.sh'))
+  .sort();
+
 // Every child gets the live-template cache pointed at a path that does not
 // exist, so loadTemplate falls back to the BUNDLED snapshot and the suite is
 // independent of local machine state.
@@ -85,6 +92,25 @@ for (const f of files) {
       const proc = spawn(process.execPath, [join(__dirname, f)], {
         stdio: ['ignore', 'pipe', 'pipe'],
         // Inherited env plus the pinned template cache (see above).
+        env: childEnv,
+      });
+      let out = '';
+      proc.stdout.on('data', d => { out += d; });
+      proc.stderr.on('data', d => { out += d; });
+      proc.on('close', code => {
+        if (code === 0) return resolve();
+        reject(new Error(`\n--- ${f} exited with code ${code} ---\n${out}`));
+      });
+      proc.on('error', err => reject(err));
+    });
+  });
+}
+
+for (const f of shellFiles) {
+  test(f, { concurrency: true }, async () => {
+    await new Promise((resolve, reject) => {
+      const proc = spawn('bash', [join(__dirname, f)], {
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: childEnv,
       });
       let out = '';

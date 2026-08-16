@@ -18,6 +18,7 @@
     "dist",
     "docs",
     "!docs/recovery.md",
+    "scripts/install-systemd.sh",
     "README.md",
     "LICENSE"
   ],
