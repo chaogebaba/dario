@@ -24,7 +24,7 @@ npm run dev   # runs with tsx, no build needed
 | `src/pool.ts` | Account pool, headroom-aware selection, failover-target selection, request queueing (v3.5.0+); always constructed since v5.0 — a plain `dario login` is a pool of one |
 | `src/analytics.ts` | Rolling request history, per-account / per-model stats, burn-rate, exhaustion predictions (v3.5.0+) |
 | `src/openai-backend.ts` | OpenAI-compat backend credential storage and request forwarder (v3.6.0+) |
-| `src/cli.ts` | CLI entry point, command routing (`login`, `proxy`, `accounts`, `backend`, `status`, `refresh`, `logout`), Bun auto-relaunch |
+| `src/cli.ts` | CLI entry point, command routing (`login`, `proxy`, `accounts`, `backend`, `status`, `refresh`, `logout`), Bun-runtime enforcement |
 | `src/index.ts` | Library exports |
 | `test/issue-29-tool-translation.mjs` | In-process regression test for the tool-use reverse translation layer (28 assertions, no OAuth or live proxy required) |
 | `test/compat.mjs` | Live-proxy end-to-end compat suite (tool use, streaming, OpenAI compat). Requires a running `dario proxy` and authenticated Claude credentials. |

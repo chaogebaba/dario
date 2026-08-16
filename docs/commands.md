@@ -56,7 +56,6 @@ This page is the per-flag reference. For environment variables grouped by task â
 | `DARIO_API_KEY` | If set, all endpoints (except `/health`) require a matching `x-api-key` or `Authorization: Bearer` header. Required when `--host` binds non-loopback. | unset (open) |
 | `DARIO_CORS_ORIGIN` | Override browser CORS origin | `http://localhost:${port}` |
 | `DARIO_QUIET_TLS` | Suppress the runtime/TLS mismatch startup banner | unset |
-| `DARIO_NO_BUN` | Disable automatic Bun relaunch | unset |
 | `DARIO_MIN_INTERVAL_MS` | Legacy name for `DARIO_PACE_MIN_MS`. Still honored; new name wins when both are set. | â€” |
 | `DARIO_CC_PATH` | Override path to the Claude Code binary for OAuth detection | auto-detect |
 | `DARIO_OAUTH_CLIENT_ID` | Override the detected Claude OAuth client id as an emergency escape hatch | unset |

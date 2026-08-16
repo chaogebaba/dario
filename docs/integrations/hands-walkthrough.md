@@ -39,7 +39,7 @@ This walkthrough covers both. SDK + dario gets the spotlight because that's wher
 | **dario** | v3.33.0+ (latest preferred — `bun add --global @askalf/dario@latest`) | v3.33.0 added the system-prompt identity match that auto-preserves hands' computer-use tools |
 | **A Claude OAuth login** | run `dario login` once | A Pro / Max subscription on a Claude account |
 | **`claude` CLI** | latest | Required for Claude Login mode; `hands init` will install for you if missing |
-| **Bun** (recommended) | 1.1+ | dario auto-relaunches under Bun for TLS-fingerprint fidelity. Skip if you're fine with a runtime banner; install via [bun.sh](https://bun.sh) for the full subscription wire shape. |
+| **Bun** | 1.4+ | dario requires the Bun runtime — its BoringSSL TLS ClientHello matches Claude Code's wire shape. Install via [bun.sh](https://bun.sh). |
 
 Verify dario before starting:
 

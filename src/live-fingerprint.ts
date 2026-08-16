@@ -41,9 +41,9 @@
  *      provided both run on the same Node major. A cross-runtime worry
  *      surfaces when Anthropic ships Bun- or bundled-binary CC: at that
  *      point Node-dario and Bun-CC would JA-differ.
- *      → Mitigation: dario auto-relaunches under Bun when it's on PATH so
- *        the proxy's ClientHello matches CC's Bun/BoringSSL shape;
- *        `--strict-tls` refuses to start otherwise.
+ *      → Mitigation: dario requires Bun, whose BoringSSL ClientHello matches
+ *        CC's; `--strict-tls` refuses to start on a Bun version below the
+ *        JA3-verified floor.
  *
  *   3. HTTP/2 frame ordering + SETTINGS parameters. Similar to TLS, this
  *      is controlled by the HTTP library. Node and undici produce a

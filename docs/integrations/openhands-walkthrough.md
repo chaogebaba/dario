@@ -22,7 +22,7 @@ Total install + config: 10–15 minutes if Python and dario are already installe
 | **Poetry** or **pipx** | recent | OpenHands' install flow |
 | **dario** | v3.30+ (latest preferred — `bun add --global @askalf/dario@latest`) | OpenAI-compat endpoint plus the provider-prefix routing this guide leans on |
 | **A Claude OAuth login** | run `dario login` once | The whole point — a Pro / Max subscription on a Claude account |
-| **Bun** (recommended) | 1.1+ | dario auto-relaunches under Bun for TLS-fingerprint fidelity. Skip if you're fine with a runtime banner; install via [bun.sh](https://bun.sh) for the full subscription wire shape. |
+| **Bun** | 1.4+ | dario requires the Bun runtime — its BoringSSL TLS ClientHello matches Claude Code's wire shape. Install via [bun.sh](https://bun.sh). |
 
 Verify dario before starting OpenHands install — saves you from chasing OpenHands errors that are actually dario auth issues:
 

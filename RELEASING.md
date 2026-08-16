@@ -44,7 +44,7 @@ dario doctor
 dario doctor --usage          # also exercises the per-model probe path
 
 # 4. Confirm the proxy starts and serves /health from the installed binary.
-DARIO_NO_BUN=1 dario proxy &
+dario proxy &
 sleep 2
 curl -s http://127.0.0.1:3456/health
 kill %1

@@ -111,7 +111,6 @@ All flags have env-var equivalents. The image sets sensible container defaults:
 | `DARIO_LOG_BODIES`        | unset            | `1` to log request/response bodies            |
 | `DARIO_PASSTHROUGH_BETAS` | unset            | `1` to forward `anthropic-beta` headers as-is |
 | `DARIO_CLAUDE_BIN`        | unset            | Path to a Claude Code binary (optional, for live template capture) |
-| `DARIO_NO_BUN`            | unset            | `1` to skip the Bun auto-relaunch (not recommended) |
 | `DARIO_ADMIN`             | unset            | `1` mounts the headless admin API at `/admin/*` — see [`docs/admin-api.md`](./admin-api.md) |
 | `DARIO_ADMIN_TOKEN`       | unset            | Bearer token for admin calls (falls back to `DARIO_API_KEY`); enabled-but-tokenless fails closed |
 | `DARIO_ADMIN_RATE_LIMIT`  | unset            | `off` to disable admin rate limiting (on by default) |
