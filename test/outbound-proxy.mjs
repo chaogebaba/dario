@@ -215,6 +215,42 @@ header('resolveEgressProxyFlag — precedence');
     expectThrows(() => resolveEgressProxyFlag(['--egress-proxy'], {}, null)) !== null);
   check('--egress-proxy followed by another flag throws',
     expectThrows(() => resolveEgressProxyFlag(['--egress-proxy', '--port=1'], {}, null)) !== null);
+
+  // ── Ambiguities pinned deliberately ───────────────────────────────
+  // Each of these has two defensible answers, so the point is that the
+  // behaviour is chosen and asserted rather than whatever argument order
+  // happens to fall out of the implementation.
+
+  // Repeated flag: first wins. (Many CLIs take the last; this one does
+  // not, and a silent change of mind here would reroute egress.)
+  check('repeated --egress-proxy: the first wins',
+    resolveEgressProxyFlag(['--egress-proxy=http://a:1', '--egress-proxy=http://b:2'], {}, null) === 'http://a:1');
+  check('repeated across forms: the = form wins regardless of position',
+    resolveEgressProxyFlag(['--egress-proxy', 'http://b:2', '--egress-proxy=http://a:1'], {}, null) === 'http://a:1');
+
+  // Alias vs canonical: the canonical name wins wherever it appears,
+  // because the aliases exist only for compatibility.
+  check('--egress-proxy beats --via even when --via comes first',
+    resolveEgressProxyFlag(['--via=http://b:2', '--egress-proxy=http://a:1'], {}, null) === 'http://a:1');
+  check('--upstream-proxy beats --via',
+    resolveEgressProxyFlag(['--via=http://b:2', '--upstream-proxy=http://a:1'], {}, null) === 'http://a:1');
+
+  // Prefix collisions: a longer flag that merely starts the same must
+  // not be mistaken for this one.
+  check('--egress-proxy-foo=X is not --egress-proxy',
+    resolveEgressProxyFlag(['--egress-proxy-foo=http://a:1'], {}, FILE) === FILE);
+  check('--via-something=X is not --via',
+    resolveEgressProxyFlag(['--via-something=http://a:1'], {}, FILE) === FILE);
+
+  // An empty LEGACY env clears too, and stops the chain — same rule as
+  // the current name, so migrating between them changes nothing.
+  check('empty legacy env disables the config file',
+    resolveEgressProxyFlag([], { DARIO_UPSTREAM_PROXY: '' }, FILE) === undefined);
+  check('whitespace-only env is treated as empty, not as a URL',
+    resolveEgressProxyFlag([], { DARIO_EGRESS_PROXY: '   ' }, FILE) === undefined);
+  // The current name is consulted first even when it is the empty one.
+  check('empty current env wins over a set legacy env',
+    resolveEgressProxyFlag([], { DARIO_EGRESS_PROXY: '', DARIO_UPSTREAM_PROXY: LEGACY }, FILE) === undefined);
 }
 
 // ======================================================================

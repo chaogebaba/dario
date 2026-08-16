@@ -18,6 +18,9 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadConfig } from './config-file.js';
+import { parseOutboundProxy } from './outbound-proxy.js';
+import { egressIpUrl } from './egress-ip.js';
 
 import { ignoreCcCredentials } from './oauth.js';
 import { homeDir } from './home-dir.js';
@@ -69,6 +72,42 @@ export async function collectEffectiveConfig(): Promise<ConfigReport> {
       { label: 'effort', value: envOrDefault('DARIO_EFFORT', '(CC default)') },
     ],
   });
+
+  // ── Egress route
+  // `dario config` answers "what IS it?", and since the egress route is
+  // now a fail-closed startup gate, an operator debugging a proxy that
+  // refuses to start should find it here rather than only in doctor.
+  // parseOutboundProxy's `display` is the redacted form; never print the
+  // raw value, which routinely carries residential-proxy credentials.
+  {
+    const rawEgress = process.env['DARIO_EGRESS_PROXY']
+      ?? process.env['DARIO_UPSTREAM_PROXY']
+      ?? loadConfig().config.egressProxy
+      ?? '';
+    let egressValue: string;
+    if (!rawEgress.trim()) {
+      egressValue = 'unset — upstream fetches go direct';
+    } else {
+      try {
+        egressValue = parseOutboundProxy(rawEgress)?.display ?? 'unset';
+      } catch (e) {
+        egressValue = `INVALID — ${(e as Error).message}`;
+      }
+    }
+    sections.push({
+      title: 'Egress',
+      rows: [
+        { label: 'egress proxy', value: egressValue },
+        { label: 'ip check', value: egressIpUrl(process.env, loadConfig().config.egressIpUrl) },
+        {
+          label: 'on check failure',
+          value: process.env['DARIO_SKIP_EGRESS_CHECK']
+            ? 'start anyway (DARIO_SKIP_EGRESS_CHECK)'
+            : 'refuse to start',
+        },
+      ],
+    });
+  }
 
   // ── Auth gate
   sections.push({
