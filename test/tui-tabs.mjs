@@ -37,6 +37,41 @@ for (const [name, tab] of [
 }
 
 // ─────────────────────────────────────────────────────────────
+// dario#986 — the parent router (tui-app.ts onKey) matches tab hotkeys
+// BEFORE delegating to the active tab's onKey. Any tab hotkey that
+// equals a key the Config tab handles in normal mode is therefore dead
+// on arrival: pressing it jumps tabs instead of doing the local action.
+// `s` (save) regressed exactly this way — Status owned lowercase `s`,
+// so config changes could never be written from the TUI.
+header('Tab hotkeys never shadow Config normal-mode keys');
+{
+  const TABS = [StatusTab, ConfigTab, AnalyticsTab, HitsTab, AccountsTab, BackendsTab];
+  const hotkeys = TABS.map(t => t.hotkey).filter(k => typeof k === 'string');
+
+  // Keys ConfigTab.onKey consumes in normal mode (editBuffer === null).
+  // Kept in sync with src/tui/tabs/config.ts and the in-panel help line.
+  const CONFIG_LOCAL_KEYS = ['s', 'd', 'r'];
+
+  for (const k of CONFIG_LOCAL_KEYS) {
+    const owner = TABS.find(t => t.hotkey === k);
+    check(
+      `Config '${k}' is not shadowed by a tab hotkey`,
+      owner === undefined,
+      owner ? `${owner.label} claims '${k}'` : undefined,
+    );
+  }
+
+  // Hotkeys must also be unique, or the earlier tab wins silently.
+  check('all tab hotkeys are distinct', new Set(hotkeys).size === hotkeys.length,
+    hotkeys.join(','));
+
+  // Prove the save path actually reaches ConfigTab.onKey for 's'.
+  const cfg = ConfigTab.initialState();
+  const afterSave = ConfigTab.onKey(cfg, { name: 'printable', ch: 's', ctrl: false });
+  check('ConfigTab.onKey handles lowercase s', afterSave !== undefined);
+}
+
+// ─────────────────────────────────────────────────────────────
 header('Status tab — loading + reachable + unreachable');
 {
   const initial = StatusTab.initialState();

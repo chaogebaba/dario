@@ -60,7 +60,10 @@ export interface StatusState {
 export const StatusTab: Tab<StatusState> = {
   id: 'status',
   label: 'Status',
-  hotkey: 's',
+  // Capital S to avoid colliding with Config's `s` save (dario#986). The
+  // parent router matches tab hotkeys before delegating to the active
+  // tab's onKey, so a lowercase `s` here swallowed the save entirely.
+  hotkey: 'S',
 
   initialState(): StatusState {
     return {
