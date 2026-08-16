@@ -62,7 +62,7 @@ const files = readdirSync(__dirname)
 // the JS runtime, but reported alongside everything else so a broken
 // installer fails `npm test` like any other regression.
 const shellFiles = readdirSync(__dirname)
-  .filter(f => f.endsWith('.test.sh'))
+  .filter(f => f.endsWith('.test.sh') && !EXCLUDED.has(f))
   .sort();
 
 // Every child gets the live-template cache pointed at a path that does not
@@ -93,10 +93,23 @@ const childEnv = { ...process.env, DARIO_LIVE_TEMPLATE_CACHE: suiteTemplateCache
 // full runtime with its own heap, so this is memory-bound rather than
 // CPU-bound — oversubscribing trades a little wall-clock for a real risk
 // of the OOM killer taking out the run. Override with TEST_CONCURRENCY.
-const CONCURRENCY = Math.max(
-  1,
-  Number(process.env['TEST_CONCURRENCY'] || Math.min(8, Math.ceil(cpus().length / 2))),
-);
+// A bad value must not quietly shrink the run. `Number('abc')` is NaN,
+// `Math.max(1, NaN)` is NaN, and `Array.from({length: NaN})` is empty — so
+// TEST_CONCURRENCY=abc used to spawn zero workers, run zero suites, and
+// exit 0. A typo'd env var reporting a green suite is the worst outcome
+// available here, so reject rather than fall back to a default.
+function intEnv(name, dflt, min) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return dflt;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < min) {
+    console.error(`${name}=${JSON.stringify(raw)} is not an integer >= ${min}.`);
+    process.exit(2);
+  }
+  return n;
+}
+
+const CONCURRENCY = intEnv('TEST_CONCURRENCY', Math.min(8, Math.ceil(cpus().length / 2)), 1);
 
 // Per-suite output cap. Suites are chatty (some print thousands of
 // assertion lines); retaining all of it for 130+ files at once is what
@@ -138,15 +151,25 @@ function tailBuffer(limit) {
 // hangs the whole run — and CI — indefinitely, with no output to say
 // which file did it. 120s is ~20x the slowest honest suite. Override
 // with TEST_TIMEOUT_MS.
-const TIMEOUT_MS = Math.max(1000, Number(process.env['TEST_TIMEOUT_MS'] || 120_000));
+const TIMEOUT_MS = intEnv('TEST_TIMEOUT_MS', 120_000, 1000);
 
 // Children outlive the driver if it dies mid-run (Ctrl-C, OOM kill),
 // which is how the machine ended up with a pile of orphaned test
 // processes. Track them and take them down on the way out.
+//
+// `detached: true` puts each suite in its own process group so a kill
+// reaches its descendants too. Several suites fan out (the installer
+// suite runs bash and spawns ~11 processes; hermes-compat, effort-flag,
+// version-advances and health-verdict all spawn grandchildren), and
+// signalling only the direct child leaves those running.
 const live = new Set();
+function killTree(proc, signal = 'SIGKILL') {
+  try { process.kill(-proc.pid, signal); }
+  catch { try { proc.kill(signal); } catch { /* already gone */ } }
+}
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
-    for (const p of live) p.kill('SIGKILL');
+    for (const p of live) killTree(p);
     process.exit(130);
   });
 }
@@ -159,6 +182,7 @@ function runSuite(file, argv) {
       stdio: ['ignore', 'pipe', 'pipe'],
       // Inherited env plus the pinned template cache (see above).
       env: childEnv,
+      detached: true,
     });
     live.add(proc);
     const buf = tailBuffer(MAX_CAPTURE);
@@ -166,13 +190,17 @@ function runSuite(file, argv) {
     proc.stderr.on('data', d => buf.push(d));
 
     let timedOut = false;
+    let settled = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill('SIGKILL');
+      killTree(proc);
     }, TIMEOUT_MS);
 
     const finish = (code, extra) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(drainTimer);
       live.delete(proc);
       const failed = timedOut || code !== 0;
       resolve({
@@ -184,8 +212,29 @@ function runSuite(file, argv) {
       });
     };
 
+    // 'close' is the one that guarantees the output tail is complete, so
+    // it stays the normal path. It is NOT sufficient on its own: it fires
+    // only once every stdio pipe reaches EOF, and a grandchild that
+    // inherited the pipe holds it open after the child itself is gone —
+    // including after a timeout SIGKILL, which never reached the
+    // grandchild before `detached`. That combination leaked a pool slot
+    // permanently and hung the driver with a green transcript. 'exit'
+    // fires on process death regardless of pipes; give the pipes a brief
+    // grace to flush, then report anyway.
+    let drainTimer = null;
     proc.on('close', code => finish(code, timedOut ? `TIMED OUT after ${TIMEOUT_MS}ms — killed.\n` : ''));
+    proc.on('exit', code => {
+      if (settled) return;
+      drainTimer = setTimeout(() => {
+        killTree(proc);
+        finish(code, `${timedOut ? `TIMED OUT after ${TIMEOUT_MS}ms — killed.\n` : ''}`
+          + 'NOTE: a descendant process outlived this suite and kept its output pipe open.\n');
+      }, 500);
+      if (typeof drainTimer.unref === 'function') drainTimer.unref();
+    });
     proc.on('error', err => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       live.delete(proc);
       resolve({ file, code: 1, out: String(err?.stack || err), ms: Date.now() - started });
@@ -225,6 +274,15 @@ await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, wor
 const wallMs = Date.now() - wallStart;
 
 const failed = results.filter(r => r.code !== 0).sort((a, b) => a.file.localeCompare(b.file));
+
+// A driver that drops jobs must not report success. Nothing else checks
+// this: `passed`, `failed` and the summary are all derived from what the
+// pool actually ran, so any path that skips work looks identical to a
+// clean run.
+if (results.length !== jobs.length) {
+  console.error(`\nDRIVER BUG: ${jobs.length} suites queued but ${results.length} ran.`);
+  process.exit(2);
+}
 
 // Failure output comes last, so it's what you see without scrolling.
 for (const r of failed) {
