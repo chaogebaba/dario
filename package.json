@@ -19,6 +19,7 @@
     "docs",
     "!docs/recovery.md",
     "scripts/install-systemd.sh",
+    "scripts/install-bin.sh",
     "README.md",
     "LICENSE"
   ],

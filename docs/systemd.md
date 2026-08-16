@@ -8,6 +8,8 @@ scripts/install-systemd.sh
 
 That builds the checkout if `dist/` is missing, writes `~/.config/systemd/user/dario.service`, runs `daemon-reload`, then `enable --now`. It waits for the service to settle and prints the recent journal if it failed to come up, rather than reporting success and leaving you to discover otherwise.
 
+It also puts the `dario` command on your PATH (via `scripts/install-bin.sh` — see [install.md](install.md)), because every command below is a `dario` command. Set `DARIO_SKIP_BIN=1` if yours already comes from a package manager.
+
 The unit is **user-scope, not system-scope**. dario reads the calling user's credentials from `~/.dario` and device identity from `~/.claude*`, and binds loopback. A system unit would run as root or a service account and see none of it. Nothing in the installer needs `sudo`.
 
 ## Prerequisites

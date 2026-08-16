@@ -5,6 +5,10 @@
 #   scripts/install-systemd.sh --uninstall  stop, disable, remove the unit
 #   scripts/install-systemd.sh --purge      uninstall AND delete ~/.dario
 #
+# Also puts the `dario` command on PATH via scripts/install-bin.sh, since
+# every instruction below is a dario command. Set DARIO_SKIP_BIN=1 to skip
+# that half.
+#
 # User scope on purpose: dario reads the calling user's credentials from
 # ~/.dario and ~/.claude*, and binds loopback. A system unit would run as
 # root or a service account and see neither. Nothing here needs sudo.
@@ -74,6 +78,12 @@ uninstall() {
   systemctl --user reset-failed "$UNIT_NAME" >/dev/null 2>&1 || true
 
   if [ "$purge" = "purge" ]; then
+    # The launcher is ours to remove only on a purge — a plain --uninstall
+    # takes the service away, not the command. install-bin.sh refuses to
+    # touch a `dario` it did not write, so a package-manager install is
+    # safe either way.
+    "$REPO_ROOT/scripts/install-bin.sh" --uninstall >/dev/null 2>&1 \
+      || warn "Left the dario command in place (not ours to remove)."
     if [ -d "$DARIO_HOME" ]; then
       # Credentials and the account pool live here. Deleting them means a
       # fresh `dario login`, so make the user say so twice.
@@ -184,6 +194,15 @@ WantedBy=default.target
 EOF
 
   ok "Wrote $UNIT_PATH"
+
+  # A running service the operator can't drive from the shell is half an
+  # install: every instruction here and in the docs is a `dario` command.
+  # Skipped with DARIO_SKIP_BIN=1 for anyone whose `dario` comes from a
+  # package manager and who only wants the unit.
+  if [ "${DARIO_SKIP_BIN:-0}" != "1" ]; then
+    info "Installing the dario command"
+    "$REPO_ROOT/scripts/install-bin.sh" || warn "Could not install the dario command — the service is unaffected."
+  fi
 
   systemctl --user daemon-reload
   info "Enabling and starting $UNIT_NAME"
