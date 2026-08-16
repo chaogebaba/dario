@@ -81,6 +81,11 @@ export interface EgressLike {
   ok: boolean;
   checkedAt: number;
   error?: string;
+  /**
+   * True when the proxy answers but reports the same address an unproxied
+   * request does — configured, reachable, and hiding nothing.
+   */
+  notChangingIp?: boolean;
 }
 
 /**

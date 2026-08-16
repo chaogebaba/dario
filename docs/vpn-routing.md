@@ -45,7 +45,9 @@ Set it once in `~/.dario/config.json` (or the TUI's Config tab, `Egress proxy` r
 { "egressProxy": "socks5h://127.0.0.1:1080" }
 ```
 
-Precedence is the usual chain: `--egress-proxy` > `DARIO_EGRESS_PROXY` > `DARIO_UPSTREAM_PROXY` > config file. An explicitly empty value (`--egress-proxy=`) routes direct, overriding a lower layer.
+Precedence is the usual chain: `--egress-proxy` > `DARIO_EGRESS_PROXY` > `DARIO_UPSTREAM_PROXY` > config file. Within the command line the last occurrence wins, whichever spelling it uses, so an appended override beats what a wrapper script already passed. An explicitly empty value (`--egress-proxy=`) routes direct, overriding a lower layer.
+
+The config file holds the URL verbatim, credentials included. `~/.dario/config.json` is written 0600 inside a 0700 directory, and neither `dario config`, `dario doctor`, nor the TUI ever renders the password — but it is on disk in cleartext, which matters for backups and for anything that syncs a home directory.
 
 ### socks5h vs socks5
 
@@ -78,7 +80,17 @@ dario's startup banner confirms when it's active:
 
 That last line is the only one that proves anything. A URL that parses, a bridge that binds, a SOCKS5 handshake that completes — all of it is equally consistent with a proxy that accepts your connection and then forwards from this host's own address. Nothing dario can observe from inside the process distinguishes the two. So it asks a remote endpoint and reports what came back.
 
-If that check fails, `dario proxy` **refuses to start**:
+Asking once isn't enough either. An endpoint that answers proves the proxy carries traffic, not that it changed where the traffic comes from. So dario asks twice at startup — once through the proxy, once over the default route with the pre-wrap fetch — and compares. Same address both ways means the proxy is forwarding from this host rather than replacing its address, which is what a split-tunnel rule, a transparent proxy, or an upstream that was never configured all look like:
+
+```
+[dario] Egress check: the proxy is reachable, but traffic still leaves from 203.0.113.7.
+[dario] That is the same address as an unproxied request, so the proxy is forwarding
+[dario] from this host rather than replacing its address.
+```
+
+That baseline request goes out the default route on purpose — it is the control. Anyone running a proxy precisely so that never happens can drop it with `DARIO_SKIP_EGRESS_BASELINE=1`, which gives up the comparison and keeps the reachability check. A baseline that *fails* is not treated as a problem: an endpoint unreachable without the proxy is itself evidence traffic isn't taking the default route, so only a successful baseline can convict.
+
+If the check fails outright, `dario proxy` **refuses to start**:
 
 ```
 [dario] Egress check failed: could not reach https://cloudflare.com/cdn-cgi/trace — ECONNREFUSED
@@ -116,6 +128,7 @@ The TUI's Status tab carries the same information live, under **Egress** — the
 - **SOCKS4/4a are rejected.** No authentication, no IPv6, no remote DNS. Use `socks5h://`. A `privoxy` bridge (`forward-socks5 / 127.0.0.1:1080`) still works if you prefer to terminate SOCKS outside dario, but it is no longer necessary.
 - **TLS terminates end-to-end at Anthropic.** The proxy sees only the destination hostname (via SNI) and byte timing in CONNECT mode — not your request bodies. Your `bun-match` BoringSSL ClientHello is preserved.
 - **Localhost calls bypass the proxy.** Anything dario fetches at `localhost`, `127.0.0.1`, `::1`, or any `*.localhost` host goes direct (so self-tests and inbound aren't accidentally tunneled).
+- **Upstreams must be `https:` while a SOCKS proxy is set.** The bridge accepts CONNECT only, so an OpenAI-compat backend registered with an `http://` base-url (a LAN or self-hosted one) gets a 501 naming the setting rather than a tunneled cleartext request. Switch that backend to `https://`, or drop the egress proxy for that host. `--egress-proxy http://…` has no such restriction.
 
 ## Option C — Tailscale exit nodes (zero dario config, ideal for teams)
 
@@ -156,4 +169,4 @@ curl http://localhost:3456/v1/messages \
 # a CONNECT to api.anthropic.com:443 from your dario process.
 ```
 
-If your VPN provider's status page or dashboard shows the connection, the routing is working. If it doesn't, double-check that dario relaunched under Bun (`dario doctor`'s Runtime/TLS row should say `bun-match`).
+If your VPN provider's status page or dashboard shows the connection, the routing is working. If it doesn't, double-check that dario is running under Bun (`dario doctor`'s Runtime/TLS row should say `bun-match`).

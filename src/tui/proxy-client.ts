@@ -272,5 +272,6 @@ export interface HealthResponse {
     checkedAt: number;
     ageMs?: number;
     error?: string;
+    notChangingIp?: boolean;
   };
 }

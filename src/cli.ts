@@ -10,13 +10,12 @@
  *   dario logout    — Remove saved credentials
  */
 
-// ── Bun auto-relaunch ──
-// Bun's TLS fingerprint matches Claude Code's runtime (both use Bun/BoringSSL).
-// If Bun is installed and we're running on Node, relaunch under Bun for
-// network-level fingerprint fidelity. Moved below into the main-entry guard
-// at the bottom of the file so importing this module (e.g. from tests that
-// just want `parsePositiveIntEnv`) doesn't trigger a Bun relaunch or any
-// other startup side effect.
+// ── Bun required ──
+// Bun's TLS fingerprint matches Claude Code's runtime (both use Bun/BoringSSL),
+// and only Bun's fetch honors the `proxy` option egress routing depends on.
+// The main-entry guard at the bottom of the file refuses to run under Node;
+// it's gated behind the isDirectEntry check so importing this module (e.g.
+// from tests that just want `parsePositiveIntEnv`) has no startup side effect.
 
 import { unlink } from 'node:fs/promises';
 import { realpathSync, readFileSync } from 'node:fs';
@@ -29,7 +28,7 @@ import { VALID_EFFORT_VALUES, type EffortValue } from './cc-template.js';
 import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, addAccountViaManualOAuth, addAccountFromKeychain, KeychainImportError, removeAccount, ensureLoginCredentialsInPool, resyncLoginFromCredentialsIfStale, MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
 import { parseOutboundProxy, installOutboundProxyWrapper, installEgressProxy, isLocalhostUrl, type OutboundProxyConfig } from './outbound-proxy.js';
-import { checkEgressIp, egressIpUrl, recordEgressCheck, setEgressRoute } from './egress-ip.js';
+import { checkEgressIp, egressIpUrl, recordDirectIp, recordEgressCheck, setEgressRoute } from './egress-ip.js';
 import { homeDir } from './home-dir.js';
 
 // `args` / `command` at module scope — command handlers below close over
@@ -540,10 +539,22 @@ async function proxy() {
     process.exit(1);
   }
   if (outboundProxy) {
+    // Captured before the wrapper is installed, so it still reaches the
+    // network by the default route. This is the only handle on "what would
+    // have happened without the proxy", and it has to be taken now.
+    const directFetch = globalThis.fetch;
     try {
       const bridge = await installEgressProxy(outboundProxy);
       if (bridge) {
         console.error(`[dario] SOCKS5 bridge listening on ${bridge.url} (loopback only)`);
+        // The listener is unref'd and the token dies with the process, so
+        // this buys nothing for the CLI's own lifetime. It matters for
+        // in-process callers (the suite, anything embedding `proxy()`),
+        // which would otherwise accumulate a live relay per call — and it
+        // makes outbound-proxy.ts's "so the caller can close it" true.
+        const closeBridge = (): void => { void bridge.close(); };
+        process.once('SIGINT', closeBridge);
+        process.once('SIGTERM', closeBridge);
       }
     } catch (err) {
       console.error(`[dario] ${(err as Error).message}`);
@@ -572,10 +583,38 @@ async function proxy() {
       console.error('[dario] It would confirm a route it never used. Point DARIO_EGRESS_IP_URL at a remote endpoint.');
       process.exit(1);
     }
-    const check = await checkEgressIp(probeUrl);
+    // The baseline goes out the default route on purpose — it is the
+    // control the proxied answer is compared against. That is one request
+    // from the real address, which someone running a proxy precisely so
+    // that never happens is entitled to refuse: DARIO_SKIP_EGRESS_BASELINE
+    // drops it and gives up the comparison.
+    const skipBaseline = /^(1|true|yes)$/i.test(process.env['DARIO_SKIP_EGRESS_BASELINE'] ?? '');
+    const [check, baseline] = await Promise.all([
+      checkEgressIp(probeUrl),
+      skipBaseline ? Promise.resolve(null) : checkEgressIp(probeUrl, 8_000, directFetch),
+    ]);
     recordEgressCheck(check);
-    if (check.ok) {
-      console.error(`[dario] Egress IP: ${check.ip} — this is the address Anthropic sees (${check.latencyMs}ms)`);
+    // A baseline that failed is not a problem: it means the endpoint is
+    // unreachable without the proxy, which is itself evidence that traffic
+    // is not quietly taking the default route. Only a successful baseline
+    // can convict.
+    if (baseline?.ok) recordDirectIp(baseline.ip);
+
+    if (check.ok && baseline?.ok && check.ip === baseline.ip) {
+      console.error(`[dario] Egress check: the proxy is reachable, but traffic still leaves from ${check.ip}.`);
+      console.error('[dario] That is the same address as an unproxied request, so the proxy is forwarding');
+      console.error('[dario] from this host rather than replacing its address. A split-tunnel rule, a');
+      console.error('[dario] transparent proxy, or an upstream that was never configured all look like this.');
+      if (skipCheck) {
+        console.error('[dario] Starting anyway (--skip-egress-check).');
+      } else {
+        console.error('[dario] Refusing to start. Fix the proxy, clear it (`--egress-proxy=`), or override');
+        console.error('[dario] with --skip-egress-check.');
+        process.exit(1);
+      }
+    } else if (check.ok) {
+      const vs = baseline?.ok ? `, was ${baseline.ip} direct` : '';
+      console.error(`[dario] Egress IP: ${check.ip} — this is the address Anthropic sees (${check.latencyMs}ms${vs})`);
     } else if (skipCheck) {
       console.error(`[dario] WARNING: egress check failed: ${check.error}`);
       console.error('[dario] Starting anyway (--skip-egress-check). Upstream requests will fail while the proxy is down.');
@@ -831,6 +870,15 @@ function parseLogFileFlag(args: string[]): string | undefined {
  * layers below it, matching how `--passthrough-betas=` clears its
  * env-supplied default. Returns undefined when nothing is configured.
  *
+ * Within the CLI layer the rule is plain argv order: the last occurrence
+ * of any of the three spellings wins. That is what every wrapper
+ * convention assumes — a systemd `ExecStart` with an appended override, an
+ * alias with extra args — and the alternative is worse than merely
+ * surprising here: scanning by flag name meant
+ * `--egress-proxy= --egress-proxy=socks5h://real:1080` resolved to the
+ * empty one and routed direct, skipping the startup egress check entirely
+ * because no proxy was configured to check.
+ *
  * Exported for tests.
  */
 export function resolveEgressProxyFlag(
@@ -840,23 +888,28 @@ export function resolveEgressProxyFlag(
 ): string | undefined {
   const NAMES = ['--egress-proxy', '--upstream-proxy', '--via'];
 
-  for (const name of NAMES) {
-    const eqArg = args.find(a => a.startsWith(`${name}=`));
-    if (eqArg) {
-      // Explicit empty value means "no proxy" — stop, don't fall through.
-      return eqArg.slice(name.length + 1) || undefined;
+  let found: { name: string; value: string } | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const eqName = NAMES.find(n => a.startsWith(`${n}=`));
+    if (eqName) {
+      found = { name: eqName, value: a.slice(eqName.length + 1) };
+      continue;
     }
-    const idx = args.indexOf(name);
-    if (idx >= 0) {
-      const value = args[idx + 1];
+    const name = NAMES.find(n => n === a);
+    if (name) {
+      const value = args[i + 1];
       // A bare flag with no value is a usage error, but treating it as
       // "unset" would silently route traffic direct. Fail loudly instead.
       if (!value || value.startsWith('-')) {
         throw new Error(`${name} requires a URL, e.g. ${name} socks5h://127.0.0.1:1080`);
       }
-      return value;
+      found = { name, value };
+      i++;
     }
   }
+  // Explicit empty value means "no proxy" — stop, don't fall through.
+  if (found) return found.value || undefined;
 
   for (const key of ['DARIO_EGRESS_PROXY', 'DARIO_UPSTREAM_PROXY']) {
     const raw = env[key];
@@ -1453,8 +1506,8 @@ async function help() {
                              proxy's JA3/JA4 ClientHello indistinguishable
                              from a stock CC request — but an older Bun ships an
                              older BoringSSL whose ClientHello diverges (#813).
-                             Install/upgrade Bun (https://bun.sh) so dario
-                             auto-relaunches under it. (v3.23)
+                             Install/upgrade Bun (https://bun.sh) — dario
+                             requires the Bun runtime. (v3.23)
     --stealth                Single-flag behavioral-stealth preset.
                              Flips pace-jitter, think-time, and
                              session-start defaults from 0 to non-zero
@@ -1926,8 +1979,6 @@ async function doctor() {
     const existing = probeBunVersion();
     if (existing) {
       console.log(`  Bun v${existing} already on PATH — nothing to install.`);
-      console.log('  If dario is still running on Node, the auto-relaunch was bypassed (DARIO_NO_BUN set,');
-      console.log('  or invoked through a wrapper that strips it). Re-run \`dario proxy\` directly.');
       console.log('');
       return;
     }
@@ -1943,7 +1994,7 @@ async function doctor() {
       // to do next.
       const after = probeBunVersion();
       if (after) {
-        console.log(`  Bun v${after} installed. Re-run \`dario proxy\` to auto-relaunch under it.`);
+        console.log(`  Bun v${after} installed. Re-run \`dario proxy\`.`);
       } else {
         console.log('  Installer reported success, but \`bun --version\` still fails from this shell.');
         console.log('  Open a new terminal (or source the profile the installer touched), then re-run');

@@ -19,6 +19,8 @@ import {
   getEgressSnapshot,
   refreshEgressIpIfStale,
   resetEgressSnapshot,
+  recordDirectIp,
+  egressIsNotChangingIp,
 } from '../dist/egress-ip.js';
 
 let pass = 0, fail = 0;
@@ -167,6 +169,72 @@ header('snapshot — cached, single-flighted, never in a request path');
   })();
   check('a stale result is re-probed in the background', settled);
   resetEgressSnapshot();
+}
+
+// ======================================================================
+// A reachable proxy is not the same as a working one. The check that the
+// startup gate actually turns on is the comparison against the address an
+// unproxied request gets — without it, a proxy that forwards from this
+// host passes every test and reports the operator's own IP as "the
+// address Anthropic sees".
+header('baseline comparison — reachable is not the same as anonymised');
+{
+  resetEgressSnapshot();
+  const at = Date.now();
+  const ok = (ip) => ({ ok: true, ip, url: 'https://probe.example', checkedAt: at, latencyMs: 10 });
+
+  setEgressRoute('socks5h://vpn.example:1080', 'socks5h', 'https://probe.example');
+  recordEgressCheck(ok('198.51.100.4'));
+  recordDirectIp('198.51.100.4');
+  check('same address through the proxy and direct is flagged',
+    egressIsNotChangingIp(getEgressSnapshot()) === true);
+
+  recordDirectIp('203.0.113.9');
+  check('a different address is not flagged',
+    egressIsNotChangingIp(getEgressSnapshot()) === false);
+
+  // Without a baseline the answer is "unknown", and unknown must not read
+  // as leaking — that would make DARIO_SKIP_EGRESS_BASELINE a self-inflicted
+  // startup failure.
+  recordDirectIp(null);
+  check('no baseline is not treated as leaking',
+    egressIsNotChangingIp(getEgressSnapshot()) === false);
+
+  // A failed proxied check is its own error; it must not also claim the
+  // addresses matched.
+  recordDirectIp('198.51.100.4');
+  recordEgressCheck({ ok: false, ip: null, url: 'https://probe.example', checkedAt: at, latencyMs: 3, error: 'boom' });
+  check('a failed check is not flagged as unproxied',
+    egressIsNotChangingIp(getEgressSnapshot()) === false);
+
+  // No proxy configured at all means there is nothing to compare.
+  resetEgressSnapshot();
+  recordEgressCheck(ok('198.51.100.4'));
+  recordDirectIp('198.51.100.4');
+  check('routing direct is not flagged (no proxy to blame)',
+    egressIsNotChangingIp(getEgressSnapshot()) === false);
+  resetEgressSnapshot();
+}
+
+// ======================================================================
+header('checkEgressIp honours an injected fetch — the direct-route probe');
+{
+  // The baseline must be measured with the PRE-WRAP fetch. If checkEgressIp
+  // ignored the argument and used the global, the baseline would go through
+  // the proxy too, always match, and refuse every start.
+  let sawInjected = false;
+  const injected = async () => { sawInjected = true; return new Response('ip=203.0.113.77\n'); };
+  const r = await checkEgressIp('https://probe.example', 5000, injected);
+  check('the injected fetch is the one used', sawInjected);
+  check('its answer is parsed', r.ok === true && r.ip === '203.0.113.77');
+
+  // Omitting it falls back to the live global, which is what the proxied
+  // check relies on to pick up the wrapper installed after import.
+  const saved = globalThis.fetch;
+  globalThis.fetch = async () => new Response('ip=198.51.100.1\n');
+  const g = await checkEgressIp('https://probe.example', 5000);
+  globalThis.fetch = saved;
+  check('no fetch argument uses the live global', g.ok === true && g.ip === '198.51.100.1');
 }
 
 console.log(`\n${'='.repeat(70)}\n  ${pass} pass, ${fail} fail\n${'='.repeat(70)}`);

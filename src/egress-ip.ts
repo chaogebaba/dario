@@ -94,12 +94,22 @@ export function parseEgressIp(body: string): string | null {
 /**
  * Ask the endpoint what address it sees. Never throws — a failed probe is
  * a result, because the caller's job is to report it, not to crash on it.
+ *
+ * `fetchImpl` defaults to the live `globalThis.fetch`, which by the time
+ * this runs is the proxy-wrapped one. Pass the pre-wrap fetch to measure
+ * the *direct* route instead — that comparison is what turns "the proxy
+ * answered" into "the proxy actually changed where I come from".
  */
-export async function checkEgressIp(url: string, timeoutMs = 8_000): Promise<EgressIpResult> {
+export async function checkEgressIp(
+  url: string,
+  timeoutMs = 8_000,
+  fetchImpl?: typeof fetch,
+): Promise<EgressIpResult> {
+  const doFetch = fetchImpl ?? globalThis.fetch;
   const started = Date.now();
   const base = { url, checkedAt: started };
   try {
-    const res = await fetch(url, {
+    const res = await doFetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
       headers: { 'user-agent': 'dario-egress-check' },
       redirect: 'follow',
@@ -149,6 +159,13 @@ export interface EgressSnapshot {
   /** Resolved probe endpoint, so re-checks need no config plumbing. */
   probeUrl: string;
   last: EgressIpResult | null;
+  /**
+   * What the same endpoint reported over the *unproxied* route at startup,
+   * when that baseline was taken. Equal to `last.ip` means the proxy is
+   * accepting traffic and forwarding it from this host's own address —
+   * a working-looking route that hides nothing.
+   */
+  directIp: string | null;
 }
 
 const snapshot: EgressSnapshot = {
@@ -156,6 +173,7 @@ const snapshot: EgressSnapshot = {
   scheme: null,
   probeUrl: DEFAULT_EGRESS_IP_URL,
   last: null,
+  directIp: null,
 };
 let refreshing = false;
 
@@ -167,6 +185,20 @@ export function setEgressRoute(proxy: string | null, scheme: string | null, prob
 
 export function recordEgressCheck(result: EgressIpResult): void {
   snapshot.last = result;
+}
+
+/** Remember the unproxied address, so later reports can compare against it. */
+export function recordDirectIp(ip: string | null): void {
+  snapshot.directIp = ip;
+}
+
+/**
+ * True when the proxy is up but egressing from this host's own address.
+ * Only meaningful once a baseline has been taken; without one this is
+ * false, because "unknown" must not read as "leaking".
+ */
+export function egressIsNotChangingIp(s: EgressSnapshot): boolean {
+  return Boolean(s.proxy && s.directIp && s.last?.ok && s.last.ip === s.directIp);
 }
 
 export function getEgressSnapshot(): EgressSnapshot {
@@ -195,5 +227,6 @@ export function resetEgressSnapshot(): void {
   snapshot.scheme = null;
   snapshot.probeUrl = DEFAULT_EGRESS_IP_URL;
   snapshot.last = null;
+  snapshot.directIp = null;
   refreshing = false;
 }

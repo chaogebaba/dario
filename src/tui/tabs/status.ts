@@ -164,7 +164,13 @@ export const StatusTab: Tab<StatusState> = {
       lines = [];
       lines.push(' ' + brand('Egress'));
       lines.push('  ' + renderKvRow('Via', `${egress.proxy ?? 'direct'}${egress.scheme ? dim(` (${egress.scheme})`) : ''}`, w - 4));
-      if (egress.ok && egress.ip) {
+      if (egress.notChangingIp && egress.ip) {
+        // Reachable and useless: the proxy answered, and reported the same
+        // address an unproxied request gets. Louder than a failed check,
+        // because this one looks healthy everywhere else.
+        lines.push('  ' + renderKvRow('IP seen by Anthropic', fg('red', `${egress.ip} — same as unproxied`), w - 4));
+        lines.push('  ' + dim('The proxy is forwarding from this host, not replacing its address.'));
+      } else if (egress.ok && egress.ip) {
         lines.push('  ' + renderKvRow('IP seen by Anthropic', fg('green', egress.ip), w - 4));
       } else {
         lines.push('  ' + renderKvRow('IP seen by Anthropic', fg('red', 'unknown — egress check failing'), w - 4));
@@ -179,7 +185,9 @@ export const StatusTab: Tab<StatusState> = {
         lines,
         collapsed: [
           '  ' + renderKvRow('Egress IP',
-            egress.ok && egress.ip ? fg('green', egress.ip) : fg('red', 'check failing'), w - 4),
+            egress.notChangingIp && egress.ip ? fg('red', `${egress.ip} (not proxied)`)
+            : egress.ok && egress.ip ? fg('green', egress.ip)
+            : fg('red', 'check failing'), w - 4),
           '',
         ],
         priority: 2,

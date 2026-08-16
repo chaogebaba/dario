@@ -6,14 +6,31 @@
 // integration (key routing, lifecycle, async data) needs a TTY and
 // is covered by manual smoke tests + M5+M6 e2e.
 
-import { StatusTab } from '../dist/tui/tabs/status.js';
-import { ConfigTab } from '../dist/tui/tabs/config.js';
-import { AnalyticsTab } from '../dist/tui/tabs/analytics.js';
-import { HitsTab } from '../dist/tui/tabs/hits.js';
-import { AccountsTab } from '../dist/tui/tabs/accounts.js';
-import { BackendsTab } from '../dist/tui/tabs/backends.js';
-import { visibleWidth, truncate, dim, inverse, pad } from '../dist/tui/render.js';
-import { renderFooter } from '../dist/tui/layout.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// The Config tab's save path is real: `doSave` calls `saveConfig` with no
+// path, which resolves to `$HOME/.dario/config.json`. Exercising the save
+// key therefore rewrites the operator's actual config — verified, not
+// theorised. It round-trips cleanly today, so nothing has been lost, but
+// a unit test is one schema change away from silently dropping a field
+// from real user state.
+//
+// `DEFAULT_CONFIG_PATH` is a module-level const, frozen the moment
+// config-file.js is first evaluated, and ESM hoists static imports above
+// all statements. So HOME has to be redirected before the dist modules
+// are pulled in, which means importing them dynamically here.
+process.env.HOME = mkdtempSync(join(tmpdir(), 'dario-tui-home-'));
+
+const { StatusTab } = await import('../dist/tui/tabs/status.js');
+const { ConfigTab } = await import('../dist/tui/tabs/config.js');
+const { AnalyticsTab } = await import('../dist/tui/tabs/analytics.js');
+const { HitsTab } = await import('../dist/tui/tabs/hits.js');
+const { AccountsTab } = await import('../dist/tui/tabs/accounts.js');
+const { BackendsTab } = await import('../dist/tui/tabs/backends.js');
+const { visibleWidth, truncate, dim, inverse, pad } = await import('../dist/tui/render.js');
+const { renderFooter } = await import('../dist/tui/layout.js');
 
 let pass = 0, fail = 0;
 function check(name, cond, detail) {
@@ -66,9 +83,20 @@ header('Tab hotkeys never shadow Config normal-mode keys');
     hotkeys.join(','));
 
   // Prove the save path actually reaches ConfigTab.onKey for 's'.
+  //
+  // `afterSave !== undefined` is not that proof: doSave catches its own
+  // errors and returns a populated state on failure, so a save that threw
+  // passed — and so did rewiring 's' to doDiscard. The regression this
+  // guards (dario 7a977ae, Status swallowing Config's save key) is only
+  // caught by asserting the save actually succeeded. HOME is sandboxed
+  // above, so this writes to a temp dir rather than the operator's config.
   const cfg = ConfigTab.initialState();
   const afterSave = ConfigTab.onKey(cfg, { name: 'printable', ch: 's', ctrl: false });
   check('ConfigTab.onKey handles lowercase s', afterSave !== undefined);
+  check("'s' reaches doSave and the save succeeds",
+    afterSave?.statusKind === 'success', `${afterSave?.statusKind}: ${afterSave?.statusMessage}`);
+  check("'s' is save, not discard",
+    /saved/i.test(afterSave?.statusMessage ?? ''), afterSave?.statusMessage);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -127,6 +155,21 @@ header('Status tab — loading + reachable + unreachable');
   check('broken egress: says the check is failing', rEgressBad.includes('egress check failing'));
   check('broken egress: shows the reason',          rEgressBad.includes('ECONNREFUSED'));
   check('broken egress: does not show a stale IP',  !rEgressBad.includes('185.244.213.7'));
+
+  // The proxy is up, the check passes, and the address is the one an
+  // unproxied request gets — a route that looks healthy in every other
+  // row while hiding nothing. It has to read as a failure, not a pass.
+  const uselessEgress = {
+    ...withEgress,
+    health: {
+      ...withEgress.health,
+      egress: { ...withEgress.health.egress, notChangingIp: true },
+    },
+  };
+  const rUseless = StatusTab.render(uselessEgress, DIM);
+  check('unproxied egress: still shows the address', rUseless.includes('185.244.213.7'));
+  check('unproxied egress: flags it as unproxied',   /same as unproxied/.test(rUseless));
+  check('unproxied egress: explains the cause',      /forwarding from this host/.test(rUseless));
 
   // Mock unreachable proxy
   const unreachable = {

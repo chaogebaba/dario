@@ -7,7 +7,7 @@ import { setDefaultResultOrder } from 'node:dns';
 import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus, ignoreCcCredentials } from './oauth.js';
 import { buildHealthResponse, derivePoolStatus, probeRequested, shouldDiscloseHealthInternals, shouldRunServingProbe, type EgressLike } from './health-response.js';
-import { getEgressSnapshot, refreshEgressIpIfStale } from './egress-ip.js';
+import { egressIsNotChangingIp, getEgressSnapshot, refreshEgressIpIfStale } from './egress-ip.js';
 import { getServingProbe } from './serving-probe.js';
 import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
@@ -2096,6 +2096,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             ip: snap.last?.ip ?? null,
             ok: snap.last?.ok ?? false,
             checkedAt: snap.last?.checkedAt ?? 0,
+            ...(egressIsNotChangingIp(snap) ? { notChangingIp: true } : {}),
             ...(snap.last?.error ? { error: snap.last.error } : {}),
           };
         }
