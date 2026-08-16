@@ -13,6 +13,7 @@
 
 import { createServer as createNetServer, connect as netConnect } from 'node:net';
 import { startSocks5Bridge } from '../dist/socks5-bridge.js';
+import { installEgressProxy, parseOutboundProxy } from '../dist/outbound-proxy.js';
 
 let pass = 0, fail = 0;
 function check(name, cond, detail) {
@@ -39,8 +40,14 @@ const close = (server) => new Promise((res) => {
 });
 
 /** Echo server standing in for the origin behind the proxy. */
-function startEcho() {
-  const server = createNetServer((sock) => sock.pipe(sock));
+function startEcho(greeting) {
+  const server = createNetServer((sock) => {
+    // An origin that speaks first is how a wrong reply-drain length shows
+    // up: the leftover bytes of the SOCKS reply get forwarded into the
+    // tunnel ahead of it, or the greeting's first bytes get eaten.
+    if (greeting) sock.write(greeting);
+    sock.pipe(sock);
+  });
   return listen(server).then((port) => ({ port, close: () => close(server) }));
 }
 
@@ -50,10 +57,20 @@ function startEcho() {
  *   opts.credentials  — { username, password } the fake will accept
  *   opts.failWith     — reply code to return instead of success (0x00)
  *   opts.forwardPort  — loopback port to splice the client to on success
+ *   opts.replyAtyp    — address type in the success reply (0x01 default)
+ *   opts.dribble      — write every reply one byte at a time, so a reader
+ *                       that assumes frame-aligned `data` events breaks
  * Records the decoded CONNECT target on `.lastTarget`.
  */
 function startFakeSocks5(opts = {}) {
   const state = { lastTarget: null, authAttempt: null };
+  // TCP is free to chunk however it likes, and a real proxy across a real
+  // network routinely splits a handshake frame. Writing byte-at-a-time is
+  // the cheap way to make that deterministic instead of load-dependent.
+  const emit = (sock, bytes) => {
+    if (!opts.dribble) { sock.write(bytes); return; }
+    for (const b of bytes) sock.write(Buffer.from([b]));
+  };
   const server = createNetServer((sock) => {
     let phase = 'greeting';
     let buf = Buffer.alloc(0);
@@ -69,10 +86,10 @@ function startFakeSocks5(opts = {}) {
         buf = buf.subarray(2 + nmethods);
         if (opts.requireAuth) {
           if (!methods.includes(0x02)) { sock.end(Buffer.from([0x05, 0xff])); return; }
-          sock.write(Buffer.from([0x05, 0x02]));
+          emit(sock, Buffer.from([0x05, 0x02]));
           phase = 'auth';
         } else {
-          sock.write(Buffer.from([0x05, 0x00]));
+          emit(sock, Buffer.from([0x05, 0x00]));
           phase = 'request';
         }
       }
@@ -88,7 +105,7 @@ function startFakeSocks5(opts = {}) {
         buf = buf.subarray(3 + ulen + plen);
         state.authAttempt = { username, password };
         const ok = username === opts.credentials?.username && password === opts.credentials?.password;
-        sock.write(Buffer.from([0x01, ok ? 0x00 : 0x01]));
+        emit(sock, Buffer.from([0x01, ok ? 0x00 : 0x01]));
         if (!ok) { sock.end(); return; }
         phase = 'request';
       }
@@ -125,8 +142,24 @@ function startFakeSocks5(opts = {}) {
           return;
         }
 
-        // Success reply, then splice to the stand-in origin.
-        sock.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]));
+        // Success reply, then splice to the stand-in origin. RFC 1928 lets
+        // the bound address come back in any of the three forms, and the
+        // client has to drain exactly the right number of bytes for it —
+        // over-draining eats the origin's first bytes, under-draining
+        // injects address bytes into the TLS stream. Both corrupt the
+        // session silently, so the fake can reply in all three shapes.
+        const atypOut = opts.replyAtyp ?? 0x01;
+        let reply;
+        if (atypOut === 0x03) {
+          const name = Buffer.from('proxy-bound.example');
+          reply = Buffer.concat([Buffer.from([0x05, 0x00, 0x00, 0x03, name.length]), name, Buffer.from([0x1f, 0x90])]);
+        } else if (atypOut === 0x04) {
+          const v6 = Buffer.alloc(16); v6[15] = 1;
+          reply = Buffer.concat([Buffer.from([0x05, 0x00, 0x00, 0x04]), v6, Buffer.from([0x1f, 0x90])]);
+        } else {
+          reply = Buffer.from([0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90]);
+        }
+        emit(sock, reply);
         const upstream = netConnect({ host: '127.0.0.1', port: opts.forwardPort }, () => {
           if (buf.length) upstream.write(buf);
           sock.pipe(upstream);
@@ -316,9 +349,19 @@ header('bridge contract — CONNECT only, loopback only');
   const proxy = await startFakeSocks5({ forwardPort: echo.port });
   const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true }));
 
-  // Absolute-form GET (what a plain-HTTP proxy request looks like).
-  const res = await fetch(`${bridge.url}/`, { method: 'GET' }).catch((e) => e);
+  // Absolute-form GET (what a plain-HTTP proxy request looks like — an
+  // OpenAI-compat backend registered with an http:// base-url).
+  const res = await fetch(`${bridge.url}/`, {
+    method: 'GET', headers: { 'proxy-authorization': TOKEN_AUTH },
+  }).catch((e) => e);
   check('non-CONNECT request is answered 501', res?.status === 501);
+  const body501 = await res.text?.().catch(() => '') ?? '';
+  check('501 names the misconfiguration, not just the verb', /https:/.test(body501), body501.slice(0, 80));
+
+  // The 501 is behind the same token: an unauthenticated caller must not
+  // be able to confirm what is listening on the port.
+  const probe = await fetch(`${bridge.url}/`, { method: 'GET' }).catch((e) => e);
+  check('unauthenticated non-CONNECT is 407, not 501', probe?.status === 407, String(probe?.status));
 
   // A malformed CONNECT target must not reach the SOCKS layer.
   const bad = await connectThroughBridge(bridge.port, 'no-port-here');
@@ -348,6 +391,79 @@ header('bridge contract — CONNECT only, loopback only');
 
   check('the loggable url carries no token', !bridge.url.includes('@') && !bridge.url.includes('dario:'));
   check('the proxy url carries the token', /^http:\/\/dario:[^@]+@127\.0\.0\.1:\d+$/.test(bridge.proxyUrl), bridge.proxyUrl);
+
+  await bridge.close(); await proxy.close(); await echo.close();
+}
+
+// ======================================================================
+// The two things this module exists to get right, and the two that fail
+// silently rather than loudly: frame-splitting on the handshake, and the
+// length of the bound-address drain in the success reply. Both produce a
+// tunnel that connects fine and then corrupts the first bytes of the TLS
+// session — which surfaces as an inscrutable handshake failure against a
+// real proxy and never on a localhost fixture that writes whole frames.
+header('handshake framing — split frames and every reply address type');
+{
+  const SENTINEL = 'ORIGIN-SPEAKS-FIRST:0123456789';
+
+  for (const dribble of [false, true]) {
+    for (const [label, atyp] of [['IPv4 (atyp 1)', 0x01], ['domain (atyp 3)', 0x03], ['IPv6 (atyp 4)', 0x04]]) {
+      const echo = await startEcho(SENTINEL);
+      const proxy = await startFakeSocks5({ forwardPort: echo.port, replyAtyp: atyp, dribble });
+      const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true }));
+      const how = dribble ? 'byte-at-a-time' : 'whole frames';
+
+      const { status, sock, rest } = await connectThroughBridge(bridge.port, 'api.anthropic.com:443');
+      check(`${label}, ${how}: CONNECT returns 200`, status.includes('200'), status);
+
+      // Anything the origin sent before the client spoke must arrive
+      // byte-exact. A short drain prepends leftover reply bytes here; a
+      // long one bites off the front of the sentinel.
+      const seen = await new Promise((resolve, reject) => {
+        let out = rest.toString();
+        if (out.length >= SENTINEL.length) { resolve(out); return; }
+        sock.on('data', (d) => { out += d.toString(); if (out.length >= SENTINEL.length) resolve(out); });
+        sock.on('error', reject);
+        setTimeout(() => resolve(out), 3000).unref?.();
+      });
+      check(`${label}, ${how}: tunnel starts at the origin's first byte`,
+        seen.startsWith(SENTINEL), JSON.stringify(seen.slice(0, 48)));
+
+      sock.destroy();
+      await bridge.close(); await proxy.close(); await echo.close();
+    }
+  }
+}
+
+// ======================================================================
+// The seam between the bridge and the fetch wrapper. Both ends are tested
+// (URL parsing in outbound-proxy.mjs, the wire protocol above) and the
+// join between them was not — which is where the one fatal regression
+// lives: hand `config.url` to Bun's fetch instead of `bridge.proxyUrl`
+// and every upstream request throws UnsupportedProxyProtocol, or worse
+// the bridge relays for anyone once the token stops being sent.
+header('installEgressProxy — fetch is pointed at the bridge, with the token');
+{
+  const echo = await startEcho();
+  const proxy = await startFakeSocks5({ forwardPort: echo.port });
+  const cfg = parseOutboundProxy(`socks5h://127.0.0.1:${proxy.port}`);
+
+  const saved = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = ((input, init) => {
+    seen.push({ input: String(input?.url ?? input), proxy: init?.proxy });
+    return Promise.resolve(new Response('ok'));
+  });
+  const bridge = await installEgressProxy(cfg);
+  await globalThis.fetch('https://api.anthropic.com/v1/messages');
+  await globalThis.fetch('http://127.0.0.1:9/loopback');
+  globalThis.fetch = saved;
+
+  const upstream = seen[0], local = seen[1];
+  check('upstream fetch is routed at the loopback bridge', upstream.proxy === bridge.proxyUrl, String(upstream.proxy));
+  check('the socks5h URL is never handed to fetch', !String(upstream.proxy).startsWith('socks5'));
+  check('the bridge token rides along', String(upstream.proxy).includes('dario:'));
+  check('localhost still bypasses the proxy', local.proxy === undefined, String(local.proxy));
 
   await bridge.close(); await proxy.close(); await echo.close();
 }

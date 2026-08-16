@@ -314,12 +314,31 @@ export function startSocks5Bridge(opts: Socks5BridgeOptions): Promise<Socks5Brid
     return got.length === expected.length && timingSafeEqual(got, expected);
   };
 
-  // Bun's fetch only issues CONNECT for https: targets. dario's upstreams
-  // are all https:, so an absolute-form request here means something is
-  // misconfigured — answer 501 rather than silently mishandling it.
-  const server: Server = createHttpServer((_req, res) => {
+  // Bun's fetch only issues CONNECT for https: targets, so an absolute-form
+  // request here means an upstream configured as plain http: — an
+  // OpenAI-compat backend added with `--base-url=http://...`, typically a
+  // LAN or self-hosted one. Tunnelling that would mean proxying cleartext
+  // HTTP, which this bridge deliberately does not do, so say which
+  // setting is at fault instead of answering with a bare 501.
+  //
+  // Behind the same token as CONNECT: an unauthenticated caller should not
+  // be able to confirm what is listening on the port.
+  const server: Server = createHttpServer((req, res) => {
+    if (!authorized(req.headers['proxy-authorization'])) {
+      res.writeHead(407, { 'proxy-authenticate': 'Basic realm="dario"', 'content-type': 'text/plain' });
+      res.end('proxy authentication required\n');
+      return;
+    }
+    const target = (() => {
+      try { return new URL(req.url ?? '').host; } catch { return null; }
+    })();
     res.writeHead(501, { 'content-type': 'text/plain' });
-    res.end('dario SOCKS5 bridge accepts CONNECT only (upstream traffic is HTTPS).\n');
+    res.end(
+      'dario SOCKS5 bridge accepts CONNECT only, and this request was plain HTTP'
+      + `${target ? ` to ${target}` : ''}.\n`
+      + 'An egress proxy is configured, so every upstream must be https:. Change the\n'
+      + 'http:// base-url to https://, or drop the egress proxy for this host.\n',
+    );
   });
 
   // CONNECT sockets are detached from the http server, so nothing else
