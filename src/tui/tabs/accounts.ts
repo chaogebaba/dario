@@ -61,7 +61,7 @@ export interface AccountsState {
   editBuffer: string | null;
   /** Feedback message shown after an action. */
   message: string | null;
-  messageKind: 'success' | 'error' | 'info' | null;
+  messageKind: 'success' | 'error' | 'info' | 'warning' | null;
 }
 
 /** Shape of the proxy's `GET /accounts` response (see src/proxy.ts). */
@@ -250,7 +250,7 @@ export const AccountsTab: Tab<AccountsState> = {
       }
       if (state.message) {
         push('');
-        const c = state.messageKind === 'error' ? 'red' : state.messageKind === 'success' ? 'green' : 'cyan';
+        const c = state.messageKind === 'error' ? 'red' : state.messageKind === 'success' ? 'green' : state.messageKind === 'warning' ? 'yellow' : 'cyan';
         push('  ' + fg(c, state.message));
       }
       push('');
@@ -279,7 +279,7 @@ export const AccountsTab: Tab<AccountsState> = {
       push('  ' + dim('Enter to confirm, Esc to cancel'));
     } else if (state.message) {
       push('');
-      const c = state.messageKind === 'error' ? 'red' : state.messageKind === 'success' ? 'green' : 'cyan';
+      const c = state.messageKind === 'error' ? 'red' : state.messageKind === 'success' ? 'green' : state.messageKind === 'warning' ? 'yellow' : 'cyan';
       push('  ' + fg(c, state.message));
     }
 
@@ -351,7 +351,12 @@ function meter(remainingPercent: number | null, width: number): string {
 }
 
 /**
- * Pre-/quota fallback: the header-derived utilization table with selection cursor.
+ * Pre-/quota fallback: card-based layout with progress bars derived from
+ * header utilization (util5h / util7d). Mirrors the renderQuotaCards style
+ * so users always see colored bars regardless of /quota availability.
+ *
+ * util values are 0-1 representing "used". Bars show REMAINING (fuel-gauge
+ * convention) while the text shows the "used" figure alongside the label.
  */
 function renderUtilTable(
   state: AccountsState,
@@ -359,34 +364,43 @@ function renderUtilTable(
   w: number,
 ): void {
   const hasUtil = state.accounts.some((a) => a.util5h !== undefined);
-
-  push('  ' + dim(
-    hasUtil
-      ? '  ' + pad('alias', 20) + pad('expires', 14) + pad('util5h', 9) + pad('util7d', 9) + pad('status', 14)
-      : '  ' + pad('alias', 20) + pad('expires', 16) + pad('source', 24)
-  ));
-  push('  ' + dim('─'.repeat(Math.min(w - 4, 68))));
+  const barWidth = Math.max(8, Math.min(w - 8, 56));
+  const labelWidth = 14;
 
   for (let i = 0; i < state.accounts.length; i++) {
     const acc = state.accounts[i]!;
     const selected = i === state.selectedIdx;
+    push('');
+    const marker = selected ? fg('cyan', '>') : ' ';
+    const expiry = formatExpiry(acc.expiresAt);
+    const statusPart = acc.status && acc.status !== 'unknown'
+      ? '   ' + (acc.status === 'auth-cooldown' ? fg('yellow', acc.status) : dim(acc.status))
+      : '';
+    const aliasText = selected ? bold(acc.alias) : acc.alias;
+    const header = `${marker} ${aliasText}  ${dim('token ')}${expiry}${statusPart}`;
+    push('  ' + header);
 
-    const aliasCol = pad(acc.alias, 20);
-    if (hasUtil) {
-      const expiresCol = pad(formatExpiry(acc.expiresAt), 14);
-      const seen = isMeasured(acc);
-      const u5 = pad(seen ? `${Math.round((acc.util5h ?? 0) * 100)}%` : '—', 9);
-      const u7 = pad(seen ? `${Math.round((acc.util7d ?? 0) * 100)}%` : '—', 9);
-      const statusCol = acc.status ?? '—';
-      const statusFg = statusCol === 'auth-cooldown' ? fg('yellow', statusCol) : dim(statusCol);
-      const row = '  ' + aliasCol + expiresCol + u5 + u7 + statusFg;
-      push(selected ? fg('cyan', '>') + row.slice(1) : row);
-    } else {
-      const expiresCol = pad(formatExpiry(acc.expiresAt), 16);
-      const sourceCol = '~/.dario/accounts/' + acc.alias + '.json';
-      const row = '  ' + aliasCol + expiresCol + dim(sourceCol);
-      push(selected ? fg('cyan', '>') + row.slice(1) : row);
+    if (!hasUtil || !isMeasured(acc)) {
+      if (!hasUtil) {
+        push('    ' + dim('~/.dario/accounts/' + acc.alias + '.json'));
+      } else {
+        push('    ' + dim('no usage observed yet — ') + '—' + dim(' util5h  ') + '—' + dim(' util7d'));
+      }
+      continue;
     }
+
+    // util values are 0-1 "used"; remaining for the fuel-gauge bar
+    const used5h = Math.round((acc.util5h ?? 0) * 100);
+    const used7d = Math.round((acc.util7d ?? 0) * 100);
+    const rem5h = Math.max(0, Math.min(100, 100 - used5h));
+    const rem7d = Math.max(0, Math.min(100, 100 - used7d));
+
+    push('    ' + pad('util5h', labelWidth) + ' ' + pad(bold(`${used5h}%`), 6, 'right')
+      + dim(' used'));
+    push('    ' + meter(rem5h, barWidth));
+    push('    ' + pad('util7d', labelWidth) + ' ' + pad(bold(`${used7d}%`), 6, 'right')
+      + dim(' used'));
+    push('    ' + meter(rem7d, barWidth));
   }
 
   if (hasUtil && !state.accounts.some(isMeasured)) {
@@ -413,15 +427,34 @@ interface QuotaEndpoint {
   accounts?: Array<{ alias: string; windows?: QuotaWindow[]; plan?: string | null; error?: string }>;
 }
 
+/** Module-level cache of last successful per-alias quota. When a fresh fetch
+ *  returns errors (e.g. 429 rate limit), we reuse stale data + show a warning. */
+let lastGoodQuota = new Map<string, AccountQuota>();
+let quotaStaleWarning: string | null = null;
+
 async function fetchQuotaMap(
   ctx: TabContext<AccountsState>,
   force: boolean,
 ): Promise<Map<string, AccountQuota>> {
   const out = new Map<string, AccountQuota>();
+  quotaStaleWarning = null;
   try {
     const q = await ctx.client.getJson<QuotaEndpoint>(force ? '/quota?refresh=1' : '/quota');
+    let allErrored = true;
     for (const a of q.accounts ?? []) {
-      out.set(a.alias, { windows: a.windows ?? [], plan: a.plan ?? null, ...(a.error ? { error: a.error } : {}) });
+      const entry: AccountQuota = { windows: a.windows ?? [], plan: a.plan ?? null, ...(a.error ? { error: a.error } : {}) };
+      out.set(a.alias, entry);
+      if (!a.error && (a.windows?.length ?? 0) > 0) allErrored = false;
+    }
+    // If all accounts errored but we have cached data, reuse it and warn.
+    if (allErrored && lastGoodQuota.size > 0 && out.size > 0) {
+      const firstErr = (q.accounts ?? []).find((a) => a.error)?.error ?? 'unknown';
+      quotaStaleWarning = `Quota API rate-limited (${firstErr}) — showing cached data.`;
+      return lastGoodQuota;
+    }
+    // If at least one succeeded, update the cache.
+    if (!allErrored) {
+      lastGoodQuota = new Map(out);
     }
   } catch { /* endpoint missing or unreachable */ }
   return out;
@@ -458,8 +491,8 @@ export async function refreshAccounts(
           selectedIdx: 0,
           mode: 'normal',
           editBuffer: null,
-          message: null,
-          messageKind: null,
+          message: quotaStaleWarning,
+          messageKind: quotaStaleWarning ? 'warning' as const : null,
         };
       }
     } catch {

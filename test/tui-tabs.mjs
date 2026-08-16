@@ -434,12 +434,18 @@ header('Accounts tab — empty + populated');
 // demonstrably part-spent. `measuredAt` is what tells the two apart.
 header('Accounts tab — never-measured utilization renders as —, not 0%');
 {
-  const strip = (s) => s.replace(/\[[0-9;]*m/g, '');
-  /** The rendered row for one alias, ANSI stripped. */
-  const row = (rendered, alias) =>
-    strip(rendered).split('\n').find((l) => new RegExp(`^\\s{2}${alias}\\s`).test(l)) ?? '';
-  /** Both utilization columns blank — an em dash in each. */
-  const bothDashed = (line) => (line.match(/—/g) ?? []).length === 2;
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  /** All lines belonging to one alias's card (header + indented detail). */
+  const cardBlock = (rendered, alias) => {
+    const lines = strip(rendered).split('\n');
+    const headerIdx = lines.findIndex((l) => l.includes(alias));
+    if (headerIdx === -1) return '';
+    let end = headerIdx + 1;
+    while (end < lines.length && /^\s{4}/.test(lines[end])) end++;
+    return lines.slice(headerIdx, end).join('\n');
+  };
+  /** Both utilization labels show a dash (—) when unmeasured. */
+  const bothDashed = (block) => (block.match(/—/g) ?? []).length >= 2;
 
   const unmeasured = {
     loading: false,
@@ -449,7 +455,7 @@ header('Accounts tab — never-measured utilization renders as —, not 0%');
   };
   const r1 = strip(AccountsTab.render(unmeasured, DIM));
   check('unmeasured: no 0% claim',         !r1.includes('0%'));
-  check('unmeasured: renders a dash',      bothDashed(row(r1, 'login')));
+  check('unmeasured: renders a dash',      bothDashed(cardBlock(r1, 'login')));
   check('unmeasured: explains why',        r1.includes('none seen yet this run'));
   check('unmeasured: names the probe',     r1.includes('dario doctor --usage'));
 
@@ -485,7 +491,7 @@ header('Accounts tab — never-measured utilization renders as —, not 0%');
   };
   const r4 = strip(AccountsTab.render(mixed, DIM));
   check('mixed: measured seat keeps its figures', r4.includes('50%') && r4.includes('20%'));
-  check('mixed: unmeasured seat still dashes',    bothDashed(row(r4, 'b')));
+  check('mixed: unmeasured seat still dashes',    bothDashed(cardBlock(r4, 'b')));
   check('mixed: no pool-wide hint',               !r4.includes('none seen yet this run'));
 
   // A proxy predating `measuredAt` omits the field. Blanking every column
