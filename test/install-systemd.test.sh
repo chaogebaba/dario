@@ -70,7 +70,7 @@ BUN_DIR="$(dirname "$BUN_PATH")"
 
 run_installer() {
   env -i \
-    HOME="$FAKE_HOME" \
+    HOME="${OVERRIDE_HOME:-$FAKE_HOME}" \
     USER="${USER:-tester}" \
     PATH="$STUB_BIN:$BUN_DIR:/usr/bin:/bin" \
     XDG_RUNTIME_DIR="$FAKE_RUNTIME" \
@@ -136,6 +136,38 @@ if command -v systemd-analyze >/dev/null 2>&1 && [ -f "$UNIT" ]; then
   [ -n "$FILTERED" ] && printf '      %s\n' "$FILTERED"
 else
   echo "  (skipped — systemd-analyze unavailable)"
+fi
+
+# ── hostile paths ────────────────────────────────────────────────────
+# systemd expands % specifiers in ExecStart/WorkingDirectory/ReadWritePaths
+# and splits ExecStart on whitespace. Both are legal in a path, and both
+# fail SILENTLY: a checkout under ~/pct%test resolved to
+# .../pct/run/user/1000est (%t is the runtime directory) and
+# `systemd-analyze verify` returned 0 without a word. Assert on what
+# systemd parses, not on what we wrote.
+header 'a checkout path containing % or a space survives unit generation'
+HOSTILE_HOME="$SANDBOX/pct%test home"
+mkdir -p "$HOSTILE_HOME/.config/systemd/user"
+HOSTILE_UNIT="$HOSTILE_HOME/.config/systemd/user/dario.service"
+: > "$CALLS"
+OVERRIDE_HOME="$HOSTILE_HOME" run_installer install >/dev/null 2>&1
+if [ -f "$HOSTILE_UNIT" ]; then
+  check "unit generated for a hostile path" 0
+  # Written escaped…
+  check "% is doubled in ExecStart"     "$(contains "$HOSTILE_UNIT" '%%')"
+  check "ExecStart paths are quoted"    "$(grep -q 'ExecStart="' "$HOSTILE_UNIT" && echo 0 || echo 1)"
+  # …and, where systemd is available, actually parses back to the literal.
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    PARSED="$(systemd-analyze verify "$HOSTILE_UNIT" 2>&1 || true)"
+    check "no specifier expansion warning" \
+      "$(printf '%s' "$PARSED" | grep -qi 'specifier' && echo 1 || echo 0)"
+  fi
+  # The one thing that must never happen: the runtime dir leaking into
+  # the path because %t was expanded.
+  check "runtime dir did not leak into the unit" \
+    "$(grep -q '/run/user/' "$HOSTILE_UNIT" && echo 1 || echo 0)"
+else
+  check "unit generated for a hostile path" 1
 fi
 
 # ── uninstall preserves state ────────────────────────────────────────
