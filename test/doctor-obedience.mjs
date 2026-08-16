@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Client-system obedience probe — unit tests for the pure verdict helpers
 // behind `dario doctor --obedience` (dario#509).
 //

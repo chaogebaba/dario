@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit test for CC-style prompt-cache breakpoint placement (applyCcPromptCaching
 // + buildCCRequest integration). Placement mirrors a live capture of CC v2.1.203
 // (dario#678): 2 system breakpoints + rolling breakpoint on the last USER message

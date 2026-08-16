@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for the --preserve-output-format flag. Covers buildCCRequest:
 // the client's `output_config.format` is dropped by default and carried
 // through when the flag is set — independent of skipFields (which opts out

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for scripts/extract-release-notes.mjs.
 //
 // Locks the empirical contract that the workflow's release-body

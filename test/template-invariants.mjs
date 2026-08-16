@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Template-replay invariants — dario#81.
 //
 // The other test files assert specific shapes against specific template

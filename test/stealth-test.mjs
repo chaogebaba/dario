@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Stealth technology validation suite.
  * Tests that dario produces requests indistinguishable from real Claude Code.

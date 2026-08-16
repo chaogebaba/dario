@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Model catalog — upstream autodetection + the ONE long-context rule.
 //
 // Guards the two operator-directed invariants (2026-06-10):

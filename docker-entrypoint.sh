@@ -51,9 +51,9 @@ if [ "$(id -u)" = "0" ]; then
     fi
   fi
 
-  exec su-exec dario node /app/dist/cli.js "$@"
+  exec su-exec dario bun /app/dist/cli.js "$@"
 fi
 
 # Already running as a non-root user (operator opted out of self-heal via
 # `docker run --user dario ...` or a CI runner without root) — just exec.
-exec node /app/dist/cli.js "$@"
+exec bun /app/dist/cli.js "$@"

@@ -18,7 +18,7 @@
 
 <p><strong>One local endpoint. Every AI tool you own. The subscription you already pay for.</strong></p>
 
-<sub><code>npm i -g @askalf/dario</code> · <strong>0</strong> runtime deps · <a href="https://www.npmjs.com/package/@askalf/dario">SLSA-attested</a> every release · nothing phones home · ~24k lines you can read in a weekend · independent, unofficial, third-party (<a href="DISCLAIMER.md">DISCLAIMER.md</a>)</sub>
+<sub><code>bun add --global @askalf/dario</code> · <strong>0</strong> runtime deps · <a href="https://www.npmjs.com/package/@askalf/dario">SLSA-attested</a> every release · nothing phones home · ~24k lines you can read in a weekend · independent, unofficial, third-party (<a href="DISCLAIMER.md">DISCLAIMER.md</a>)</sub>
 
 <sub>Part of <a href="#own-your-stack"><strong>Own Your Stack</strong></a> — 12 open tools for owning your AI infra: <a href="https://github.com/askalf/truecopy">truecopy</a> · <a href="https://github.com/askalf/strongroom">strongroom</a> · <a href="https://github.com/askalf/fieldpass">fieldpass</a> · <a href="https://github.com/askalf/plumbline">plumbline</a> · <a href="#own-your-stack">full family ↓</a></sub>
 
@@ -43,7 +43,7 @@ You're already paying $20, $100, or $200 a month for Claude. Then Cursor wants a
 
 ```bash
 # 1. Install
-npm install -g @askalf/dario
+bun add --global @askalf/dario
 
 # 2. Log in to your Claude subscription (Pro, Max 5x, or Max 20x)
 dario login                 # or `dario login --manual` for SSH / headless

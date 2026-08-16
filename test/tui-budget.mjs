@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Per-tab row budgets (#868).
 //
 // #866 stopped the app writing frames taller than the terminal, but that

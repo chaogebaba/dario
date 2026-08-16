@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // One-shot capture of the FULL outbound /v1/messages body from the
 // installed `claude` binary. The existing capture-and-bake script only
 // retains structural axes (header_order, body_field_order, tool names,

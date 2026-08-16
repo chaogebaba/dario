@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for --fast-model tier-aware routing. Under a forced --model,
 // Claude Code's Haiku-tier sub-agent (Explore/Task) requests would be silently
 // upgraded to the forced frontier model — quietly multiplying cost.

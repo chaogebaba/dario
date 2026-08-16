@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for the v4 Analytics streaming behavior.
 //
 // Pins:

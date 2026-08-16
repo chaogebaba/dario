@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for src/tui/input.ts — the keypress parser.
 //
 // parseKeys is a pure function over a Buffer chunk → Key[]. Every key

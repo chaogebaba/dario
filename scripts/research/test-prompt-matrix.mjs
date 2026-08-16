@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Extended A/B matrix probe — push the limits of behavioral variation
 // surfaceable via system-prompt modification. Builds on the smaller
 // test-constraint-removal.mjs by adding:

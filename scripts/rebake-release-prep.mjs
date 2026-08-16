@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Release-prep for an auto-rebake of the bundled CC template.
  *

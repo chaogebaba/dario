@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for platform-scoped tool filtering.
 //
 // CC's tool set is platform-dependent. Windows CC advertises PowerShell and,

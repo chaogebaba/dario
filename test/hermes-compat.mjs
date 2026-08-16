@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Hermes Agent compatibility tests — dario#88.
 //
 // Covers the two pieces that landed in v3.30.13:

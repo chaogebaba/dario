@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for scripts/health-verdict.sh — the parsing + verdict behind the
 // self-hosted serving-health watcher (cc-oauth-health.yml).
 //

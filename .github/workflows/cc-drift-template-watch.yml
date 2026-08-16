@@ -67,15 +67,15 @@ jobs:
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
 
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
+          bun-version: 1.4.0
 
       - name: Install + build
         run: |
-          npm ci --no-audit --no-fund
-          npm run build
+          bun install --frozen-lockfile --no-audit --no-fund
+          bun run build
 
       - name: Pin OAuth credential to platform-dario canonical (sole-refresher)
         # The platform dario container is the SOLE refresher of the shared Max
@@ -126,7 +126,7 @@ jobs:
         # docs/drift-monitor.md.
         run: |
           set +e
-          node scripts/capture-and-bake.mjs --check 2> drift-output.txt
+          bun scripts/capture-and-bake.mjs --check 2> drift-output.txt
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
@@ -203,7 +203,7 @@ jobs:
           fi
 
           # Run the real bake. Writes src/cc-template-data.json.
-          node scripts/capture-and-bake.mjs
+          bun scripts/capture-and-bake.mjs
 
           # dario#881 tripwire, second read. The bake above is a SEPARATE live
           # capture from the --check one, and the anomaly is intermittent — so
@@ -238,7 +238,7 @@ jobs:
           # with no version change, the auto-release version-gate fast-exits,
           # and the freshly-baked template never ships to npm (it only shipped
           # for #317 because an unrelated release happened to ride along).
-          new_version=$(node scripts/rebake-release-prep.mjs)
+          new_version=$(bun scripts/rebake-release-prep.mjs)
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
 
           git add src/cc-template-data.json package.json CHANGELOG.md
@@ -368,7 +368,7 @@ jobs:
           fi
 
           # Deterministic label bump + release-prep. Prints the new dario version.
-          new_version=$(node scripts/label-sync.mjs "$target")
+          new_version=$(bun scripts/label-sync.mjs "$target")
 
           # Sanity: the bump must have changed the bundle (guards a stale
           # label-target.txt or an already-current label).

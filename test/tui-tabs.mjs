@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for the six v4 tabs — pure-render assertions on each.
 //
 // Every tab's render(state, dim) is a pure function, so this exercises

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Live TUI audit — drives the REAL startTuiApp() through a fake TTY against
  * a local stub proxy, and audits every frame the app actually writes.

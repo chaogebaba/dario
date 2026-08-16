@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * cch seed calibration (dario#528) — keep src/cch.ts:CCH_SEEDS current WITHOUT
  * depending on anyone else to hand us the rotating seed.

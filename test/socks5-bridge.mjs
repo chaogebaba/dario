@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // SOCKS5 bridge — protocol-level tests against a fake SOCKS5 server.
 //
 // The parser tests in outbound-proxy.mjs cover URL shapes; this covers

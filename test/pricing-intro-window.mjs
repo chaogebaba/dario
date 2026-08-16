@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for date-modeled intro pricing (analytics.ts pricingRateFor).
 // Sonnet 5 launched with an intro rate ($2/$10) that reverts to standard
 // ($3/$15) after 2026-08-31 UTC. Each request is priced at the rate effective

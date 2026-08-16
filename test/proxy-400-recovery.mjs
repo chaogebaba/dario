@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // 400-recovery chain: multi-pass, bounded, and non-remediable 400s pass straight
 // through. Hermetic — the upstream is a scripted fake via ProxyOptions.fetchImpl,
 // and `upstreamApiKey` puts dario in per-token API-key mode so no OAuth pool,

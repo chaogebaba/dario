@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Label-only sync of the bundled CC template + release-prep.
  *

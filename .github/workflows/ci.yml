@@ -15,34 +15,36 @@ jobs:
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
       - name: package.json is valid JSON and canonically formatted
-        run: node scripts/check-package-json.mjs
+        run: bun scripts/check-package-json.mjs
 
       # Kept in this job rather than a new one so it does not add a required
       # status check to branch protection -- it is the same class of cheap
       # metadata assertion, and it needs no npm install.
       - name: README line-count claim still matches src/
-        run: node scripts/check-readme-line-count.mjs
+        run: bun scripts/check-readme-line-count.mjs
 
   build:
     needs: validate-package-json
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        # The floor dario declares in engines, plus latest so a Bun release
+        # that breaks us surfaces here rather than in a user's install.
+        bun-version: ['1.4.0', 'latest']
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: ${{ matrix.node-version }}
-      - run: npm ci
-      - run: npm run audit
-      - run: npm run build
-      - run: node dist/cli.js help
-      - run: node dist/cli.js status
+          bun-version: ${{ matrix.bun-version }}
+      - run: bun install --frozen-lockfile
+      - run: bun run audit
+      - run: bun run build
+      - run: bun dist/cli.js help
+      - run: bun dist/cli.js status
 
-  # Unit suite. `npm test` (test/all.test.mjs) fans out every test/*.mjs as
-  # a node:test subtest EXCEPT the live-integration files (e2e / compat /
-  # stress / stealth — they need a running proxy, a real key, or a
+  # Unit suite. `bun test/all.test.mjs` fans out every test/*.mjs (and any
+  # *.test.sh) as a subprocess EXCEPT the live-integration files (e2e /
+  # compat / stress / stealth — they need a running proxy, a real key, or a
   # subscription). Build first: the tests import compiled code from dist/.
   # Guards against silent unit-test rot — the build job above only runs
   # `cli help`/`status`, so a stale assertion (an alias bump, a prompt
@@ -54,12 +56,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-      - run: npm ci
-      - run: npm run build
-      - run: npm test
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun test/all.test.mjs
 
   # Docker smoke test under cap_drop: ALL — catches the class of regression
   # that shipped twice on 2026-05-14 (v3.37.16 + v3.37.17) where a Dockerfile

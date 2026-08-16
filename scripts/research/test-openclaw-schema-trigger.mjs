@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Refined test of @theo's claim — using his EXACT commit message
 // format. His test used `{"schema": "openclaw.inbound_meta.v1"}`
 // as the commit message — a JSON blob that looks like an internal

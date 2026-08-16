@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for --no-claude-auth via the requiresClaudeLogin startup gate.
 // The flag lets an OpenAI-only proxy start WITHOUT a Claude login, so it never
 // loads or rotates the shared Claude refresh token (which otherwise logs out an

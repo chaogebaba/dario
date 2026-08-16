@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Pick out the cc-drift PRs that a newly-opened one supersedes.
 //
 // WHY THIS EXISTS. cc-drift-watch runs hourly. It already skips re-drafting

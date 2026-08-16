@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Deep A/B test: take CC's system prompt, strip the behavioral
 // constraint language (verbosity caps, no-comments-by-default,
 // ask-before-acting, scope discipline), keep the alignment / safety

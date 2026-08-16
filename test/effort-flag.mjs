@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for the --effort flag (dario#87). Covers the pure
 // resolveEffort() function, the buildCCRequest integration (effort reaches
 // the outbound body), the CLI parser + env mirror + validation path, and

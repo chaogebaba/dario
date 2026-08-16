@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Effort-capability rejection parsing + clamp choice.
 //
 // The autodetected model catalog (v4.8.57) exposes models that predate the

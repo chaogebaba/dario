@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Claude Agent SDK drift watcher — cheap, metadata-only.
  *

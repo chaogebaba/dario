@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Client cache-TTL mirroring — dario#678 round 3.
 //
 // Ground truth (loopback capture, CC v2.1.209 under subscription OAuth,

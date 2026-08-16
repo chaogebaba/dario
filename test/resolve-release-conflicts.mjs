@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for scripts/resolve-release-conflicts.mjs.
 //
 // The fixtures are REAL conflicts from 2026-08-12, when four PRs (#952, #955,

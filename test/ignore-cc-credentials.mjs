@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * DARIO_IGNORE_CC_CREDENTIALS — isolate dario from a live Claude Code session.
  *

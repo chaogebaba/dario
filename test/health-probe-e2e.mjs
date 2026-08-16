@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // dario#905 — end-to-end wiring for the opt-in serving probe on /health.
 //
 // serving-probe.mjs covers the verdict policy and health-response.mjs covers

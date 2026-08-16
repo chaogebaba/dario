@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for reconcilePoolAccounts (#599) — the hot-reload primitive behind the
 // headless admin API. Exercises the live AccountPool directly with synthetic
 // accounts: no disk, no network, no proxy, so it never touches a real ~/.dario.

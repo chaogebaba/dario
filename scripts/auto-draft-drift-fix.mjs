@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Auto-draft a drift-fix PR from a check-cc-drift.mjs report.
  *

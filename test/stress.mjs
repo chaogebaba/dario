@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Stress test for a running dario proxy.
 //
 // Defaults to **Opus 4.7 + Sonnet 4.6** — the heavyweight models that

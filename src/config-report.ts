@@ -55,7 +55,7 @@ export async function collectEffectiveConfig(): Promise<ConfigReport> {
     title: 'Identity',
     rows: [
       { label: 'version', value: `v${version}` },
-      { label: 'runtime', value: `node ${process.version} on ${process.platform} ${process.arch}` },
+      { label: 'runtime', value: `${'Bun' in globalThis ? `bun ${(globalThis as { Bun?: { version?: string } }).Bun?.version ?? '?'}` : `node ${process.version} (unsupported)`} on ${process.platform} ${process.arch}` },
     ],
   });
 

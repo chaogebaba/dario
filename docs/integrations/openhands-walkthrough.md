@@ -20,7 +20,7 @@ Total install + config: 10–15 minutes if Python and dario are already installe
 |---|---|---|
 | **Python** | 3.12+ | OpenHands' minimum |
 | **Poetry** or **pipx** | recent | OpenHands' install flow |
-| **dario** | v3.30+ (latest preferred — `npm i -g @askalf/dario@latest`) | OpenAI-compat endpoint plus the provider-prefix routing this guide leans on |
+| **dario** | v3.30+ (latest preferred — `bun add --global @askalf/dario@latest`) | OpenAI-compat endpoint plus the provider-prefix routing this guide leans on |
 | **A Claude OAuth login** | run `dario login` once | The whole point — a Pro / Max subscription on a Claude account |
 | **Bun** (recommended) | 1.1+ | dario auto-relaunches under Bun for TLS-fingerprint fidelity. Skip if you're fine with a runtime banner; install via [bun.sh](https://bun.sh) for the full subscription wire shape. |
 
@@ -233,7 +233,7 @@ Anthropic's billing classifier occasionally rejects subscription traffic if the 
 ```bash
 # One-time setup
 pipx install openhands-ai
-npm install -g @askalf/dario
+bun add --global @askalf/dario
 dario login
 
 # Per-session

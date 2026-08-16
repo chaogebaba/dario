@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * dario — Use your Claude subscription as an API.
  *
@@ -1999,10 +1999,13 @@ async function config() {
 }
 
 async function upgrade() {
-  // Thin wrapper over `npm install -g @askalf/dario@latest`. The value
+  // Thin wrapper over `bun add --global @askalf/dario@latest`. The value
   // isn't in saving the user typing — it's in the pre-flight (print
-  // current vs. latest version, refuse to run if already on latest,
-  // fail with a clear hint if npm is missing).
+  // current vs. latest version, refuse to run if already on latest).
+  //
+  // The latest-version probe reads the npm registry over HTTP rather than
+  // shelling out to `npm view`: dario requires Bun, and a Bun-only host
+  // has no reason to also have npm on PATH.
   const { spawnSync } = await import('node:child_process');
   const { fileURLToPath } = await import('node:url');
   const { readFile: rf } = await import('node:fs/promises');
@@ -2019,23 +2022,24 @@ async function upgrade() {
   console.log('');
   console.log(`  Current: v${currentVersion}`);
 
-  // Probe npm for the latest version first — avoids a long npm install if
-  // the user's already on @latest. 3s timeout keeps the pre-flight short.
+  // Registry metadata endpoint; 3s budget keeps the pre-flight short.
   let latestVersion: string | null = null;
   try {
-    const res = spawnSync('npm', ['view', '@askalf/dario', 'version'], {
-      encoding: 'utf8',
-      timeout: 3000,
-      shell: process.platform === 'win32',
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 3000);
+    const res = await fetch('https://registry.npmjs.org/@askalf%2Fdario/latest', {
+      signal: ctl.signal,
+      headers: { accept: 'application/json' },
     });
-    if (res.status === 0) {
-      const m = /(\d+\.\d+\.\d+(?:[.\-][\w.\-]+)?)/.exec(res.stdout);
-      latestVersion = m ? m[1]! : null;
+    clearTimeout(t);
+    if (res.ok) {
+      const body = await res.json() as { version?: string };
+      latestVersion = typeof body.version === 'string' ? body.version : null;
     }
-  } catch { /* noop */ }
+  } catch { /* offline or registry down — fall through and install anyway */ }
 
   if (!latestVersion) {
-    console.log('  Latest: (npm view failed — is npm on PATH? Continuing anyway.)');
+    console.log('  Latest: (registry lookup failed — continuing anyway.)');
   } else {
     console.log(`  Latest:  v${latestVersion}`);
     if (latestVersion === currentVersion) {
@@ -2047,19 +2051,18 @@ async function upgrade() {
   }
 
   console.log('');
-  console.log('  Running: npm install -g @askalf/dario@latest');
+  console.log('  Running: bun add --global @askalf/dario@latest');
   console.log('');
 
-  const install = spawnSync('npm', ['install', '-g', '@askalf/dario@latest'], {
+  const install = spawnSync('bun', ['add', '--global', '@askalf/dario@latest'], {
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });
 
   if (install.status !== 0) {
     console.error('');
-    console.error('  npm install failed. If this is a permissions issue, try:');
-    console.error('    sudo npm install -g @askalf/dario@latest     # POSIX');
-    console.error('    npm install -g @askalf/dario@latest          # Windows (may need admin)');
+    console.error('  bun add failed. If bun is not on PATH, install it first:');
+    console.error('    curl -fsSL https://bun.sh/install | bash');
     console.error('');
     process.exit(install.status ?? 1);
   }
@@ -2294,28 +2297,26 @@ export function isMainEntry(
   }
 }
 
-// Main-entry guard. Only run the Bun auto-relaunch and handler dispatch
-// when this module is the direct CLI entry point.
+// Main-entry guard. Only enforce the runtime and dispatch handlers when
+// this module is the direct CLI entry point.
 const isDirectEntry = isMainEntry(process.argv[1], import.meta.url);
 
 if (isDirectEntry) {
-  // Bun auto-relaunch for TLS fingerprint fidelity. Only meaningful when
-  // dario is the direct entry — if we're imported, whoever imported us
-  // already chose their runtime.
-  if (!('Bun' in globalThis) && !process.env.DARIO_NO_BUN) {
-    try {
-      const { execFileSync, spawn } = await import('node:child_process');
-      execFileSync('bun', ['--version'], { stdio: 'ignore', timeout: 3000 });
-      const child = spawn('bun', ['run', ...process.argv.slice(1)], {
-        stdio: 'inherit',
-        env: { ...process.env, DARIO_NO_BUN: '1' },
-      });
-      child.on('exit', (code) => process.exit(code ?? 0));
-      // Prevent this process from continuing
-      await new Promise(() => {});
-    } catch {
-      // Bun not available, continue with Node
-    }
+  // Bun is required, not preferred. dario's whole reason for existing is
+  // that its upstream requests are byte-identical to Claude Code's, and
+  // that rests on Bun's BoringSSL ClientHello — Node's OpenSSL stack
+  // produces a different JA3, and Node's fetch silently ignores the
+  // `proxy` option that egress routing depends on. Running on Node used
+  // to "work" while quietly failing both, so refuse instead of relaunching.
+  if (!('Bun' in globalThis)) {
+    console.error('[dario] dario requires the Bun runtime.');
+    console.error('[dario]');
+    console.error('[dario]   Install:  curl -fsSL https://bun.sh/install | bash');
+    console.error('[dario]   Then run: bun ' + (process.argv[1] ?? 'dario') + ' ' + command);
+    console.error('[dario]');
+    console.error('[dario] Node is not supported: its TLS fingerprint differs from Claude Code\'s,');
+    console.error('[dario] and its fetch ignores the proxy option used for egress routing.');
+    process.exit(1);
   }
 
   const handler = commands[command];

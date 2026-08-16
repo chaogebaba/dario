@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for src/config-file.ts (v4 M1).
 //
 // Pins the contract every higher-level v4 surface depends on:

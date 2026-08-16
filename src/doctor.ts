@@ -37,6 +37,7 @@ import { detectCCOAuthConfig } from './cc-oauth-detect.js';
 import { runAuthorizeProbe } from './cc-authorize-probe.js';
 import { MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { homeDir } from './home-dir.js';
+import { bunVersionMeetsJa3Floor, JA3_VERIFIED_BUN_FLOOR } from './runtime-fingerprint.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -372,11 +373,11 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
     checks.push({ status: 'warn', label: 'dario', detail: 'package.json not readable — version unknown' });
   }
 
-  // ---- Node
+  // ---- Runtime
   checks.push({
-    status: nodeStatus(),
-    label: 'Node',
-    detail: process.version,
+    status: runtimeStatus(),
+    label: 'Runtime',
+    detail: runtimeDetail(),
   });
 
   // ---- Platform
@@ -1071,14 +1072,29 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
   return checks;
 }
 
-function nodeStatus(): CheckStatus {
-  const m = /^v(\d+)\./.exec(process.version);
-  const major = m ? parseInt(m[1]!, 10) : 0;
-  // engines: >=18 (see package.json). 18/20 are current supported Node LTS
-  // lines — anything below 18 fails; above is ok.
-  if (major >= 18) return 'ok';
-  if (major === 0) return 'warn';
-  return 'fail';
+/**
+ * Runtime row. dario requires Bun (>=1.4.0 per package.json engines), and
+ * separately wants a build at or above the JA3-verified floor for wire
+ * fidelity. Reporting `process.version` under a "Node" label was actively
+ * misleading once Bun became the only supported runtime: on Bun that
+ * value is Bun's own version, so the row claimed an impossible Node.
+ */
+function runtimeStatus(): CheckStatus {
+  if (!('Bun' in globalThis)) return 'fail';
+  const v = (globalThis as { Bun?: { version?: string } }).Bun?.version;
+  if (!v) return 'warn';
+  return bunVersionMeetsJa3Floor(v) ? 'ok' : 'warn';
+}
+
+function runtimeDetail(): string {
+  if (!('Bun' in globalThis)) {
+    return `running on Node ${process.version} — unsupported. dario requires Bun; ` +
+           `Node's TLS fingerprint differs from Claude Code's and its fetch ignores the proxy option.`;
+  }
+  const v = (globalThis as { Bun?: { version?: string } }).Bun?.version ?? 'unknown';
+  return bunVersionMeetsJa3Floor(v)
+    ? `Bun ${v}`
+    : `Bun ${v} — below the JA3-verified floor ${JA3_VERIFIED_BUN_FLOOR}; run \`bun upgrade\``;
 }
 
 function safely<T>(fn: () => T, fallback: T): T {

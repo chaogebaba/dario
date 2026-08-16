@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit test for the ANTHROPIC_UPSTREAM_API_KEY upstream-auth override.
 // When a per-token API key is configured, dario forwards to api.anthropic.com
 // with `x-api-key` (standard API pool) instead of the Pro/Max OAuth bearer —

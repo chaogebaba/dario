@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Client system-prompt precedence framing — regression test for the
 // 2026-06-12 deepdive planner outage.
 //

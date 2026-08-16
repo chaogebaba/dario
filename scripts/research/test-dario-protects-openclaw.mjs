@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Verify that dario's default template-replay mode protects users
 // from Anthropic's `openclaw.inbound_meta.v1` billing-classifier
 // filter (verified by test-openclaw-schema-trigger.mjs as flipping

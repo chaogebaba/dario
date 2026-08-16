@@ -1,22 +1,22 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS build
+FROM oven/bun:1.4.0-alpine AS build
 WORKDIR /app
-COPY package.json package-lock.json tsconfig.json ./
-RUN npm ci
+COPY package.json bun.lock tsconfig.json ./
+RUN bun install --frozen-lockfile
 COPY src ./src
-RUN npm run build
+RUN bun run build
 
-FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS runtime
+FROM oven/bun:1.4.0-alpine AS runtime
 
 # su-exec is the alpine package that lets the entrypoint drop privileges
 # from root → dario after the volume self-heal. ~10KB; no shell, no PAM.
 RUN apk add --no-cache su-exec
 
-# Bun ships dario's runtime TLS fingerprint — without it, dario auto-detects
-# Node and falls back to bun-not-found mode. Copying the static binary from
-# oven/bun:1-alpine keeps the runtime image free of bun's build deps.
-COPY --from=oven/bun:1-alpine /usr/local/bin/bun /usr/local/bin/bun
+# Bun IS the runtime — dario requires it for the Claude Code TLS
+# fingerprint and for fetch's proxy option (egress routing). The base
+# image already ships it, so there is no separate binary to copy and no
+# Node in the image at all.
 
 RUN addgroup -S dario \
  && adduser -S -G dario -h /home/dario dario \
@@ -31,8 +31,7 @@ COPY --from=build --chown=dario:dario /app/dist ./dist
 COPY --from=build --chown=dario:dario /app/package.json ./package.json
 
 # Expose `dario` on PATH so `docker exec <container> dario login --manual`
-# works without falling back to `node /app/dist/cli.js`. The shebang in
-# cli.ts (`#!/usr/bin/env node`) handles the rest.
+# works. The shebang in cli.ts (`#!/usr/bin/env bun`) handles the rest.
 RUN chmod +x /app/dist/cli.js \
  && ln -s /app/dist/cli.js /usr/local/bin/dario
 

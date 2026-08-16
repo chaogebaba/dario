@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Capture a fresh template from the user's installed CC, scrub it, and
  * write it to `src/cc-template-data.json` as the bundled fallback.

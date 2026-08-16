@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Adaptive-thinking model gate — dario#NNN.
 //
 // `thinking: { type: "adaptive" }` is gated per-model server-side.

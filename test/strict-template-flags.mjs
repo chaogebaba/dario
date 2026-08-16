@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for dario#77 — the strict-template + no-live-capture CLI flags.
 // The runtime behaviour (exit vs proceed on bundled / drifted template) is
 // exercised end-to-end through the proxy startup path; this file covers

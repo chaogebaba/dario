@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Regression: MCP tools (mcp__<server>__<tool>) must pass through verbatim
  * in default mode, not round-robin onto CC fallback slots.

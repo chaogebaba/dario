@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Regression: the bundled CC template must always carry the interactive-only
  * tools (AskUserQuestion, EnterPlanMode, ExitPlanMode).

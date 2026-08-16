@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Wiring smoke for the TuiApp composition.
 //
 // Can't run the full TUI loop in CI (no TTY), but we CAN exercise

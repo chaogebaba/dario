@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for src/tui/render.ts — the ANSI primitives.
 //
 // Every function in render.ts is pure (no terminal state, no side

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Issue #29 regression test — reverse parameter shape translation.
  *

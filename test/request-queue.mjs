@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for the bounded request queue that replaced the v3.30.x
 // unbounded semaphore in dario#80. The pure decision function
 // (`decideAdmit`) and timeout check (`isQueueEntryExpired`) exercise

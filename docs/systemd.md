@@ -13,7 +13,7 @@ The unit is **user-scope, not system-scope**. dario reads the calling user's cre
 ## Prerequisites
 
 - Linux with systemd and a live user manager (`XDG_RUNTIME_DIR` set — a plain `su` session does not have one).
-- Bun ≥ 1.3.14. Older builds are classified as unverified for TLS fidelity (`src/runtime-fingerprint.ts`), so the installer refuses them.
+- Bun ≥ 1.4.0 (the version `package.json` declares in `engines`). Bun is the runtime, not an optimisation — the TLS fingerprint and `fetch`'s proxy option both depend on it — so the installer refuses older builds.
 - Credentials already set up (`dario login`). Without them the proxy starts and reports unhealthy, and the installer will tell you so.
 
 ## Day-to-day
@@ -53,7 +53,7 @@ The installer checks this and warns if it's off, but does not turn it on for you
 
 | Directive | Reason |
 |---|---|
-| `ExecStart=<bun> <repo>/dist/cli.js proxy` | Runs Bun directly, so the serving process is the MainPID. Going through the node shim would leave systemd tracking a wrapper while the real server ran as a child — `SIGTERM` would miss the process that owns the token flush and the listening socket. |
+| `ExecStart=<bun> <repo>/dist/cli.js proxy` | Invokes Bun explicitly rather than relying on the `dario` shim, so the serving process is the MainPID and `SIGTERM` reaches the process that owns the token flush and the listening socket. |
 | `TimeoutStopSec=15` | dario force-exits 5s after `SIGTERM` (`src/proxy.ts`). A shorter stop timeout would `SIGKILL` it mid token-flush. |
 | `KillMode=control-group` | Stops anything the proxy spawned, not just the leader. |
 | `Restart=on-failure`, `RestartSec=3` | Failures here are startup/config errors, not crash loops. Note the overage-guard halt returns 503s without exiting, so a restart will not clear it — use `dario resume` or wait out the cooldown. |

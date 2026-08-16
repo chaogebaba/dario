@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Empirical A/B test: does Anthropic's billing classifier route to
 // `five_hour` (subscription) when CC's system prompt content is
 // modified, while everything else (effort, max_tokens, tools, headers,

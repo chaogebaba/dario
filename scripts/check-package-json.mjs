@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Fails CI if package.json is invalid JSON or not canonically formatted.
 // Guards against the class of bug where a tool writes escaped newlines
 // ("\n" as literal backslash-n) instead of real newlines into package.json.
@@ -20,7 +20,7 @@ const canonical = JSON.stringify(parsed, null, 2) + '\n';
 if (raw !== canonical) {
   console.error('package.json is not canonically formatted.');
   console.error('Expected: 2-space indent, trailing newline, real newlines (not escaped \\n).');
-  console.error('To fix, run: npm run fix:pkg');
+  console.error('To fix, run: bun run fix:pkg');
   process.exit(1);
 }
 

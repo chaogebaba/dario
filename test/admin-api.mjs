@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for the headless admin API (#599), src/admin-api.ts.
 //
 // Exercises the request handler with mock req/res — no network, no real OAuth.

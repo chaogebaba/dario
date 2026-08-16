@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // dario#905 — request-queue slot leak on a connected-but-not-reading client.
 //
 // The wedge: a streaming client whose socket stays OPEN but which stops

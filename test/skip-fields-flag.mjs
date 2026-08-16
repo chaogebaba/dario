@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for the --skip-fields flag. Covers the CLI parser, the
 // buildCCRequest opt-out behavior (each named field stays out of the
 // outbound body), and the haiku interaction (haiku omits all three

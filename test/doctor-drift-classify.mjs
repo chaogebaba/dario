@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for scripts/doctor-drift-classify.mjs — the pure parse + drift
 // classifier behind the dario-doctor-watch. The headline case is dario#721:
 // an "OAuth expired" row that coexists with fully-passing obedience probes

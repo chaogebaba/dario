@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Regression: dario must not advertise CC tools the client didn't declare.
  *

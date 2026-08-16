@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // One-off investigation: figure out why Opus 4.7 is currently faster than
 // Sonnet 4.6 through dario. Bigger model winning is unusual; either
 // Anthropic moved Opus to a faster inference cluster, Sonnet 4.6 is

@@ -121,22 +121,21 @@ jobs:
           # opening the PR under the PAT identity restores normal CI firing.
           token: ${{ secrets.DARIO_DRIFT_BOT_PAT }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: '22'
-          cache: 'npm'
+          bun-version: 1.4.0
 
       - name: Install deps
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Build
-        run: npm run build
+        run: bun run build
 
       - name: Run drift check
         id: drift
         run: |
           set +e
-          node scripts/check-cc-drift.mjs > drift-report.json 2> drift-log.txt
+          bun scripts/check-cc-drift.mjs > drift-report.json 2> drift-log.txt
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
           cat drift-log.txt
@@ -232,7 +231,7 @@ jobs:
           # the workdir. Stage ONLY the files it actually patched so CI
           # artifacts don't end up in the commit — that requires the
           # explicit `changedFiles` list emitted alongside `fixed: true`.
-          DRAFT_RESULT=$(node scripts/auto-draft-drift-fix.mjs drift-report.json)
+          DRAFT_RESULT=$(bun scripts/auto-draft-drift-fix.mjs drift-report.json)
           echo "$DRAFT_RESULT" > auto-draft-result.json
 
           FIXED=$(echo "$DRAFT_RESULT" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).fixed")
@@ -300,7 +299,7 @@ jobs:
           # test/close-superseded-drift-prs.mjs -- notably that it refuses to
           # close a NEWER PR, which is the one mistake that would lose work.
           gh pr list --state open --json number,headRefName \
-            | node scripts/close-superseded-drift-prs.mjs "$BRANCH" \
+            | bun scripts/close-superseded-drift-prs.mjs "$BRANCH" \
             | while read -r OLD_PR; do
                 [ -n "$OLD_PR" ] || continue
                 echo "Closing #$OLD_PR -- superseded by $PR_URL"
@@ -337,9 +336,9 @@ jobs:
         # then merges into the root node_modules so the ESM probe script can
         # resolve it (NODE_PATH is ignored by `import`).
         run: |
-          npm ci --prefix .github/drift-probe-deps --no-audit --no-fund
+          bun install --frozen-lockfile --prefix .github/drift-probe-deps --no-audit --no-fund
           cp -r .github/drift-probe-deps/node_modules/. node_modules/
-          npx playwright install chromium --with-deps
+          bunx playwright install chromium --with-deps
 
       - name: Run authorize-URL probe (headless Chromium)
         id: probe
@@ -351,7 +350,7 @@ jobs:
         # headless throws (e.g. Chromium install failure).
         run: |
           set +e
-          node scripts/check-cc-authorize-probe-headless.mjs > probe-report.json 2> probe-log.txt
+          bun scripts/check-cc-authorize-probe-headless.mjs > probe-report.json 2> probe-log.txt
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
           cat probe-log.txt
@@ -367,7 +366,7 @@ jobs:
         if: steps.probe.outputs.exit_code == '2'
         run: |
           set +e
-          node scripts/check-cc-authorize-probe.mjs > probe-report.json 2> probe-log.txt
+          bun scripts/check-cc-authorize-probe.mjs > probe-report.json 2> probe-log.txt
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
           cat probe-log.txt

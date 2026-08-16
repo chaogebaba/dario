@@ -1,6 +1,6 @@
 name: Compat test (self-hosted)
 
-# Runs `node test/compat.mjs` against a live `dario proxy --passthrough`
+# Runs `bun test/compat.mjs` against a live `dario proxy --passthrough`
 # instance on the same self-hosted runner that hosts the drift watcher.
 # Catches wire-shape regressions BEFORE merge instead of relying on the
 # post-release drift watcher to flag them after the fact.
@@ -81,15 +81,15 @@ jobs:
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
 
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
+          bun-version: 1.4.0
 
       - name: Install + build
         run: |
-          npm ci --no-audit --no-fund
-          npm run build
+          bun install --frozen-lockfile --no-audit --no-fund
+          bun run build
 
       - name: Start dario proxy (passthrough mode)
         # Always start dario: the suite routes THROUGH the proxy so the
@@ -144,7 +144,7 @@ jobs:
           # rebuild path so compat.mjs can verify dario forwards the
           # client's exact request shape (the explicit guarantee
           # passthrough mode makes).
-          node dist/cli.js proxy --passthrough --port=3457 > proxy.log 2>&1 &
+          bun dist/cli.js proxy --passthrough --port=3457 > proxy.log 2>&1 &
           echo $! > proxy.pid
           echo "started dario proxy with PID $(cat proxy.pid)"
 
@@ -181,7 +181,7 @@ jobs:
           DARIO_TEST_URL: http://127.0.0.1:3457
         run: |
           set +e
-          # `node test/compat.mjs | tee` — without pipefail, `$?` captures
+          # `bun test/compat.mjs | tee` — without pipefail, `$?` captures
           # `tee`'s exit (always 0), NOT compat.mjs's. v4.6.3 fix: use
           # ${PIPESTATUS[0]} (the leftmost command's exit code) so a
           # failing compat suite actually surfaces as a non-zero exit.
@@ -189,7 +189,7 @@ jobs:
           # the workflow's job status finalizer mark the run SUCCESS even
           # when 9/10 compat assertions failed. Caught by hand on the
           # v4.6.2 follow-up run (#26003543366).
-          node test/compat.mjs | tee compat-output.txt
+          bun test/compat.mjs | tee compat-output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Stop dario proxy
@@ -240,7 +240,7 @@ jobs:
             echo "$marker"
             echo "## Compat test: $status_emoji $status_text"
             echo ""
-            echo "Ran \`node test/compat.mjs\` against \`dario proxy --passthrough\` on the [self-hosted runner](.github/workflows/compat-test-self-hosted.yml) for commit \`${{ github.event.pull_request.head.sha }}\`."
+            echo "Ran \`bun test/compat.mjs\` against \`dario proxy --passthrough\` on the [self-hosted runner](.github/workflows/compat-test-self-hosted.yml) for commit \`${{ github.event.pull_request.head.sha }}\`."
             echo ""
             echo "<details><summary>Output</summary>"
             echo ""

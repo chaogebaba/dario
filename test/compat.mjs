@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * dario — Compatibility Validation Suite
  * Tests --passthrough mode against Hermes/OpenClaw protocol expectations.

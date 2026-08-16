@@ -51,7 +51,7 @@ jobs:
         id: check
         run: |
           set +e
-          node scripts/check-doctor-drift.mjs > doctor-drift.json 2> doctor-drift.err
+          bun scripts/check-doctor-drift.mjs > doctor-drift.json 2> doctor-drift.err
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 0 ]; then

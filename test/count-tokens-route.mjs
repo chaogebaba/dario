@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // resolveProxyTarget — the proxy path allowlist (SSRF guard) + per-route
 // forwarding mode. Added when /v1/messages/count_tokens joined the
 // allowlist (it 403'd before — surfaced by the 2026-06-09 fable battery):

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Regression test for dario#143 — the v3.31.18 silent-CLI bug.
 //
 // The main-entry guard added in v3.31.15 (#137) was a strict string

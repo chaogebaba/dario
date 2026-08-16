@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for sanitizeMessages — orchestration-tag scrub on message bodies.
 //
 // dario#54 regression: CC v2.1.112 splits per-reminder system-reminders into

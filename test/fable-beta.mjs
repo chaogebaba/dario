@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // betaForModel — fable-conditional `fallback-credit-2026-06-01` beta.
 //
 // Live captures (2026-06-09, CC v2.1.170): real CC appends

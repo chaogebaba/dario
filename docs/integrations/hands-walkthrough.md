@@ -35,8 +35,8 @@ This walkthrough covers both. SDK + dario gets the spotlight because that's wher
 | Thing | Version | Why |
 |---|---|---|
 | **Node.js** | 20+ | hands and dario both target Node 20 minimum |
-| **hands** | latest from npm — `npm i -g @askalf/hands` | The agent itself |
-| **dario** | v3.33.0+ (latest preferred — `npm i -g @askalf/dario@latest`) | v3.33.0 added the system-prompt identity match that auto-preserves hands' computer-use tools |
+| **hands** | latest from npm — `bun add --global @askalf/hands` | The agent itself |
+| **dario** | v3.33.0+ (latest preferred — `bun add --global @askalf/dario@latest`) | v3.33.0 added the system-prompt identity match that auto-preserves hands' computer-use tools |
 | **A Claude OAuth login** | run `dario login` once | A Pro / Max subscription on a Claude account |
 | **`claude` CLI** | latest | Required for Claude Login mode; `hands init` will install for you if missing |
 | **Bun** (recommended) | 1.1+ | dario auto-relaunches under Bun for TLS-fingerprint fidelity. Skip if you're fine with a runtime banner; install via [bun.sh](https://bun.sh) for the full subscription wire shape. |
@@ -53,7 +53,7 @@ dario status          # OAuth healthy, expires in N hours
 One npm install, one interactive command:
 
 ```bash
-npm install -g @askalf/hands
+bun add --global @askalf/hands
 hands init
 ```
 
@@ -236,7 +236,7 @@ Three causes, in order of likelihood:
 If dario isn't preserving the `anthropic-beta: computer-use-*` header, you're probably on a dario version older than v3.33.0. Upgrade — the system-prompt identity match and beta-preserve behavior both landed in that release.
 
 ```bash
-npm install -g @askalf/dario@latest
+bun add --global @askalf/dario@latest
 ```
 
 ### Voice mode says "whisper.cpp not found"
@@ -266,7 +266,7 @@ dario's outbound timeout is 5 min by default, so this is purely about hands' own
 
 ```bash
 # One-time setup
-npm install -g @askalf/dario @askalf/hands
+bun add --global @askalf/dario @askalf/hands
 dario login
 hands init
 

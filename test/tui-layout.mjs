@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for src/tui/layout.ts — header/footer/tabstrip/kv-row/wrap.
 //
 // All pure string-returning functions; assertions are visible-width

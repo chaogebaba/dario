@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Frame-level invariants for the composed TUI (header + tab strip + rule
 // + active tab body + footer).
 //

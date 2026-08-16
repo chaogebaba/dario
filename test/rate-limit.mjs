@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for the token-bucket rate limiter (#620), src/rate-limit.js.
 // Deterministic — the clock is injected, so no sleeping.
 

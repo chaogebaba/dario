@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Runtime wire-drift watcher — the request-time counterpart to
  * scripts/check-cc-drift.mjs (which statically scans the installed Claude Code

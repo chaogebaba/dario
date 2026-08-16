@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for scripts/version-advances.sh — the rule deciding whether a bot PR
 // may be armed for auto-merge.
 //

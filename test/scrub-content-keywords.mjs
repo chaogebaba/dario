@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Regression test: dario's content scrubber must NOT corrupt the user's
 // source code / data. The framework-identifier patterns include bare words
 // that double as code tokens — most notably `continue` (the JS keyword AND

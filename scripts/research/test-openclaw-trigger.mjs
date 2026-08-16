@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // A/B test of the @theo claim (2026-04-29):
 //
 //   "if you have a recent commit that mentions OpenClaw in a json

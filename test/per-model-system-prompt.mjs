@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Per-model system prompt (dario#lock-step): CC 2.1.198 ships Fable a larger,
 // model-specific system prompt than the shared base. dario must inject Fable's
 // prompt for Fable requests and the base for everything else.

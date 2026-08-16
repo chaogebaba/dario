@@ -24,22 +24,22 @@
   ],
   "scripts": {
     "build": "tsc && cp src/cc-template-data.json dist/",
-    "test": "node --test --test-concurrency=8 test/all.test.mjs",
-    "test:serial": "node test/issue-29-tool-translation.mjs && node test/hybrid-tools.mjs && node test/tool-schema-contract.mjs && node test/scrub-paths.mjs && node test/provider-prefix.mjs && node test/analytics-recording.mjs && node test/analytics-billing-bucket.mjs && node test/failover-429.mjs && node test/pool-sticky.mjs && node test/live-fingerprint.mjs && node test/proxy-header-order.mjs && node test/proxy-body-order.mjs && node test/runtime-fingerprint.mjs && node test/pacing.mjs && node test/stream-drain.mjs && node test/subagent.mjs && node test/mcp-protocol.mjs && node test/mcp-tools.mjs && node test/mcp-e2e.mjs && node test/session-rotation.mjs && node test/drift-detection.mjs && node test/cc-authorize-probe-classifier.mjs && node test/compat-range.mjs && node test/doctor-formatter.mjs && node test/doctor-identity-drift.mjs && node test/atomic-write.mjs && node test/account-refresh-singleflight.mjs && node test/durable-token-persist.mjs && node test/streaming-edge-cases.mjs && node test/client-detection.mjs && node test/manual-oauth-flow.mjs && node test/scrub-template.mjs && node test/context-bleed.mjs && node test/passthrough-header-forwarding.mjs && node test/capture-provenance.mjs && node test/sanitize-messages.mjs && node test/platform-tools.mjs && node test/strict-template-flags.mjs && node test/request-queue.mjs && node test/effort-flag.mjs && node test/template-invariants.mjs",
-    "audit": "npm audit --production --audit-level=high",
-    "prepublishOnly": "npm run build",
-    "start": "node dist/cli.js",
-    "dev": "tsx src/cli.ts",
-    "e2e": "node test/e2e.mjs",
-    "stress": "node test/stress.mjs",
-    "compat": "node test/compat.mjs",
-    "lint:pkg": "node scripts/check-package-json.mjs",
-    "drift:sdk": "node scripts/check-sdk-drift.mjs",
-    "drift:wire": "node scripts/check-wire-drift.mjs",
-    "check:overage": "node scripts/check-overage-live.mjs",
-    "cch:calibrate": "node scripts/cch-calibrate.mjs",
-    "fix:pkg": "node -e \"const fs=require('fs');fs.writeFileSync('package.json',JSON.stringify(JSON.parse(fs.readFileSync('package.json','utf-8')),null,2)+'\\n')\"",
-    "audit:tui": "node tools/tui-audit/audit.mjs"
+    "test": "bun test/all.test.mjs",
+    "test:serial": "bun test/issue-29-tool-translation.mjs && bun test/hybrid-tools.mjs && bun test/tool-schema-contract.mjs && bun test/scrub-paths.mjs && bun test/provider-prefix.mjs && bun test/analytics-recording.mjs && bun test/analytics-billing-bucket.mjs && bun test/failover-429.mjs && bun test/pool-sticky.mjs && bun test/live-fingerprint.mjs && bun test/proxy-header-order.mjs && bun test/proxy-body-order.mjs && bun test/runtime-fingerprint.mjs && bun test/pacing.mjs && bun test/stream-drain.mjs && bun test/subagent.mjs && bun test/mcp-protocol.mjs && bun test/mcp-tools.mjs && bun test/mcp-e2e.mjs && bun test/session-rotation.mjs && bun test/drift-detection.mjs && bun test/cc-authorize-probe-classifier.mjs && bun test/compat-range.mjs && bun test/doctor-formatter.mjs && bun test/doctor-identity-drift.mjs && bun test/atomic-write.mjs && bun test/account-refresh-singleflight.mjs && bun test/durable-token-persist.mjs && bun test/streaming-edge-cases.mjs && bun test/client-detection.mjs && bun test/manual-oauth-flow.mjs && bun test/scrub-template.mjs && bun test/context-bleed.mjs && bun test/passthrough-header-forwarding.mjs && bun test/capture-provenance.mjs && bun test/sanitize-messages.mjs && bun test/platform-tools.mjs && bun test/strict-template-flags.mjs && bun test/request-queue.mjs && bun test/effort-flag.mjs && bun test/template-invariants.mjs",
+    "audit": "bun audit --audit-level=high",
+    "prepublishOnly": "bun run build",
+    "start": "bun dist/cli.js",
+    "dev": "bun src/cli.ts",
+    "e2e": "bun test/e2e.mjs",
+    "stress": "bun test/stress.mjs",
+    "compat": "bun test/compat.mjs",
+    "lint:pkg": "bun scripts/check-package-json.mjs",
+    "drift:sdk": "bun scripts/check-sdk-drift.mjs",
+    "drift:wire": "bun scripts/check-wire-drift.mjs",
+    "check:overage": "bun scripts/check-overage-live.mjs",
+    "cch:calibrate": "bun scripts/cch-calibrate.mjs",
+    "fix:pkg": "bun -e \"const fs=require('fs');fs.writeFileSync('package.json',JSON.stringify(JSON.parse(fs.readFileSync('package.json','utf-8')),null,2)+'\\n')\"",
+    "audit:tui": "bun tools/tui-audit/audit.mjs"
   },
   "keywords": [
     "llm",
@@ -74,11 +74,11 @@
     "url": "https://github.com/askalf/dario/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "bun": ">=1.4.0"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.7.0"
-  }
+  },
+  "packageManager": "bun@1.4.0"
 }

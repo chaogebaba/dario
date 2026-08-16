@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Tests for per-model 7d rate-limit buckets — the dario-side handling of
 // the `anthropic-ratelimit-unified-7d_<family>-utilization` headers
 // Anthropic started emitting on Sonnet responses around 2026-04-25

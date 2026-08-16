@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Genuine-CC byte-faithful passthrough (dario#678 follow-up).
  *

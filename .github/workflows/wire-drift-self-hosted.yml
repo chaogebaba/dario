@@ -1,6 +1,6 @@
 name: Wire drift (self-hosted)
 
-# Runs `node scripts/check-wire-drift.mjs` against the installed `claude` on
+# Runs `bun scripts/check-wire-drift.mjs` against the installed `claude` on
 # the self-hosted runner. This is the RUNTIME counterpart to cc-drift-watch.yml
 # (which statically scans the installed Claude Code package and so can't see
 # per-request wire decisions): it spawns claude for opus/sonnet/haiku/fable,
@@ -59,15 +59,15 @@ jobs:
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
 
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
+          bun-version: 1.4.0
 
       - name: Install + build
         run: |
-          npm ci --no-audit --no-fund
-          npm run build
+          bun install --frozen-lockfile --no-audit --no-fund
+          bun run build
 
       - name: Report claude version
         run: claude --version || echo "::warning::claude not on PATH — the wire-drift check will report a high-severity 'capture' finding"
@@ -76,7 +76,7 @@ jobs:
         id: drift
         run: |
           set +e
-          node scripts/check-wire-drift.mjs > wire-drift-report.json 2> wire-drift-log.txt
+          bun scripts/check-wire-drift.mjs > wire-drift-report.json 2> wire-drift-log.txt
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           echo "=== wire-drift-log.txt ==="
           cat wire-drift-log.txt
@@ -100,7 +100,7 @@ jobs:
             echo "$marker"
             echo "## Wire drift: $status_emoji $status_text"
             echo ""
-            echo "Ran \`node scripts/check-wire-drift.mjs\` against the runner's \`claude\` for commit \`${{ github.event.pull_request.head.sha }}\` — per-model \`anthropic-beta\` (betaForModel) + billing-block cch gate vs the installed \`claude\`."
+            echo "Ran \`bun scripts/check-wire-drift.mjs\` against the runner's \`claude\` for commit \`${{ github.event.pull_request.head.sha }}\` — per-model \`anthropic-beta\` (betaForModel) + billing-block cch gate vs the installed \`claude\`."
             echo ""
             echo "<details><summary>Report</summary>"
             echo ""
@@ -135,7 +135,7 @@ jobs:
             cat wire-drift-report.json 2>/dev/null || echo "(no report)"
             echo '```'
             echo ""
-            echo "Fix: update \`betaForModel\` (src/proxy.ts) to the current CC matrix, and/or run \`npm run cch:calibrate\` if the report shows a cch-gate finding. [Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "Fix: update \`betaForModel\` (src/proxy.ts) to the current CC matrix, and/or run \`bun run cch:calibrate\` if the report shows a cch-gate finding. [Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           } > "$body_file"
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body-file "$body_file"

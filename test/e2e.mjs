@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * dario — E2E Test Suite
  * Requires a running dario proxy on localhost:3456

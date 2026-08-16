@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Test 3 in the @theo OpenClaw triage: spawn CC's actual binary
 // from two test directories — one clean, one with "OpenClaw" in
 // the commit history — and observe BOTH:

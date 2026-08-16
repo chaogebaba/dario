@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // BUILDOUT-06 — dario doctor drift check.
 //
 // Runs `docker exec askalf-dario dario doctor --obedience`, parses its status

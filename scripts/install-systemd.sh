@@ -89,13 +89,14 @@ install_service() {
   [ -n "$bun_bin" ] || die "bun not found on PATH. Install from https://bun.sh and retry."
   bun_bin="$(cd "$(dirname "$bun_bin")" && pwd)/$(basename "$bun_bin")"
 
-  # Bun's TLS fingerprint is what dario's wire fidelity rests on; older
-  # builds are classified unverified upstream (src/runtime-fingerprint.ts).
+  # dario requires Bun (package.json engines) — it is the runtime, not an
+  # optimisation: the TLS fingerprint and fetch's proxy option both depend
+  # on it. Older builds are also below the JA3-verified floor.
   local bun_ver
   bun_ver="$("$bun_bin" --version 2>/dev/null | tr -d '\n')"
-  local min="1.3.14"
+  local min="1.4.0"
   if [ "$(printf '%s\n%s\n' "$min" "$bun_ver" | sort -V | head -n1)" != "$min" ]; then
-    die "bun $bun_ver is older than the verified floor $min. Upgrade with: bun upgrade"
+    die "bun $bun_ver is older than the required $min. Upgrade with: bun upgrade"
   fi
 
   local entry="$REPO_ROOT/dist/cli.js"

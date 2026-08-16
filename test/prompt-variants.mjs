@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Per-model system-prompt variants: the map, the legacy fold, and the merge
 // that keeps a live capture from wiping the baked variants.
 //

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Extract a single version's section from CHANGELOG.md.
 //
 // Used by `cc-drift-auto-release.yml` to populate the GitHub release

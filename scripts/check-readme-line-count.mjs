@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // The README's "~Nk lines you can read in a weekend" claim is a load-bearing
 // selling point -- it is the thing that makes "audit it yourself" credible --
 // and it rots on its own, silently, every release.

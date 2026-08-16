@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Resolve the ONE conflict shape our release automation produces.
 //
 // Two bot PRs drafted off the same release both add a section under

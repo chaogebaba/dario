@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Unit tests for isTerminalRefreshFailure — the dead-refresh-token classifier.
 // A terminal failure (invalid_grant / 401 / 403) means the refresh token is
 // revoked/rotated-out and retrying can't recover it: dario must fail fast with

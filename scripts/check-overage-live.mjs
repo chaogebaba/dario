@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Live subscription-routing check — sends a sustained, multi-model load THROUGH
  * a dario proxy against real api.anthropic.com and confirms every response

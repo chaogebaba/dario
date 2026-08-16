@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // fable-5 is baked into every model listing dario advertises.
 //
 // Regression guard: Claude Fable 5 (the current flagship, integrated v4.8.46)

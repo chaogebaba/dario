@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * Regression: platform-scoped CC natives must map by the CLIENT's declaration,
  * not the proxy HOST's process.platform.
