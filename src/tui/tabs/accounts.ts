@@ -1,5 +1,5 @@
 /**
- * Accounts tab — list of OAuth subscription accounts in the pool.
+ * Accounts tab — interactive management of OAuth subscription accounts.
  *
  * Source of truth is the RUNNING PROXY's live pool (`GET /accounts`), not a
  * local disk read: the TUI is its own process, and in a containerized / admin
@@ -9,24 +9,26 @@
  * read only when the proxy is unreachable, and flag it so the user knows the
  * view may be stale.
  *
- * Read-mostly. Mutations (add/remove) require the CLI or the admin API — the
- * tab shows the relevant command in the footer.
+ * Interactive features:
+ *   - Arrow keys navigate the account list
+ *   - `r` refreshes AND reconciles the pool (hot-reload from disk)
+ *   - `n` adds a new account (OAuth flow in background, then reconciles)
+ *   - `d` deletes the selected account (with confirmation)
+ *   - `e` edits the selected account's alias (inline rename)
  *
  * Layout:
  *
- *   ┌─ Accounts ──────────────────────────────────────┐
- *   │  alias            expires    util5h   util7d    │
- *   │  ─────            ───────    ──────   ──────    │
- *   │  default          7h 41m       12%      4%      │
- *   │  alt              expired       0%      0%      │
- *   │  …                                              │
- *   └─────────────────────────────────────────────────┘
- *   To add: `dario accounts add <alias>`
- *   To remove: `dario accounts remove <alias>`
+ *   Accounts
+ *   alias               expires       util5h   util7d   status
+ *   ──────────────────────────────────────────────────────────────────
+ *   > default           7h 41m          12%      4%
+ *     alt               expired          0%      0%
+ *
+ *   n add  d delete  e rename  r refresh
  */
 
 import type { Tab, TabContext } from '../tab.js';
-import { fg, dim, bold, brand, pad, truncate, progressBar } from '../render.js';
+import { fg, dim, bold, brand, pad, truncate, progressBar, inverse } from '../render.js';
 import { renderKvRow } from '../layout.js';
 import { formatResetInstant, formatResetRelative, quotaBand, type QuotaWindow } from '../../quota.js';
 
@@ -46,26 +48,20 @@ export interface AccountsState {
     util5h?: number;
     util7d?: number;
     status?: string;
-    /**
-     * When the utilization figures were last measured, 0/undefined when
-     * never. dario only sees utilization on responses it proxies, so a
-     * proxy that has served nothing reports `util5h: 0` meaning "no idea",
-     * and rendering that as `0%` tells the operator their quota is
-     * untouched. Unmeasured renders `—`.
-     */
     measuredAt?: number;
-    /**
-     * Control-plane quota from `GET /quota`. Preferred over the header-derived
-     * util columns above: it exists without traffic, carries a per-window
-     * reset, and names the per-model bucket. Absent when the proxy predates
-     * the endpoint or the fetch failed — the util table is the fallback.
-     */
     quota?: AccountQuota;
   }>;
   error: string | null;
-  /** Where the list came from: the running proxy's pool, the proxy's
-   *  single-account mode, or a local disk fallback when the proxy is down. */
   source?: 'pool' | 'single-account' | 'disk';
+  /** Index of the currently selected account in the list. */
+  selectedIdx: number;
+  /** Interaction mode: normal browsing, confirming a delete, or editing an alias. */
+  mode: 'normal' | 'confirm-delete' | 'edit-alias' | 'adding';
+  /** Edit buffer for alias rename. */
+  editBuffer: string | null;
+  /** Feedback message shown after an action. */
+  message: string | null;
+  messageKind: 'success' | 'error' | 'info' | null;
 }
 
 /** Shape of the proxy's `GET /accounts` response (see src/proxy.ts). */
@@ -88,7 +84,16 @@ export const AccountsTab: Tab<AccountsState> = {
   hotkey: 'a',
 
   initialState(): AccountsState {
-    return { loading: true, accounts: [], error: null };
+    return {
+      loading: true,
+      accounts: [],
+      error: null,
+      selectedIdx: 0,
+      mode: 'normal',
+      editBuffer: null,
+      message: null,
+      messageKind: null,
+    };
   },
 
   async onMount(_state, ctx: TabContext): Promise<AccountsState | undefined> {
@@ -96,39 +101,134 @@ export const AccountsTab: Tab<AccountsState> = {
   },
 
   onKey(state, key) {
-    if (key.name === 'printable' && key.ch === 'r' && !key.ctrl) {
-      // `forceQuota` rides along so the refetch bypasses the proxy's 60s
-      // quota cache. An explicit keypress asking for a refresh and getting a
-      // cached answer is the one case the cache must not win.
-      forceQuota = true;
-      return { ...state, loading: true };
+    // ── Edit-alias mode: capture typed characters ──────────────
+    if (state.mode === 'edit-alias') {
+      if (key.name === 'escape') {
+        return { ...state, mode: 'normal' as const, editBuffer: null, message: null, messageKind: null };
+      }
+      if (key.name === 'enter') {
+        // Keep editBuffer so onTick can read it for the rename.
+        return { ...state, mode: 'normal' as const, message: 'Renaming…', messageKind: 'info' as const };
+      }
+      if (key.name === 'backspace') {
+        const buf = state.editBuffer ?? '';
+        return { ...state, editBuffer: buf.slice(0, -1) };
+      }
+      if (key.name === 'printable' && key.ch && !key.ctrl) {
+        const buf = state.editBuffer ?? '';
+        return { ...state, editBuffer: buf + key.ch };
+      }
+      return undefined;
     }
+
+    // ── Confirm-delete mode ───────────────────────────────────
+    if (state.mode === 'confirm-delete') {
+      if (key.name === 'printable' && (key.ch === 'y' || key.ch === 'Y')) {
+        // Signal delete — the tick handler will fire it.
+        return { ...state, mode: 'normal' as const, message: 'Deleting…', messageKind: 'info' as const };
+      }
+      // Any other key cancels.
+      return { ...state, mode: 'normal' as const, message: null, messageKind: null };
+    }
+
+    // ── Adding mode: just waiting ─────────────────────────────
+    if (state.mode === 'adding') {
+      // No keys accepted while the add flow is running.
+      return undefined;
+    }
+
+    // ── Normal mode ───────────────────────────────────────────
+    // Arrow navigation
+    if (key.name === 'up' && state.accounts.length > 0) {
+      const idx = Math.max(0, state.selectedIdx - 1);
+      return { ...state, selectedIdx: idx };
+    }
+    if (key.name === 'down' && state.accounts.length > 0) {
+      const idx = Math.min(state.accounts.length - 1, state.selectedIdx + 1);
+      return { ...state, selectedIdx: idx };
+    }
+
+    // `r` — refresh + reconcile
+    if (key.name === 'printable' && key.ch === 'r' && !key.ctrl) {
+      forceQuota = true;
+      doReconcile = true;
+      return { ...state, loading: true, message: null, messageKind: null };
+    }
+
+    // `n` — add new account
+    if (key.name === 'printable' && key.ch === 'n' && !key.ctrl) {
+      doAdd = true;
+      return { ...state, mode: 'adding' as const, message: 'Starting OAuth flow…', messageKind: 'info' as const };
+    }
+
+    // `d` or `x` — delete selected account
+    if (key.name === 'printable' && (key.ch === 'd' || key.ch === 'x') && !key.ctrl) {
+      if (state.accounts.length === 0) return undefined;
+      const alias = state.accounts[state.selectedIdx]?.alias;
+      if (!alias) return undefined;
+      return { ...state, mode: 'confirm-delete' as const, message: `Delete "${alias}"? Press y to confirm, any other key to cancel.`, messageKind: 'info' as const };
+    }
+
+    // `e` — edit alias
+    if (key.name === 'printable' && key.ch === 'e' && !key.ctrl) {
+      if (state.accounts.length === 0) return undefined;
+      const alias = state.accounts[state.selectedIdx]?.alias;
+      if (!alias) return undefined;
+      return { ...state, mode: 'edit-alias' as const, editBuffer: alias, message: null, messageKind: null };
+    }
+
     return undefined;
   },
 
   onTick(state, ctx) {
-    // onKey can only return new state, not run async work — so a manual
-    // refresh ('r') just sets loading:true and this tick drives the refetch.
-    // `refreshInFlight` guards against the 250ms tick stacking overlapping
-    // fetches while one is already running.
+    // Drive async side-effects that onKey can't fire directly.
+
+    // Refresh + reconcile
     if (state.loading && !refreshInFlight) {
       refreshInFlight = true;
       const force = forceQuota;
+      const reconcile = doReconcile;
       forceQuota = false;
-      void refreshAccounts(ctx, force)
+      doReconcile = false;
+      void (async () => {
+        if (reconcile) {
+          await ctx.client.reconcilePool();
+        }
+        return refreshAccounts(ctx, force);
+      })()
         .then((next) => ctx.setState(next))
         .finally(() => { refreshInFlight = false; });
+    }
+
+    // Add account flow
+    if (doAdd && state.mode === 'adding') {
+      doAdd = false;
+      void performAdd(ctx);
+    }
+
+    // Delete (after confirm)
+    if (state.mode === 'normal' && state.message === 'Deleting…') {
+      const alias = state.accounts[state.selectedIdx]?.alias;
+      if (alias) {
+        void performDelete(ctx, alias, state.selectedIdx);
+      }
+    }
+
+    // Rename (after Enter in edit mode)
+    if (state.mode === 'normal' && state.message === 'Renaming…' && state.editBuffer !== null) {
+      const oldAlias = state.accounts[state.selectedIdx]?.alias;
+      const newAlias = state.editBuffer;
+      if (oldAlias && newAlias) {
+        // Clear editBuffer to prevent re-trigger on next tick.
+        ctx.setState({ editBuffer: null } as Partial<AccountsState>);
+        void performRename(ctx, oldAlias, newAlias);
+      }
     }
   },
 
   render(state, dimv): string {
     const lines: string[] = [];
     const w = dimv.cols;
-    // Bound every row at the push site rather than at each call site. The
-    // column header (68 wide) and the disk-fallback path (which
-    // interpolates `~/.dario/accounts/<alias>.json`, unbounded by alias
-    // length) both overflowed; hand-auditing 15 separate pushes is how
-    // that got missed.
     const push = (s: string) => lines.push(truncate(s, w));
 
     push(' ' + brand('Accounts'));
@@ -143,11 +243,18 @@ export const AccountsTab: Tab<AccountsState> = {
       push('');
       if (state.source === 'single-account') {
         push('  ' + dim('Single-account mode (`dario login`) — no pool.'));
-        push('  ' + 'Start a pool: ' + fg('cyan', 'dario accounts add <alias>'));
+        push('  ' + 'Start a pool: press ' + fg('cyan', 'n') + ' or run ' + fg('cyan', 'dario accounts add <alias>'));
       } else {
         push('  ' + dim('No accounts in the pool.'));
-        push('  ' + 'Add one: ' + fg('cyan', 'dario accounts add <alias>'));
+        push('  ' + 'Add one: press ' + fg('cyan', 'n') + ' or run ' + fg('cyan', 'dario accounts add <alias>'));
       }
+      if (state.message) {
+        push('');
+        const c = state.messageKind === 'error' ? 'red' : state.messageKind === 'success' ? 'green' : 'cyan';
+        push('  ' + fg(c, state.message));
+      }
+      push('');
+      push(' ' + dim(`${fg('cyan', 'n')} add  ${fg('cyan', 'r')} refresh`));
       return lines.join('\n');
     }
 
@@ -165,27 +272,31 @@ export const AccountsTab: Tab<AccountsState> = {
       renderUtilTable(state, push, w);
     }
 
-    push('');
-    push(' ' + dim('Mutations via CLI:'));
-    push('   ' + fg('cyan', 'dario accounts add <alias>'));
-    push('   ' + fg('cyan', 'dario accounts remove <alias>'));
+    // ── Message area ──────────────────────────────────────────
+    if (state.mode === 'edit-alias') {
+      push('');
+      push('  ' + bold('Rename alias: ') + (state.editBuffer ?? '') + fg('cyan', '_'));
+      push('  ' + dim('Enter to confirm, Esc to cancel'));
+    } else if (state.message) {
+      push('');
+      const c = state.messageKind === 'error' ? 'red' : state.messageKind === 'success' ? 'green' : 'cyan';
+      push('  ' + fg(c, state.message));
+    }
 
-    // Refresh hint
+    // ── Footer key hints ──────────────────────────────────────
     push('');
-    push(' ' + renderKvRow('', '', w - 2));   // spacer
-    push(' ' + dim(`Press ${fg('cyan', 'r')} to refresh quota.`));
+    const normalMode = !state.mode || state.mode === 'normal';
+    const hints = normalMode
+      ? ` ${fg('cyan', 'n')} add  ${fg('cyan', 'd')} delete  ${fg('cyan', 'e')} rename  ${fg('cyan', 'r')} refresh quota`
+      : '';
+    push(dim(hints));
 
     return lines.join('\n');
   },
 };
 
 /**
- * The quota card, mirroring the cli-proxy-api management-center layout: an
- * account header carrying the plan, then one row per usage window showing the
- * percentage REMAINING, its reset instant with a countdown, and a meter.
- *
- * Every number here is remaining, not consumed — see QuotaWindow. The meter
- * reads as a fuel gauge: full and green is good.
+ * The quota card layout — unchanged from the previous read-only implementation.
  */
 function renderQuotaCards(
   state: AccountsState,
@@ -193,20 +304,21 @@ function renderQuotaCards(
   w: number,
 ): void {
   const now = Date.now();
-  // Label column sized to the widest label present so the percentages line up
-  // across windows and across accounts.
   const labelWidth = Math.max(
     14,
     ...state.accounts.flatMap((a) => (a.quota?.windows ?? []).map((win) => win.label.length)),
   );
   const barWidth = Math.max(8, Math.min(w - 8, 56));
 
-  for (const acc of state.accounts) {
+  for (let i = 0; i < state.accounts.length; i++) {
+    const acc = state.accounts[i]!;
+    const selected = i === state.selectedIdx;
     push('');
+    const marker = selected ? fg('cyan', '>') : ' ';
     const expiry = formatExpiry(acc.expiresAt);
     const planPart = acc.quota?.plan ? dim('Plan ') + bold(acc.quota.plan) : '';
-    push('  ' + fg('cyan', '●') + ' ' + bold(acc.alias) + '  ' + dim('token ') + expiry
-      + (planPart ? '   ' + planPart : ''));
+    const header = `${marker} ${selected ? bold(acc.alias) : acc.alias}  ${dim('token ')}${expiry}${planPart ? '   ' + planPart : ''}`;
+    push('  ' + header);
 
     if (acc.quota?.error) {
       push('    ' + fg('yellow', 'quota unavailable: ') + dim(acc.quota.error));
@@ -228,64 +340,55 @@ function renderQuotaCards(
   }
 }
 
-/** Colored meter over the REMAINING fraction. Unknown renders an empty track. */
+/** Colored meter over the REMAINING fraction. */
 function meter(remainingPercent: number | null, width: number): string {
   const band = quotaBand(remainingPercent);
   const bar = progressBar((remainingPercent ?? 0) / 100, width);
   if (band === 'unknown') return dim(bar);
   const color = band === 'high' ? 'green' : band === 'medium' ? 'yellow' : 'red';
-  // Color only the filled run; the empty track stays dim so a nearly-drained
-  // window reads as a short colored stub rather than a full-width red line.
   const cells = Math.round(Math.max(0, Math.min(1, (remainingPercent ?? 0) / 100)) * width);
   return fg(color, bar.slice(0, cells)) + dim(bar.slice(cells));
 }
 
 /**
- * Pre-/quota fallback: the header-derived utilization table. Retained because
- * a proxy older than the endpoint still reports util5h/util7d on /accounts,
- * and because a failed control-plane fetch should degrade rather than blank.
+ * Pre-/quota fallback: the header-derived utilization table with selection cursor.
  */
 function renderUtilTable(
   state: AccountsState,
   push: (s: string) => void,
   w: number,
 ): void {
-  // Live pool data (from /accounts) carries utilization; the disk fallback
-  // doesn't, so show the util columns only when the pool populated them.
   const hasUtil = state.accounts.some((a) => a.util5h !== undefined);
 
-  // Header row
   push('  ' + dim(
     hasUtil
-      ? pad('alias', 20) + pad('expires', 14) + pad('util5h', 9) + pad('util7d', 9) + pad('status', 14)
-      : pad('alias', 20) + pad('expires', 16) + pad('source', 24)
+      ? '  ' + pad('alias', 20) + pad('expires', 14) + pad('util5h', 9) + pad('util7d', 9) + pad('status', 14)
+      : '  ' + pad('alias', 20) + pad('expires', 16) + pad('source', 24)
   ));
-  push('  ' + dim('─'.repeat(Math.min(w - 4, 66))));
+  push('  ' + dim('─'.repeat(Math.min(w - 4, 68))));
 
-  for (const acc of state.accounts) {
+  for (let i = 0; i < state.accounts.length; i++) {
+    const acc = state.accounts[i]!;
+    const selected = i === state.selectedIdx;
+
     const aliasCol = pad(acc.alias, 20);
     if (hasUtil) {
       const expiresCol = pad(formatExpiry(acc.expiresAt), 14);
-      // `—` when the pool has never seen a response for this account.
-      // Printing the placeholder 0 as `0%` is the whole bug this column
-      // had: it reads as a measurement of an untouched quota.
       const seen = isMeasured(acc);
       const u5 = pad(seen ? `${Math.round((acc.util5h ?? 0) * 100)}%` : '—', 9);
       const u7 = pad(seen ? `${Math.round((acc.util7d ?? 0) * 100)}%` : '—', 9);
       const statusCol = acc.status ?? '—';
       const statusFg = statusCol === 'auth-cooldown' ? fg('yellow', statusCol) : dim(statusCol);
-      push('  ' + aliasCol + expiresCol + u5 + u7 + statusFg);
+      const row = '  ' + aliasCol + expiresCol + u5 + u7 + statusFg;
+      push(selected ? fg('cyan', '>') + row.slice(1) : row);
     } else {
       const expiresCol = pad(formatExpiry(acc.expiresAt), 16);
       const sourceCol = '~/.dario/accounts/' + acc.alias + '.json';
-      push('  ' + aliasCol + expiresCol + dim(sourceCol));
+      const row = '  ' + aliasCol + expiresCol + dim(sourceCol);
+      push(selected ? fg('cyan', '>') + row.slice(1) : row);
     }
   }
 
-  // Without this the `—` column is a mystery. dario reads utilization off
-  // the rate-limit headers of responses it proxies and nowhere else, so an
-  // idle proxy genuinely has nothing to show — say so rather than let the
-  // operator conclude the feature is broken.
   if (hasUtil && !state.accounts.some(isMeasured)) {
     push('');
     push('  ' + dim('util is read from proxied responses — none seen yet this run.'));
@@ -293,36 +396,23 @@ function renderUtilTable(
   }
 }
 
-/** Guards the onTick refetch against overlapping in-flight fetches. */
+// ── Async side-effect flags ─────────────────────────────────────────
+
 let refreshInFlight = false;
-
-/** Set by the `r` keypress so the next refetch bypasses the quota cache. */
 let forceQuota = false;
+let doReconcile = false;
+let doAdd = false;
 
-/**
- * Has this account's utilization actually been measured? A proxy older than
- * `measuredAt` omits the field entirely; fall back to the pre-existing
- * "util present" test there so an old proxy behaves as it did before rather
- * than blanking every column.
- */
 function isMeasured(acc: AccountsState['accounts'][number]): boolean {
   if (acc.measuredAt !== undefined) return acc.measuredAt > 0;
   return acc.util5h !== undefined;
 }
 
-/** Shape of the proxy's `GET /quota` response (see src/proxy.ts). */
+/** Shape of the proxy's `GET /quota` response. */
 interface QuotaEndpoint {
   accounts?: Array<{ alias: string; windows?: QuotaWindow[]; plan?: string | null; error?: string }>;
 }
 
-/**
- * Control-plane quota for every account, keyed by alias.
- *
- * Best-effort by design: `/quota` reaches out to Anthropic, so it is slower
- * and more failure-prone than the local `/accounts` read, and a proxy older
- * than the endpoint 404s. Either way the account list still renders — the
- * util table is the fallback view.
- */
 async function fetchQuotaMap(
   ctx: TabContext<AccountsState>,
   force: boolean,
@@ -333,25 +423,21 @@ async function fetchQuotaMap(
     for (const a of q.accounts ?? []) {
       out.set(a.alias, { windows: a.windows ?? [], plan: a.plan ?? null, ...(a.error ? { error: a.error } : {}) });
     }
-  } catch {
-    // Endpoint missing or unreachable — render without it.
-  }
+  } catch { /* endpoint missing or unreachable */ }
   return out;
 }
+
+// ── Core refresh ────────────────────────────────────────────────────
 
 export async function refreshAccounts(
   ctx?: TabContext<AccountsState>,
   forceQuotaRefresh = false,
 ): Promise<AccountsState> {
-  // Preferred source: the running proxy's live pool. This is what actually
-  // serves traffic, and it works regardless of which process/host/volume the
-  // TUI itself runs on — the fix for #641, where a containerized proxy held
-  // the accounts and the TUI's local disk read came up empty.
   if (ctx) {
     try {
       const r = await ctx.client.getJson<AccountsEndpoint>('/accounts');
       if (r.mode === 'single-account') {
-        return { loading: false, accounts: [], error: null, source: 'single-account' };
+        return { loading: false, accounts: [], error: null, source: 'single-account', selectedIdx: 0, mode: 'normal', editBuffer: null, message: null, messageKind: null };
       }
       if (Array.isArray(r.accounts)) {
         const now = Date.now();
@@ -361,9 +447,6 @@ export async function refreshAccounts(
           source: 'pool',
           accounts: r.accounts.map((a) => ({
             alias: a.alias,
-            // Prefer the absolute timestamp: `expiresInMs` is clamped at 0
-            // upstream, which renders a long-dead token as `0m` instead of
-            // `expired`. Older proxies send only the clamped remainder.
             expiresAt: a.expiresAt ?? now + (a.expiresInMs ?? 0),
             util5h: a.util5h,
             util7d: a.util7d,
@@ -372,13 +455,14 @@ export async function refreshAccounts(
             ...(quota.has(a.alias) ? { quota: quota.get(a.alias)! } : {}),
           })),
           error: null,
+          selectedIdx: 0,
+          mode: 'normal',
+          editBuffer: null,
+          message: null,
+          messageKind: null,
         };
       }
-      // Unknown shape — fall through to the disk read below.
     } catch {
-      // Proxy unreachable (not running, wrong port, missing key) — fall back
-      // to the on-disk view so a standalone TUI still shows something, flagged
-      // stale so the user knows it isn't the live pool.
       return diskFallback();
     }
   }
@@ -390,7 +474,7 @@ async function diskFallback(): Promise<AccountsState> {
     const { listAccountAliases, loadAllAccounts } = await import('../../accounts.js');
     const aliases = await listAccountAliases();
     if (aliases.length === 0) {
-      return { loading: false, accounts: [], error: null, source: 'disk' };
+      return { loading: false, accounts: [], error: null, source: 'disk', selectedIdx: 0, mode: 'normal', editBuffer: null, message: null, messageKind: null };
     }
     const all = await loadAllAccounts();
     return {
@@ -398,9 +482,102 @@ async function diskFallback(): Promise<AccountsState> {
       source: 'disk',
       accounts: all.map((a) => ({ alias: a.alias, expiresAt: a.expiresAt })),
       error: null,
+      selectedIdx: 0,
+      mode: 'normal',
+      editBuffer: null,
+      message: null,
+      messageKind: null,
     };
   } catch (e) {
-    return { loading: false, accounts: [], error: (e as Error).message, source: 'disk' };
+    return { loading: false, accounts: [], error: (e as Error).message, source: 'disk', selectedIdx: 0, mode: 'normal', editBuffer: null, message: null, messageKind: null };
+  }
+}
+
+// ── Async action handlers ───────────────────────────────────────────
+
+/**
+ * Add a new account: spawns `dario accounts add` (which uses email as default
+ * alias), waits for it to complete, then reconciles the pool.
+ */
+async function performAdd(ctx: TabContext<AccountsState>): Promise<void> {
+  try {
+    const { spawn } = await import('node:child_process');
+    const { join } = await import('node:path');
+    const { homeDir } = await import('../../home-dir.js');
+    const { readFile } = await import('node:fs/promises');
+
+    // Resolve an alias from ~/.claude.json email, same as the CLI does.
+    let alias = '';
+    try {
+      const raw = await readFile(join(homeDir(), '.claude.json'), 'utf-8');
+      const data = JSON.parse(raw);
+      const email: string | undefined = data.oauthAccount?.emailAddress;
+      if (email && typeof email === 'string') {
+        alias = email.replace(/@/g, '.').replace(/[^a-zA-Z0-9._-]/g, '');
+      }
+    } catch { /* no email available */ }
+
+    // Use the same binary that launched the TUI.
+    const childArgs = ['accounts', 'add'];
+    if (alias) childArgs.push(alias);
+
+    const child = spawn(process.argv[0]!, [process.argv[1]!, ...childArgs], {
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+
+    // Wait for the OAuth flow to complete (up to 5 minutes).
+    await new Promise<void>((resolve) => {
+      child.on('exit', () => resolve());
+      setTimeout(() => resolve(), 5 * 60_000);
+    });
+
+    // Reconcile the pool to pick up the new account.
+    await ctx.client.reconcilePool();
+
+    // Refresh the display.
+    const next = await refreshAccounts(ctx, true);
+    ctx.setState({ ...next, message: alias ? `Account "${alias}" added.` : 'Account added.', messageKind: 'success' } as Partial<AccountsState>);
+  } catch (e) {
+    ctx.setState({ mode: 'normal', loading: false, message: `Add failed: ${(e as Error).message}`, messageKind: 'error' } as Partial<AccountsState>);
+  }
+}
+
+async function performDelete(ctx: TabContext<AccountsState>, alias: string, idx: number): Promise<void> {
+  try {
+    const result = await ctx.client.removeAccount(alias);
+    if (result?.ok) {
+      const next = await refreshAccounts(ctx, false);
+      const newIdx = Math.min(idx, Math.max(0, next.accounts.length - 1));
+      ctx.setState({ ...next, selectedIdx: newIdx, message: `Removed "${alias}".`, messageKind: 'success' } as Partial<AccountsState>);
+    } else {
+      ctx.setState({ message: `Failed to remove "${alias}".`, messageKind: 'error', mode: 'normal' } as Partial<AccountsState>);
+    }
+  } catch (e) {
+    ctx.setState({ message: `Delete failed: ${(e as Error).message}`, messageKind: 'error', mode: 'normal' } as Partial<AccountsState>);
+  }
+}
+
+async function performRename(ctx: TabContext<AccountsState>, oldAlias: string, newAlias: string): Promise<void> {
+  if (!newAlias || !/^[a-zA-Z0-9._-]+$/.test(newAlias)) {
+    ctx.setState({ message: 'Invalid alias — use letters, numbers, dot, dash, underscore.', messageKind: 'error', editBuffer: null } as Partial<AccountsState>);
+    return;
+  }
+  if (oldAlias === newAlias) {
+    ctx.setState({ message: null, messageKind: null, editBuffer: null } as Partial<AccountsState>);
+    return;
+  }
+  try {
+    const result = await ctx.client.renameAccount(oldAlias, newAlias);
+    if (result?.ok) {
+      const next = await refreshAccounts(ctx, false);
+      ctx.setState({ ...next, message: `Renamed "${oldAlias}" → "${newAlias}".`, messageKind: 'success', editBuffer: null } as Partial<AccountsState>);
+    } else {
+      ctx.setState({ message: `Rename failed.`, messageKind: 'error', editBuffer: null } as Partial<AccountsState>);
+    }
+  } catch (e) {
+    ctx.setState({ message: `Rename failed: ${(e as Error).message}`, messageKind: 'error', editBuffer: null } as Partial<AccountsState>);
   }
 }
 

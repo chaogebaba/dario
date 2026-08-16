@@ -113,6 +113,29 @@ export async function removeAccount(alias: string): Promise<boolean> {
   }
 }
 
+/**
+ * Rename an account alias: reads the old account, writes it under the new
+ * alias, then removes the old file. Fails if the old alias doesn't exist or
+ * the new alias is invalid / already taken.
+ */
+export async function renameAccount(oldAlias: string, newAlias: string): Promise<boolean> {
+  const oldPath = safeAliasPath(oldAlias);
+  const newPath = safeAliasPath(newAlias);
+  if (!oldPath || !newPath) return false;
+  if (oldPath === newPath) return true; // no-op
+  try {
+    const raw = await readFile(oldPath, 'utf-8');
+    const creds = JSON.parse(raw) as AccountCredentials;
+    creds.alias = newAlias;
+    await ensureDir();
+    await durableWriteFile(newPath, JSON.stringify(creds, null, 2), 0o600);
+    await unlink(oldPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Detect deviceId + accountUuid from an installed Claude Code. */
 export async function detectClaudeIdentity(): Promise<{ deviceId: string; accountUuid: string } | null> {
   const paths = [

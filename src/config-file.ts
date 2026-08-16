@@ -162,6 +162,13 @@ export interface DarioConfig {
   egressProxy?: string | null;
 
   /**
+   * API key for authenticating inbound requests to the proxy. Same as
+   * setting `DARIO_API_KEY` in the environment but persisted in the
+   * config file. Precedence: env `DARIO_API_KEY` > config file > none.
+   */
+  apiKey?: string | null;
+
+  /**
    * Endpoint asked "what address do you see?" to verify the egress proxy
    * is really carrying traffic. Empty/unset uses Cloudflare's cdn-cgi
    * trace. Overridden by `DARIO_EGRESS_IP_URL`.
@@ -237,6 +244,7 @@ export function defaultConfig(): DarioConfig {
     preserveOrchestrationTags: false,
     logFile: null,
     egressProxy: null,
+    apiKey: null,
     egressIpUrl: null,
     overageGuard: {
       enabled: true,

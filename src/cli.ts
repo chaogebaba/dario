@@ -731,6 +731,15 @@ async function proxy() {
   // to start rather than rely on the operator to read the startup banner.
   // Escape hatch: --unsafe-no-auth for the rare "I know what I'm doing"
   // case (local-trusted LAN, temporary debug, etc.). dario#74.
+  //
+  // Precedence: DARIO_API_KEY env > config file apiKey > none. Materialize
+  // the config-file value into the environment so the proxy's own env read
+  // picks it up without an explicit parameter threading. This is the same
+  // pattern pacing/thinkTime use (precedence resolution in cli.ts, consumer
+  // reads the final value downstream).
+  if (!process.env['DARIO_API_KEY'] && fileCfg.apiKey) {
+    process.env['DARIO_API_KEY'] = fileCfg.apiKey;
+  }
   const resolvedHost = host ?? process.env['DARIO_HOST'] ?? '127.0.0.1';
   const isLoopback = resolvedHost === '127.0.0.1'
     || resolvedHost === 'localhost'
@@ -1091,14 +1100,33 @@ async function accounts() {
   }
 
   if (sub === 'add') {
-    const alias = args[2];
+    let alias = args[2];
     if (!alias) {
-      console.error('');
-      console.error('  Usage: dario accounts add <alias>');
-      console.error('');
-      console.error('  <alias> is any label you want for the account (e.g. "work", "personal").');
-      console.error('');
-      process.exit(1);
+      // No alias provided — try to default to the Claude account's email
+      // from ~/.claude.json. The email is sanitized into a filesystem-safe
+      // alias (dots and hyphens are allowed; @ becomes a dot, other specials
+      // are dropped). If no email is discoverable, fall back to the old error.
+      const { readFile: rf } = await import('node:fs/promises');
+      try {
+        const raw = await rf(join(homeDir(), '.claude.json'), 'utf-8');
+        const data = JSON.parse(raw);
+        const email: string | undefined = data.oauthAccount?.emailAddress;
+        if (email && typeof email === 'string') {
+          // Sanitize: keep alphanumeric, dot, dash, underscore. Replace @ with dot.
+          alias = email.replace(/@/g, '.').replace(/[^a-zA-Z0-9._-]/g, '');
+        }
+      } catch { /* ignore — file missing or unreadable */ }
+      if (!alias) {
+        console.error('');
+        console.error('  Usage: dario accounts add <alias>');
+        console.error('');
+        console.error('  <alias> is any label you want for the account (e.g. "work", "personal").');
+        console.error('  Tip: if you have Claude Code installed, omit <alias> and dario will');
+        console.error('  use your Claude account email as the alias.');
+        console.error('');
+        process.exit(1);
+      }
+      console.log(`  No alias provided — using Claude account email: "${alias}"`);
     }
     if (!/^[a-zA-Z0-9._-]+$/.test(alias)) {
       console.error('[dario] Invalid alias. Use letters, numbers, dot, underscore, dash only.');
@@ -2353,12 +2381,14 @@ async function usage() {
  * `dario tui` (or `dario` with no args) — opens the interactive
  * terminal UI. v4 entry point.
  *
- * The TUI is a viewer/configurator; it expects a `dario proxy`
- * already running locally for live analytics. When no proxy is
- * reachable, each tab degrades gracefully — Status shows
- * "unreachable" with the start-command hint, Analytics + Hits show
- * the same. Accounts + Backends + Config don't need the proxy at
- * all (they read disk directly).
+ * The TUI is a viewer/configurator over a running proxy. If no proxy
+ * is reachable on the configured port at startup, the TUI auto-spawns
+ * `dario proxy` as a detached background process and waits (up to 15s)
+ * for it to become ready. This makes `dario` (no args) a single-command
+ * workflow — users no longer need a separate terminal for `dario proxy`.
+ *
+ * The spawned proxy is detached and unref'd: it outlives the TUI and
+ * keeps serving after the user quits with 'q'.
  *
  * Bails out early if stdin isn't a TTY — the TUI can't function in
  * a pipe / redirect. The error message points at `dario proxy` (the
@@ -2375,17 +2405,72 @@ async function tui() {
     console.error('  or `dario --no-tui` to print help instead.');
     process.exit(1);
   }
+  const { loadConfig } = await import('./config-file.js');
+  const fileResult = loadConfig();
+  const fileCfg = fileResult.config;
   const portArg = args.find((a) => a.startsWith('--port='));
-  const port = portArg ? parseInt(portArg.split('=')[1]!, 10) : 3456;
+  const portFromEnv = process.env['DARIO_PORT'] ? parseInt(process.env['DARIO_PORT']!, 10) : undefined;
+  const port = (portArg ? parseInt(portArg.split('=')[1]!, 10) : undefined) ?? portFromEnv ?? fileCfg.port ?? 3456;
   const apiKeyArg = args.find((a) => a.startsWith('--api-key='));
   const apiKey = apiKeyArg
     ? apiKeyArg.split('=')[1]
-    : (process.env['DARIO_API_KEY'] || undefined);
+    : (process.env['DARIO_API_KEY'] || fileCfg.apiKey || undefined);
+
+  const proxyUrl = `http://127.0.0.1:${port}`;
+
+  // Auto-spawn the proxy if it isn't already running. The TUI is a viewer
+  // over the proxy's state — without one, the Status tab shows "unreachable"
+  // and Analytics/Hits are empty. Spawning here means `dario` (no args) is a
+  // single-command workflow: users no longer need a separate terminal for
+  // `dario proxy`. The child is detached + unref'd so it outlives the TUI
+  // and keeps serving after the user quits with 'q'.
+  const { spawn } = await import('node:child_process');
+  let spawnedProxy = false;
+  const isProxyReachable = async (): Promise<boolean> => {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 2000);
+      const res = await fetch(proxyUrl + '/health', { signal: ctl.signal });
+      clearTimeout(t);
+      // Any HTTP response — even a 503 — means a proxy is running.
+      void res;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (!(await isProxyReachable())) {
+    // Build argv for the child proxy. Pass --port only if the user overrode it
+    // (otherwise the child reads the same config file we just read).
+    const childArgs = ['proxy'];
+    if (portArg) childArgs.push(portArg);
+    // Forward the API key so the child proxy starts with the same credential gate.
+    if (apiKey) childArgs.push(`--api-key=${apiKey}`);
+
+    const child = spawn(process.argv[0]!, [process.argv[1]!, ...childArgs], {
+      stdio: 'ignore',
+      detached: true,
+      env: { ...process.env, DARIO_TUI_SPAWNED: '1' },
+    });
+    child.unref();
+    spawnedProxy = true;
+
+    // Wait up to 15s for the proxy to become reachable. The first startup
+    // may be slow (SOCKS5 bridge + egress IP check + template capture).
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (await isProxyReachable()) break;
+    }
+  }
+
   const { startTuiApp } = await import('./tui/tui-app.js');
   await startTuiApp({
     version: pkgVersion(),
-    proxyUrl: `http://127.0.0.1:${port}`,
+    proxyUrl,
     apiKey,
+    spawnedProxy,
   });
 }
 

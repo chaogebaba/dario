@@ -18,7 +18,7 @@ import { AccountPool, computeStickyKey, parseRateLimits, modelFamily, isInAuthCo
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
 import { notify as osNotify } from './notify.js';
-import { loadAllAccounts, loadAccount, saveAccount, refreshAccountToken, resyncLoginFromCredentialsIfStale, ensureLoginCredentialsInPool, mirrorLoginToCredentials } from './accounts.js';
+import { loadAllAccounts, loadAccount, saveAccount, refreshAccountToken, resyncLoginFromCredentialsIfStale, ensureLoginCredentialsInPool, mirrorLoginToCredentials, removeAccount as removeAccountFromDisk, renameAccount as renameAccountOnDisk } from './accounts.js';
 import { handleAdminRequest, type AdminAccountLive, type AdminAuditEvent } from './admin-api.js';
 import { createTokenBucket } from './rate-limit.js';
 import { getOpenAIBackend, isOpenAIModel, forwardToOpenAI, type BackendCredentials } from './openai-backend.js';
@@ -2270,6 +2270,71 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // Pool status endpoint — shows loaded accounts, headroom, and the
     // account that would be selected next. Read-only; mutation flows through
     // the `dario accounts` CLI, not HTTP.
+    //
+    // POST /pool/reconcile — hot-reload accounts from disk without restart.
+    // The TUI calls this after `dario accounts add/remove` in another terminal
+    // so the running proxy picks up account changes immediately. Same trust
+    // model as /health: loopback-only, no admin token required — it reads
+    // disk state, never writes credentials. POST to avoid accidental triggers
+    // from browser pre-fetches or monitoring probes.
+    if (urlPath === '/pool/reconcile' && req.method === 'POST') {
+      try {
+        const size = reconcilePoolAccounts(pool, await loadAllAccounts());
+        if (verbose) console.log(`[dario] pool reconciled from TUI — ${size} account${size === 1 ? '' : 's'}`);
+        if (size > 0) retryModelCatalogNow(catalogDeps);
+        res.writeHead(200, JSON_HEADERS);
+        res.end(JSON.stringify({ ok: true, accounts: size }));
+      } catch (err) {
+        res.writeHead(500, JSON_HEADERS);
+        res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+      }
+      return;
+    }
+
+    // DELETE /accounts/<alias> — remove an account from disk + reconcile the
+    // pool. Loopback-only (same trust model as /pool/reconcile).
+    if (urlPath.startsWith('/accounts/') && req.method === 'DELETE') {
+      const alias = decodeURIComponent(urlPath.slice('/accounts/'.length).split('/')[0]!);
+      if (!alias) {
+        res.writeHead(400, JSON_HEADERS);
+        res.end(JSON.stringify({ ok: false, error: 'missing alias' }));
+        return;
+      }
+      const removed = await removeAccountFromDisk(alias);
+      if (removed) {
+        reconcilePoolAccounts(pool, await loadAllAccounts());
+        if (verbose) console.log(`[dario] account "${alias}" removed via TUI`);
+      }
+      res.writeHead(removed ? 200 : 404, JSON_HEADERS);
+      res.end(JSON.stringify({ ok: removed, alias }));
+      return;
+    }
+
+    // POST /accounts/<alias>/rename  { newAlias }
+    if (urlPath.match(/^\/accounts\/[^/]+\/rename$/) && req.method === 'POST') {
+      const alias = decodeURIComponent(urlPath.split('/')[2]!);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      let newAlias = '';
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+        newAlias = typeof body.newAlias === 'string' ? body.newAlias.trim() : '';
+      } catch { /* empty */ }
+      if (!newAlias || !/^[a-zA-Z0-9._-]+$/.test(newAlias)) {
+        res.writeHead(400, JSON_HEADERS);
+        res.end(JSON.stringify({ ok: false, error: 'invalid or missing newAlias' }));
+        return;
+      }
+      const renamed = await renameAccountOnDisk(alias, newAlias);
+      if (renamed) {
+        reconcilePoolAccounts(pool, await loadAllAccounts());
+        if (verbose) console.log(`[dario] account "${alias}" renamed to "${newAlias}" via TUI`);
+      }
+      res.writeHead(renamed ? 200 : 404, JSON_HEADERS);
+      res.end(JSON.stringify({ ok: renamed, oldAlias: alias, newAlias }));
+      return;
+    }
+
     if (urlPath === '/accounts' && req.method === 'GET') {
       const now = Date.now();
       const accounts = pool.all().map(a => {

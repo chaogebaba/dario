@@ -58,6 +58,8 @@ export interface TuiAppOpts {
   apiKey?: string;
   /** dario package version, displayed in the header. */
   version: string;
+  /** Whether the TUI auto-spawned a proxy child process. */
+  spawnedProxy?: boolean;
 }
 
 export function startTuiApp(opts: TuiAppOpts): Promise<void> {

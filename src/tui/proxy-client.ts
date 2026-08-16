@@ -236,6 +236,103 @@ export class ProxyClient {
     if (this.apiKey) h['x-api-key'] = this.apiKey;
     return h;
   }
+
+  /**
+   * POST a JSON body and return the parsed response. Rejects on non-2xx,
+   * network failure, parse error, or timeout.
+   */
+  private postJson<T = unknown>(path: string, body: unknown = {}): Promise<T> {
+    const url = new URL(this.baseUrl + path);
+    const payload = JSON.stringify(body);
+    return new Promise<T>((resolve, reject) => {
+      const req = httpRequest({
+        hostname: url.hostname,
+        port: url.port || 80,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: { ...this.headers(), 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(payload)) },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf-8');
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 200)}`));
+            return;
+          }
+          try { resolve(JSON.parse(raw) as T); }
+          catch (e) { reject(new Error(`JSON parse: ${(e as Error).message}`)); }
+        });
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.setTimeout(this.timeoutMs, () => {
+        req.destroy(new Error(`timeout after ${this.timeoutMs}ms`));
+      });
+      req.write(payload);
+      req.end();
+    });
+  }
+
+  /**
+   * DELETE a resource. Rejects on network failure or timeout.
+   */
+  private deleteJson<T = unknown>(path: string): Promise<T> {
+    const url = new URL(this.baseUrl + path);
+    return new Promise<T>((resolve, reject) => {
+      const req = httpRequest({
+        hostname: url.hostname,
+        port: url.port || 80,
+        path: url.pathname + url.search,
+        method: 'DELETE',
+        headers: this.headers(),
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf-8');
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 200)}`));
+            return;
+          }
+          try { resolve(JSON.parse(raw) as T); }
+          catch (e) { reject(new Error(`JSON parse: ${(e as Error).message}`)); }
+        });
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.setTimeout(this.timeoutMs, () => {
+        req.destroy(new Error(`timeout after ${this.timeoutMs}ms`));
+      });
+      req.end();
+    });
+  }
+
+  /**
+   * Hot-reload the pool from disk. Tells the proxy to re-read all accounts
+   * from ~/.dario/accounts/ and reconcile its in-memory pool. Returns the
+   * new account count. Null on any error.
+   */
+  async reconcilePool(): Promise<{ ok: boolean; accounts: number } | null> {
+    try { return await this.postJson<{ ok: boolean; accounts: number }>('/pool/reconcile'); }
+    catch { return null; }
+  }
+
+  /**
+   * Remove an account from disk + live pool. Returns whether it was removed.
+   */
+  async removeAccount(alias: string): Promise<{ ok: boolean; alias: string } | null> {
+    try { return await this.deleteJson<{ ok: boolean; alias: string }>(`/accounts/${encodeURIComponent(alias)}`); }
+    catch { return null; }
+  }
+
+  /**
+   * Rename an account alias on disk + live pool.
+   */
+  async renameAccount(oldAlias: string, newAlias: string): Promise<{ ok: boolean } | null> {
+    try { return await this.postJson<{ ok: boolean }>(`/accounts/${encodeURIComponent(oldAlias)}/rename`, { newAlias }); }
+    catch { return null; }
+  }
 }
 
 export interface OverageGuardStatus {
