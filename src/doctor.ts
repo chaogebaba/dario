@@ -972,7 +972,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
       // (v5.0): it confirms the sole account is eligible, not rejected.
       if (aliases.length >= 1) {
         try {
-          const { AccountPool } = await import('./pool.js');
+          const { AccountPool, ineligibleReason } = await import('./pool.js');
           const pool = new AccountPool();
           for (const acc of loaded) {
             pool.add(acc.alias, {
@@ -985,13 +985,42 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
           }
           const next = pool.select();
           const ps = pool.status();
-          checks.push({
-            status: 'info',
-            label: 'Pool routing',
-            detail: next
-              ? `next: ${next.alias}  (max-headroom select; ${ps.healthy}/${ps.accounts} healthy)`
-              : `no eligible account — all rejected or near-expiry (${ps.exhausted}/${ps.accounts} exhausted)`,
-          });
+          // `next` is whatever select() returns, and select() deliberately
+          // falls back to an ineligible account when nothing is eligible —
+          // the request path then sends a doomed request and 401s. Naming
+          // that account as "next" told the operator the pool was ready to
+          // serve when it was not, one line below a WARN saying the token had
+          // expired. Ask the router's own predicate instead.
+          const blocked = next ? ineligibleReason(next) : null;
+          if (next && !blocked) {
+            checks.push({
+              status: 'info',
+              label: 'Pool routing',
+              detail: `next: ${next.alias}  (max-headroom select; ${ps.healthy}/${ps.accounts} healthy)`,
+            });
+          } else {
+            const why = {
+              expired: 'its token has expired',
+              'auth-cooldown': 'upstream rejected its token and it is cooling down',
+              'rate-limited': 'its rate-limit window has not reset yet',
+            };
+            const fix = {
+              expired: ' Run `dario login`.',
+              'auth-cooldown': ' Run `dario login` if it persists.',
+              'rate-limited': '',
+            };
+            checks.push({
+              status: 'warn',
+              label: 'Pool routing',
+              detail: next
+                // Say what the proxy will actually do, not just that nothing
+                // is eligible: it still dispatches to this account and takes
+                // the 401, which is what shows up in the logs.
+                ? `no account can serve — ${next.alias} is next in line but ${why[blocked!]}`
+                  + ` (${ps.exhausted}/${ps.accounts} unavailable).${fix[blocked!]}`
+                : `no account can serve — all rejected, expired, or in cool-down (${ps.exhausted}/${ps.accounts} unavailable).`,
+            });
+          }
         } catch (err) {
           checks.push({ status: 'warn', label: 'Pool routing', detail: `check failed: ${(err as Error).message}` });
         }

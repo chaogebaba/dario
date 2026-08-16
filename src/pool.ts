@@ -130,6 +130,33 @@ export function isInAuthCooldown(account: PoolAccount, now: number = Date.now())
   return now - account.lastAuthFailureAt < cooldown;
 }
 
+/**
+ * Why `select()` would skip this account, or null when it is eligible.
+ *
+ * The predicate `select()` filters on, named and reusable so a diagnostic can
+ * ask the same question the router asks instead of re-deriving it. `dario
+ * doctor` reported `next: login` for a token that had expired three months
+ * earlier: select() falls back to an ineligible account rather than returning
+ * null, so the answer was accurate about select()'s return value and wrong
+ * about what would happen if you sent a request — which is the only thing the
+ * operator reading that line wanted to know.
+ *
+ * Order matters for the message, not for the outcome. An expired token is the
+ * cause an operator can act on, and it is upstream of the auth cool-down that
+ * the first doomed request provokes, so it is reported in preference to it.
+ */
+export type IneligibleReason = 'expired' | 'auth-cooldown' | 'rate-limited';
+
+export function ineligibleReason(
+  account: PoolAccount,
+  now: number = Date.now(),
+): IneligibleReason | null {
+  if (account.expiresAt <= now + 30_000) return 'expired';
+  if (isInAuthCooldown(account, now)) return 'auth-cooldown';
+  if (account.rateLimit.status === 'rejected') return 'rate-limited';
+  return null;
+}
+
 export interface PoolStatus {
   accounts: number;
   healthy: number;
@@ -457,11 +484,7 @@ export class AccountPool {
     const now = Date.now();
     const all = [...this.accounts.values()];
 
-    const eligible = all.filter(a =>
-      a.rateLimit.status !== 'rejected' &&
-      a.expiresAt > now + 30_000 &&
-      !isInAuthCooldown(a, now),
-    );
+    const eligible = all.filter(a => ineligibleReason(a, now) === null);
 
     if (eligible.length > 0) {
       if (this.strategy === 'fill-first') {
