@@ -2138,6 +2138,23 @@ async function upgrade() {
     projectRoot = dirname(realpathSync(join(dir, 'package.json')));
   } catch { /* no package.json to follow — dir is the best guess */ }
 
+  // A snapshot installed by scripts/install-bin.sh records where it came
+  // from. It has no .git and no src/, so without this it would look like
+  // a release install and get replaced by a registry copy.
+  try {
+    const src = (await rf(join(projectRoot, '.dario-source'), 'utf-8')).trim();
+    if (src) {
+      console.log('');
+      console.log(`  This dario was installed from a source checkout: ${src}`);
+      console.log('  `bun add --global` would install an unrelated release copy over it.');
+      console.log('  Refresh from the checkout instead:');
+      console.log('');
+      console.log(`    cd ${src} && git pull && bun run build && scripts/install-bin.sh`);
+      console.log('');
+      return;
+    }
+  } catch { /* not a snapshot install */ }
+
   if (existsSync(join(projectRoot, '.git')) || existsSync(join(projectRoot, 'src', 'cli.ts'))) {
     console.log('');
     console.log(`  This dario runs from a source checkout: ${projectRoot}`);

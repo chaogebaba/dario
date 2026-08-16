@@ -6,7 +6,7 @@ Every instruction in these docs is a `dario` command — `dario login`, `dario d
 scripts/install-bin.sh
 ```
 
-That writes a launcher to `~/.local/bin/dario` pointing at this checkout, and tells you whether that directory is on your PATH (with the line to add if it isn't). `scripts/install-systemd.sh` runs it for you, so installing the service gives you the command too.
+That copies the built output to `~/.local/lib/dario`, writes a launcher to `~/.local/bin/dario` pointing at the copy, and tells you whether that directory is on your PATH (with the line to add if it isn't). `scripts/install-systemd.sh` runs it for you, so installing the service gives you the command too.
 
 ```bash
 dario --version      # confirm it works
@@ -14,18 +14,29 @@ dario                # the TUI
 dario doctor         # health report
 ```
 
-Install somewhere else with `DARIO_BIN_DIR=/usr/local/bin scripts/install-bin.sh` — that one needs `sudo`, which is why the default is user-scope.
+Install elsewhere with `DARIO_BIN_DIR` / `DARIO_LIB_DIR`. `DARIO_BIN_DIR=/usr/local/bin` needs `sudo`, which is why the default is user-scope.
 
-## It points at the checkout, not a copy
+## The copy is the point
 
-Nothing is copied. The launcher `exec`s `bun <checkout>/dist/cli.js "$@"`, so `git pull && bun run build` is picked up on the next run with no reinstall. Move or delete the checkout and the command tells you so:
+`dist/` is often a symlink to somewhere else — a scratch volume, an external drive, a tmpfs — so build output stays off the main filesystem. A launcher that `exec`s through that symlink dies the moment the volume goes away:
 
 ```
-dario: /path/to/dario/dist/cli.js is missing — the checkout moved or was cleaned.
-Rebuild with: cd /path/to/dario && bun run build
+dario: /path/to/checkout/dist/cli.js is missing
 ```
 
-Re-run `scripts/install-bin.sh` from the new location to repoint it.
+So the default install copies `dist/` and `package.json` into `~/.local/lib/dario` and runs *that*. dario has zero runtime dependencies and `dist/` is a couple of megabytes, so the copy is cheap and the installed command depends on nothing but `$HOME` and Bun. Build wherever you like; the thing on your PATH stays put. The installer dereferences symlinks when copying and warns if any survive.
+
+The trade is that a rebuild isn't picked up automatically. After `git pull && bun run build`, re-run `scripts/install-bin.sh` to refresh.
+
+## `--link` for active development
+
+```bash
+scripts/install-bin.sh --link
+```
+
+Points the launcher straight at the checkout, so every rebuild is live with no reinstall. Right when you're changing code, wrong for anything whose build output lands on removable storage — that's the failure mode above.
+
+Switch back with a plain `scripts/install-bin.sh`.
 
 ## Why a wrapper and not a symlink
 
@@ -59,4 +70,17 @@ Shadowing is the related trap. If another `dario` sits earlier on PATH it keeps 
 scripts/install-bin.sh --uninstall
 ```
 
-Removes the launcher and nothing else — `~/.dario` (credentials, config, account pool) is untouched. `scripts/install-systemd.sh --purge` removes the launcher as well, since at that point you're asking for everything to go.
+Removes the launcher and the `~/.local/lib/dario` copy, and nothing else — `~/.dario` (credentials, config, account pool) is untouched. `scripts/install-systemd.sh --purge` removes them as well, since at that point you're asking for everything to go.
+
+## Upgrading
+
+`dario upgrade` shells out to `bun add --global`, which installs a release from the registry into Bun's global prefix — a different copy from the one you installed here. It detects that and points you at the right command instead:
+
+```
+This dario was installed from a source checkout: /path/to/dario
+Refresh from the checkout instead:
+
+  cd /path/to/dario && git pull && bun run build && scripts/install-bin.sh
+```
+
+Worth knowing why it bothers: if Bun's bin directory comes earlier on your PATH than `~/.local/bin`, a `bun add --global` would install a release copy that silently shadows yours, and every local change would look like it did nothing.

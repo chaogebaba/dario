@@ -35,7 +35,58 @@ fi
 
 run_installer() {
   local bindir="$1"; shift
-  DARIO_BIN_DIR="$bindir" bash "$INSTALLER" "$@" 2>&1
+  DARIO_BIN_DIR="$bindir" DARIO_LIB_DIR="$bindir/../lib" bash "$INSTALLER" "$@" 2>&1
+}
+
+# ======================================================================
+header 'snapshot — the installed command outlives the build volume'
+{
+  # The reason this mode is the default: dist/ is commonly a symlink to a
+  # scratch or external volume, and a launcher that execs through it dies
+  # the moment that volume goes away. Simulated here by building into a
+  # directory, symlinking dist/ at it, and then moving it aside.
+  FAKE_REPO="$SANDBOX/volrepo"
+  VOLUME="$SANDBOX/removable"
+  mkdir -p "$FAKE_REPO" "$VOLUME"
+  cp -RL "$SCRIPT_DIR/dist" "$VOLUME/dist"
+  cp "$SCRIPT_DIR/package.json" "$FAKE_REPO/package.json"
+  cp -R "$SCRIPT_DIR/scripts" "$FAKE_REPO/scripts"
+  ln -s "$VOLUME/dist" "$FAKE_REPO/dist"
+
+  BIN="$SANDBOX/vol/bin"
+  DARIO_BIN_DIR="$BIN" DARIO_LIB_DIR="$SANDBOX/vol/lib" \
+    bash "$FAKE_REPO/scripts/install-bin.sh" >/dev/null 2>&1
+  check 'installs from a repo whose dist/ is a symlink' \
+    "$(yn "$([ -x "$BIN/dario" ] && echo 0 || echo 1)")"
+
+  # The copy must be real files. A snapshot that copied the symlink
+  # instead of its contents looks identical until the volume disappears.
+  check 'the snapshot dereferenced the symlink' \
+    "$(yn "$([ -z "$(find "$SANDBOX/vol/lib" -type l)" ] && echo 0 || echo 1)")"
+  check 'nothing under the snapshot points back at the volume' \
+    "$(yn "$(grep -rl "$VOLUME" "$SANDBOX/vol/lib" "$BIN/dario" >/dev/null 2>&1 && echo 1 || echo 0)")"
+
+  ver="$("$BIN/dario" --version 2>/dev/null)"
+  check 'runs before the volume goes away' \
+    "$(yn "$(grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' <<<"$ver" && echo 0 || echo 1)")"
+
+  # Unplug.
+  mv "$VOLUME" "$VOLUME.gone"
+  check 'the checkout entry point is now unreachable' \
+    "$(yn "$([ ! -f "$FAKE_REPO/dist/cli.js" ] && echo 0 || echo 1)")"
+  ver="$("$BIN/dario" --version 2>/dev/null)"
+  check 'the command still runs with the volume gone' \
+    "$(yn "$(grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' <<<"$ver" && echo 0 || echo 1)")"
+  mv "$VOLUME.gone" "$VOLUME"
+
+  # --link is the opposite trade, and must actually differ.
+  BIN2="$SANDBOX/vollink/bin"
+  DARIO_BIN_DIR="$BIN2" DARIO_LIB_DIR="$SANDBOX/vollink/lib" \
+    bash "$FAKE_REPO/scripts/install-bin.sh" --link >/dev/null 2>&1
+  check '--link points the launcher at the checkout instead' \
+    "$(yn "$(grep -q "$FAKE_REPO/dist/cli.js" "$BIN2/dario" && echo 0 || echo 1)")"
+  check '--link writes no snapshot' \
+    "$(yn "$([ ! -d "$SANDBOX/vollink/lib" ] && echo 0 || echo 1)")"
 }
 
 # ======================================================================
