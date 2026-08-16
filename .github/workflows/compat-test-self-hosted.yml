@@ -88,7 +88,7 @@ jobs:
 
       - name: Install + build
         run: |
-          bun install --frozen-lockfile --no-audit --no-fund
+          bun install --frozen-lockfile
           bun run build
 
       - name: Start dario proxy (passthrough mode)

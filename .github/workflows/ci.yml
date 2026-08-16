@@ -105,7 +105,7 @@ jobs:
           # so exit code is 1 — that's not a regression we care about here.
           # The regression class this test guards against is "entrypoint
           # crashed before exec'ing the CLI" — detected by checking the
-          # CLI actually produced the doctor report (version + Node rows).
+          # CLI actually produced the doctor report (version + runtime rows).
           docker run --rm \
             --cap-drop=ALL \
             --security-opt=no-new-privileges:true \
@@ -115,7 +115,7 @@ jobs:
           echo '--- assertions ---'
           test -s /tmp/doctor-out.txt
           grep -q 'dario.*v[0-9]' /tmp/doctor-out.txt  # version row populated
-          grep -q 'Node.*v' /tmp/doctor-out.txt        # Node row present
+          grep -q 'Runtime' /tmp/doctor-out.txt        # runtime row present
           echo 'PASS'
 
       - name: 'no entrypoint restart-loop under cap_drop: ALL'

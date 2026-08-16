@@ -335,8 +335,13 @@ jobs:
         # (.github/drift-probe-deps) so the install is integrity-checked,
         # then merges into the root node_modules so the ESM probe script can
         # resolve it (NODE_PATH is ignored by `import`).
+        #
+        # --cwd, not --prefix: bun has no --prefix and does not reject it —
+        # it reinterprets the command as `bun add .github/drift-probe-deps`,
+        # which mutates the root package.json and leaves this directory
+        # without a node_modules for the copy below.
         run: |
-          bun install --frozen-lockfile --prefix .github/drift-probe-deps --no-audit --no-fund
+          bun install --frozen-lockfile --cwd .github/drift-probe-deps
           cp -r .github/drift-probe-deps/node_modules/. node_modules/
           bunx playwright install chromium --with-deps
 

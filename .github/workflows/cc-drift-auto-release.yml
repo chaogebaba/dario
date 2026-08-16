@@ -320,24 +320,23 @@ jobs:
       # build/smoke aborts everything — no release, no npm publish, no
       # half-shipped state.
 
-      - name: Set up Node
+      - name: Set up Bun
         if: steps.gate.outputs.proceed == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          bun-version: 1.4.0
 
-      - name: npm ci
+      - name: install
         if: steps.gate.outputs.proceed == 'true'
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: build
         if: steps.gate.outputs.proceed == 'true'
-        run: npm run build
+        run: bun run build
 
       - name: --help smoke
         if: steps.gate.outputs.proceed == 'true'
-        run: node dist/cli.js help
+        run: bun dist/cli.js help
 
       # ─── Build + push image FIRST, then announce (autodeploy race fix) ───
       # The host-side Hetzner dario-autodeploy.timer keys off the PUBLIC
@@ -511,10 +510,12 @@ jobs:
 
       - name: Node 24 for the tokenless publish
         # OIDC trusted publishing needs npm >= 11.5 — Node 24's bundled
-        # npm. The build above deliberately stays on Node 22 (bake
-        # fidelity); this swap changes only the npm CLIENT doing the
-        # publish — dist/ is already built and nothing after this step
-        # runs node (docker actions + gh CLI only).
+        # npm. The build above runs on Bun like the rest of the project;
+        # this swap changes only the npm CLIENT doing the publish — dist/
+        # is already built and nothing after this step runs node (docker
+        # actions + gh CLI only). npm is retained here and nowhere else:
+        # trusted publishing and SLSA provenance are npm-registry
+        # features with no Bun equivalent.
         if: steps.gate.outputs.proceed == 'true' && steps.gate.outputs.npm_published != 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

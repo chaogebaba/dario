@@ -80,7 +80,7 @@ jobs:
 
       - name: Install + build
         run: |
-          bun install --frozen-lockfile --no-audit --no-fund
+          bun install --frozen-lockfile
           bun run build
 
       - name: Pin OAuth credential to platform-dario canonical (sole-refresher)
