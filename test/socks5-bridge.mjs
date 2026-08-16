@@ -146,11 +146,32 @@ function startFakeSocks5(opts = {}) {
   return listen(server).then((port) => ({ port, state, server, close: () => close(server) }));
 }
 
-/** Speak HTTP CONNECT to the bridge; resolve with status line + tunnel socket. */
-function connectThroughBridge(bridgePort, target) {
+
+/**
+ * The bridge issues a per-process token so no other local process can
+ * relay through the operator's SOCKS5 proxy. Tests speak it like Bun's
+ * fetch does: Basic auth in the CONNECT request.
+ */
+let TOKEN_AUTH = null;
+function useBridge(bridge) {
+  const u = new URL(bridge.proxyUrl);
+  TOKEN_AUTH = 'Basic ' + Buffer.from(`${u.username}:${decodeURIComponent(u.password)}`).toString('base64');
+  return bridge;
+}
+
+/**
+ * Speak HTTP CONNECT to the bridge; resolve with status line + tunnel
+ * socket. `auth` defaults to the bridge's own token — omit it (pass null)
+ * to exercise the 407 path.
+ */
+function connectThroughBridge(bridgePort, target, auth = TOKEN_AUTH) {
   return new Promise((resolve, reject) => {
     const sock = netConnect({ host: '127.0.0.1', port: bridgePort }, () => {
-      sock.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
+      sock.write(
+        `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n`
+        + (auth ? `Proxy-Authorization: ${auth}\r\n` : '')
+        + '\r\n',
+      );
     });
     let head = '';
     const onData = (d) => {
@@ -180,7 +201,7 @@ header('socks5h — remote DNS sends the hostname, tunnel carries bytes');
 {
   const echo = await startEcho();
   const proxy = await startFakeSocks5({ forwardPort: echo.port });
-  const bridge = await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true });
+  const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true }));
 
   check('bridge binds loopback only', bridge.url.startsWith('http://127.0.0.1:'));
 
@@ -202,7 +223,7 @@ header('socks5 — local DNS resolves before the request');
 {
   const echo = await startEcho();
   const proxy = await startFakeSocks5({ forwardPort: echo.port });
-  const bridge = await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: false });
+  const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: false }));
 
   const { status, sock } = await connectThroughBridge(bridge.port, 'localhost:443');
   check('CONNECT returns 200', status.includes('200'));
@@ -218,7 +239,7 @@ header('socks5h — an IP destination skips DNS entirely');
 {
   const echo = await startEcho();
   const proxy = await startFakeSocks5({ forwardPort: echo.port });
-  const bridge = await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true });
+  const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true }));
 
   const { sock } = await connectThroughBridge(bridge.port, '203.0.113.7:8443');
   check('IPv4 destination sent as atyp 1', proxy.state.lastTarget?.atyp === 0x01);
@@ -236,10 +257,10 @@ header('RFC 1929 username/password authentication');
     forwardPort: echo.port, requireAuth: true,
     credentials: { username: 'alice', password: 's@cret' },
   });
-  const bridge = await startSocks5Bridge({
+  const bridge = useBridge(await startSocks5Bridge({
     host: '127.0.0.1', port: proxy.port, remoteDns: true,
     username: 'alice', password: 's@cret',
-  });
+  }));
 
   const { status, sock } = await connectThroughBridge(bridge.port, 'api.anthropic.com:443');
   check('authenticated CONNECT returns 200', status.includes('200'));
@@ -259,10 +280,10 @@ header('auth failures and refusals surface as 502, not a hang');
     forwardPort: echo.port, requireAuth: true,
     credentials: { username: 'alice', password: 'right' },
   });
-  const b1 = await startSocks5Bridge({
+  const b1 = useBridge(await startSocks5Bridge({
     host: '127.0.0.1', port: badCreds.port, remoteDns: true,
     username: 'alice', password: 'wrong',
-  });
+  }));
   const r1 = await connectThroughBridge(b1.port, 'api.anthropic.com:443');
   check('wrong password → 502', r1.status.includes('502'));
   check('502 body explains the rejection', r1.rest.toString().includes('rejected the supplied username/password'));
@@ -271,7 +292,7 @@ header('auth failures and refusals surface as 502, not a hang');
 
   // Proxy demands auth, dario has no credentials configured.
   const needsAuth = await startFakeSocks5({ forwardPort: echo.port, requireAuth: true, credentials: {} });
-  const b2 = await startSocks5Bridge({ host: '127.0.0.1', port: needsAuth.port, remoteDns: true });
+  const b2 = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: needsAuth.port, remoteDns: true }));
   const r2 = await connectThroughBridge(b2.port, 'api.anthropic.com:443');
   check('missing credentials → 502', r2.status.includes('502'));
   check('502 tells the user to add credentials', r2.rest.toString().includes('socks5h://user:pass@'));
@@ -279,7 +300,7 @@ header('auth failures and refusals surface as 502, not a hang');
 
   // Upstream refuses the CONNECT (reply 0x05, connection refused).
   const refuses = await startFakeSocks5({ forwardPort: echo.port, failWith: 0x05 });
-  const b3 = await startSocks5Bridge({ host: '127.0.0.1', port: refuses.port, remoteDns: true });
+  const b3 = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: refuses.port, remoteDns: true }));
   const r3 = await connectThroughBridge(b3.port, 'api.anthropic.com:443');
   check('refused CONNECT → 502', r3.status.includes('502'));
   check('502 names the SOCKS reply code', r3.rest.toString().includes('connection refused'));
@@ -293,7 +314,7 @@ header('bridge contract — CONNECT only, loopback only');
 {
   const echo = await startEcho();
   const proxy = await startFakeSocks5({ forwardPort: echo.port });
-  const bridge = await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true });
+  const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true }));
 
   // Absolute-form GET (what a plain-HTTP proxy request looks like).
   const res = await fetch(`${bridge.url}/`, { method: 'GET' }).catch((e) => e);
@@ -304,6 +325,30 @@ header('bridge contract — CONNECT only, loopback only');
   check('CONNECT without a port → 400', bad.status.includes('400'));
   bad.sock.destroy();
 
+  // Loopback is not private: without a credential every other process
+  // and user on the box could relay through the operator's SOCKS5 proxy,
+  // which is metered, paid, and identity-bearing.
+  const noAuth = await connectThroughBridge(bridge.port, 'api.anthropic.com:443', null);
+  check('CONNECT without the token → 407', noAuth.status.includes('407'), noAuth.status);
+  noAuth.sock.destroy();
+
+  const wrongAuth = await connectThroughBridge(
+    bridge.port, 'api.anthropic.com:443',
+    'Basic ' + Buffer.from('dario:wrong-token').toString('base64'),
+  );
+  check('CONNECT with a wrong token → 407', wrongAuth.status.includes('407'), wrongAuth.status);
+  wrongAuth.sock.destroy();
+
+  // A wrong token of the RIGHT length must not slip through a sloppy
+  // comparison, and must not throw inside timingSafeEqual either.
+  const rightLength = TOKEN_AUTH.slice(0, -4) + (TOKEN_AUTH.endsWith('AAAA') ? 'BBBB' : 'AAAA');
+  const sameLen = await connectThroughBridge(bridge.port, 'api.anthropic.com:443', rightLength);
+  check('same-length wrong token → 407', sameLen.status.includes('407'), sameLen.status);
+  sameLen.sock.destroy();
+
+  check('the loggable url carries no token', !bridge.url.includes('@') && !bridge.url.includes('dario:'));
+  check('the proxy url carries the token', /^http:\/\/dario:[^@]+@127\.0\.0\.1:\d+$/.test(bridge.proxyUrl), bridge.proxyUrl);
+
   await bridge.close(); await proxy.close(); await echo.close();
 }
 
@@ -311,7 +356,7 @@ header('bridge contract — CONNECT only, loopback only');
 header('unreachable proxy fails fast rather than hanging');
 {
   // Port 1 on loopback: nothing listens, connection refused immediately.
-  const bridge = await startSocks5Bridge({ host: '127.0.0.1', port: 1, remoteDns: true, timeoutMs: 2000 });
+  const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: 1, remoteDns: true, timeoutMs: 2000 }));
   const r = await connectThroughBridge(bridge.port, 'api.anthropic.com:443');
   check('dead proxy → 502', r.status.includes('502'));
   r.sock.destroy();
@@ -323,7 +368,7 @@ header('tunnel teardown and buffering');
 {
   const echo = await startEcho();
   const proxy = await startFakeSocks5({ forwardPort: echo.port });
-  const bridge = await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true });
+  const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true }));
 
   // The client half closing must take the SOCKS half with it. Without
   // that, every abandoned tunnel leaks an fd until the proxy times it
@@ -359,7 +404,7 @@ header('tunnel teardown and buffering');
   });
   const blasterPort = await listen(blaster);
   const bulkProxy = await startFakeSocks5({ forwardPort: blasterPort });
-  const bulkBridge = await startSocks5Bridge({ host: '127.0.0.1', port: bulkProxy.port, remoteDns: true });
+  const bulkBridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: bulkProxy.port, remoteDns: true }));
 
   global.gc?.();
   const rssBefore = process.memoryUsage().rss;

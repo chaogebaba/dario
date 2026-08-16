@@ -64,6 +64,8 @@ Bun fetch --CONNECT--> 127.0.0.1:ephemeral --SOCKS5--> proxy --> origin
 
 The bridge only moves already-encrypted bytes. TLS still originates in Bun and terminates at the origin, so the fingerprint is unchanged. The listener binds `127.0.0.1` on an ephemeral port and is never exposed off-host.
 
+Loopback is not the same as private, though. Without a credential, any other process — or any other user — on the machine could tunnel through your SOCKS5 proxy, which is metered, paid, and identity-bearing. So the bridge mints a random token per dario process and answers `407` to a CONNECT that doesn't carry it; Bun's `fetch` sends it as Basic auth from the userinfo in the proxy URL. The token exists only in memory and is never logged — the startup banner prints the bare `http://127.0.0.1:<port>`.
+
 dario's startup banner confirms when it's active:
 
 ```

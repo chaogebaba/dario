@@ -16,9 +16,11 @@
 //   |<-------------------------- TLS session -------------------------->|
 //
 // The bridge binds 127.0.0.1 on an ephemeral port and is never exposed
-// off-host. It carries no credentials of its own; SOCKS5 username and
-// password (RFC 1929) are held in memory and written only to the proxy
-// socket during the handshake.
+// off-host, but loopback is not the same as private: without a
+// credential any other local process or user could relay through the
+// operator's SOCKS5 proxy. So it mints a per-process token and answers
+// 407 without it. SOCKS5 username and password (RFC 1929) are held in
+// memory and written only to the proxy socket during the handshake.
 //
 // socks5h resolves the destination hostname at the proxy (no local DNS
 // leak) and is the right default for egress routing. socks5 resolves
@@ -26,6 +28,7 @@
 // resolver — supported because curl draws the same distinction.
 
 import { createServer as createHttpServer, type Server } from 'node:http';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import { pipeline, type Duplex } from 'node:stream';
@@ -60,9 +63,14 @@ export interface Socks5BridgeOptions {
 export interface Socks5Bridge {
   /** Loopback port the bridge is listening on. */
   port: number;
-  /** `http://127.0.0.1:<port>` — pass to Bun fetch's `proxy` option. */
+  /** `http://127.0.0.1:<port>` — safe to log, carries no token. */
   url: string;
-  /** Stop accepting and drop the listener. Idempotent. */
+  /**
+   * `http://dario:<token>@127.0.0.1:<port>` — what fetch's `proxy` option
+   * gets. Never log this.
+   */
+  proxyUrl: string;
+  /** Stop accepting, drop live tunnels, and close the listener. */
   close(): Promise<void>;
 }
 
@@ -292,6 +300,20 @@ async function socks5Connect(
  * down. Messages never include credentials.
  */
 export function startSocks5Bridge(opts: Socks5BridgeOptions): Promise<Socks5Bridge> {
+  // Loopback-only is not the same as private. Without a credential, every
+  // other process and every other user on the box could tunnel through
+  // the operator's SOCKS5 proxy — metered, paid, and identity-bearing.
+  // Bun's fetch sends Proxy-Authorization for userinfo in the proxy URL
+  // (verified), so a per-process token costs nothing and closes it.
+  const token = randomBytes(24).toString('base64url');
+  const expected = Buffer.from(`Basic ${Buffer.from(`dario:${token}`).toString('base64')}`);
+  const authorized = (header: string | undefined): boolean => {
+    if (!header) return false;
+    const got = Buffer.from(header);
+    // Length differs → not ours, and timingSafeEqual would throw.
+    return got.length === expected.length && timingSafeEqual(got, expected);
+  };
+
   // Bun's fetch only issues CONNECT for https: targets. dario's upstreams
   // are all https:, so an absolute-form request here means something is
   // misconfigured — answer 501 rather than silently mishandling it.
@@ -328,6 +350,14 @@ export function startSocks5Bridge(opts: Socks5BridgeOptions): Promise<Socks5Brid
     clientSocket.on('error', teardown);
     clientSocket.on('close', teardown);
     tunnels.add(clientSocket);
+
+    if (!authorized(req.headers['proxy-authorization'])) {
+      clientSocket.end(
+        'HTTP/1.1 407 Proxy Authentication Required\r\n' +
+        'Proxy-Authenticate: Basic realm="dario"\r\n\r\n',
+      );
+      return;
+    }
 
     const raw = req.url ?? '';
     const idx = raw.lastIndexOf(':');
@@ -382,6 +412,7 @@ export function startSocks5Bridge(opts: Socks5BridgeOptions): Promise<Socks5Brid
       resolve({
         port: addr.port,
         url: `http://127.0.0.1:${addr.port}`,
+        proxyUrl: `http://dario:${token}@127.0.0.1:${addr.port}`,
         close: () => new Promise<void>((done) => {
           for (const t of tunnels) t.destroy();
           tunnels.clear();

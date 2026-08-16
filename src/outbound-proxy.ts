@@ -227,6 +227,8 @@ export async function installEgressProxy(config: OutboundProxyConfig): Promise<S
     return null;
   }
   const bridge = await startSocks5Bridge(config.socks);
-  installOutboundProxyWrapper(config, bridge.url);
+  // proxyUrl, not url: the bridge requires a per-process token so no
+  // other local process can relay through the operator's SOCKS5 proxy.
+  installOutboundProxyWrapper(config, bridge.proxyUrl);
   return bridge;
 }
