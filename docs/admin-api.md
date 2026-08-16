@@ -102,6 +102,14 @@ representative `claim` (e.g. `five_hour`), routing `status`,
 equivalent of the proxy-key-gated `GET /accounts` pool view; a headless
 operator needs only the admin token to watch headroom.
 
+Read `measured_at` before you trust `util5h` / `util7d`. dario learns
+utilization only from the rate-limit headers on responses it proxies, so an
+account it has not served yet reports `0` meaning "not looked", not "quota
+untouched" — `measured_at: 0` says so, and any other value is the unix-ms
+timestamp of the reading. A proxy that has just restarted reports zeros for
+every seat until traffic flows. `dario doctor --usage` takes a reading on
+demand.
+
 ## Bulk re-auth, in one round-trip
 
 For a pool with several accounts, the round-trip of "notice one's broken,
