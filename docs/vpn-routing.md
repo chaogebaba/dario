@@ -17,28 +17,58 @@ dario proxy
 
 This covers every dario use case. No flags needed. The tradeoff is that *all* traffic from the machine is now tunneled — fine if you wanted that anyway, less ideal if you only want dario egress to be private.
 
-## Option B — Per-process via `--upstream-proxy=` (v3.35.0+)
+## Option B — Per-process via `--egress-proxy=` (v3.35.0+, SOCKS5 in v5.6)
 
-Routes only dario's outbound through an HTTP/HTTPS proxy. The rest of your system stays on the default route.
+Routes only dario's outbound through a proxy. The rest of your system stays on the default route.
 
 ```bash
-# Mullvad's HTTP proxy endpoint (Mullvad SOCKS5 also exists; see notes below)
-dario proxy --upstream-proxy=http://10.64.0.1:80
+# Mullvad's HTTP proxy endpoint
+dario proxy --egress-proxy=http://10.64.0.1:80
+
+# SOCKS5 with the destination resolved at the proxy (no local DNS leak)
+dario proxy --egress-proxy=socks5h://127.0.0.1:1080
 
 # Or with credentials embedded:
-dario proxy --upstream-proxy=http://user:pass@proxy.example.com:8080
+dario proxy --egress-proxy=socks5h://user:pass@proxy.example.com:1080
 
 # Or via env var:
-DARIO_UPSTREAM_PROXY=http://127.0.0.1:8118 dario proxy
+DARIO_EGRESS_PROXY=http://127.0.0.1:8118 dario proxy
 
-# Short alias is also supported:
+# Older spellings still work:
 dario proxy --via=http://127.0.0.1:8118
+DARIO_UPSTREAM_PROXY=http://127.0.0.1:8118 dario proxy
 ```
+
+Set it once in `~/.dario/config.json` (or the TUI's Config tab, `Egress proxy` row) to avoid passing it every time:
+
+```json
+{ "egressProxy": "socks5h://127.0.0.1:1080" }
+```
+
+Precedence is the usual chain: `--egress-proxy` > `DARIO_EGRESS_PROXY` > `DARIO_UPSTREAM_PROXY` > config file. An explicitly empty value (`--egress-proxy=`) routes direct, overriding a lower layer.
+
+### socks5h vs socks5
+
+`socks5h://` resolves the destination hostname **at the proxy**. `socks5://` resolves it **locally** and sends an address literal, which leaks the lookup to your local resolver even though the connection itself is tunneled. Prefer `socks5h://` unless you specifically need local resolution. This is the same distinction curl draws between `--socks5-hostname` and `--socks5`.
+
+SOCKS4/4a are rejected: no authentication, no IPv6, no remote DNS.
+
+### How SOCKS5 is implemented
+
+Bun's `fetch` only understands `http:`/`https:` proxy URLs. Rather than move the upstream request onto Node's HTTP stack — which would change the TLS ClientHello dario exists to preserve — dario starts an in-process CONNECT bridge on loopback and points fetch at that:
+
+```
+Bun fetch --CONNECT--> 127.0.0.1:ephemeral --SOCKS5--> proxy --> origin
+|<--------------------------- TLS session --------------------------->|
+```
+
+The bridge only moves already-encrypted bytes. TLS still originates in Bun and terminates at the origin, so the fingerprint is unchanged. The listener binds `127.0.0.1` on an ephemeral port and is never exposed off-host.
 
 dario's startup banner confirms when it's active:
 
 ```
-[dario] Outbound proxy: http://10.64.0.1:80/ (all upstream fetches routed; localhost bypasses)
+[dario] SOCKS5 bridge listening on http://127.0.0.1:38471 (loopback only)
+[dario] Egress proxy: socks5h://127.0.0.1:1080 (all upstream fetches routed; localhost bypasses, DNS resolved at proxy)
 ```
 
 `dario doctor` surfaces the same:
@@ -61,8 +91,8 @@ dario's startup banner confirms when it's active:
 
 ### Constraints
 
-- **Bun runtime required.** Bun's fetch implements the `proxy` option natively. Node's built-in fetch ignores it silently — to avoid a false-success failure mode where the flag appears to work while requests actually go direct, dario refuses to start with `--upstream-proxy` unless running under Bun. dario auto-relaunches under Bun when available; `bun run dario proxy --upstream-proxy=...` works directly.
-- **HTTP/HTTPS schemes only.** SOCKS5 is not currently supported by Bun 1.3.x's fetch (`UnsupportedProxyProtocol`). If your VPN provider only exposes SOCKS5, run a local SOCKS-to-HTTP bridge such as `privoxy` with `forward-socks5 / 127.0.0.1:1080` and point dario at the privoxy HTTP side.
+- **Bun runtime required.** Bun's fetch implements the `proxy` option natively. Node's built-in fetch ignores it silently — to avoid a false-success failure mode where the flag appears to work while requests actually go direct, dario refuses to start with `--egress-proxy` unless running under Bun.
+- **SOCKS4/4a are rejected.** No authentication, no IPv6, no remote DNS. Use `socks5h://`. A `privoxy` bridge (`forward-socks5 / 127.0.0.1:1080`) still works if you prefer to terminate SOCKS outside dario, but it is no longer necessary.
 - **TLS terminates end-to-end at Anthropic.** The proxy sees only the destination hostname (via SNI) and byte timing in CONNECT mode — not your request bodies. Your `bun-match` BoringSSL ClientHello is preserved.
 - **Localhost calls bypass the proxy.** Anything dario fetches at `localhost`, `127.0.0.1`, `::1`, or any `*.localhost` host goes direct (so self-tests and inbound aren't accidentally tunneled).
 

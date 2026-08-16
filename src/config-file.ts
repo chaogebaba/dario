@@ -153,6 +153,14 @@ export interface DarioConfig {
   logFile?: string | null;
 
   /**
+   * Egress proxy for all upstream fetches — `http://`, `https://`,
+   * `socks5h://` (DNS resolved at the proxy) or `socks5://` (DNS
+   * resolved locally). Credentials may be embedded in the URL.
+   * Overridden by `--egress-proxy` and `DARIO_EGRESS_PROXY`.
+   */
+  egressProxy?: string | null;
+
+  /**
    * Overage-guard — halt the proxy on the first response carrying
    * `representative-claim: overage`. Subscribers should never see a
    * single overage hit during normal operation; one means something
@@ -220,6 +228,7 @@ export function defaultConfig(): DarioConfig {
     systemPrompt: null,
     preserveOrchestrationTags: false,
     logFile: null,
+    egressProxy: null,
     overageGuard: {
       enabled: true,
       behavior: 'halt',
@@ -505,6 +514,9 @@ function sanitize(parsed: Record<string, unknown>): DarioConfig {
 
   const logFile = pickStringOrNull('logFile');
   if (logFile !== undefined) out.logFile = logFile;
+
+  const egressProxy = pickStringOrNull('egressProxy');
+  if (egressProxy !== undefined) out.egressProxy = egressProxy;
 
   if (isPlainObject(parsed.overageGuard)) {
     out.overageGuard = {};

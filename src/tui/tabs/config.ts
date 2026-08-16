@@ -22,6 +22,7 @@
 
 import type { Tab } from '../tab.js';
 import { fg, dim, brand, inverse, pad, truncate } from '../render.js';
+import { parseOutboundProxy } from '../../outbound-proxy.js';
 import {
   CONFIG_SCHEMA_VERSION,
   defaultConfig,
@@ -59,6 +60,7 @@ const FIELDS: FieldDef[] = [
   { path: 'sessionStart.minMs',         label: 'Session-start min',     type: 'number', hint: 'first-request delay floor' },
   { path: 'sessionStart.jitterMs',      label: 'Session-start jitter',  type: 'number' },
   { path: 'pool.strategy',              label: 'Pool strategy',         type: 'string', hint: '"headroom" (default) or "fill-first"' },
+  { path: 'egressProxy',                label: 'Egress proxy',          type: 'string', hint: 'socks5h://host:1080, http://host:port, or empty' },
   // ── Overage-guard (v4.1, dario#288) ─────────────────────────
   { path: 'overageGuard.enabled',       label: 'Overage-guard',         type: 'bool',   hint: 'halt proxy on any representative-claim=overage' },
   { path: 'overageGuard.behavior',      label: 'Overage behavior',      type: 'string', hint: '"halt" (default) or "warn"' },
@@ -288,7 +290,28 @@ function commitEdit(state: ConfigState): ConfigState {
         statusKind: 'error',
       };
     }
-    parsed = state.editBuffer;
+    // Egress proxy: empty clears it; anything else must parse now, or the
+    // user saves a config that makes `dario proxy` exit non-zero at the
+    // next start. Errors are already credential-masked by the parser.
+    if (f.path === 'egressProxy') {
+      if (state.editBuffer.trim() === '') {
+        parsed = null;
+      } else {
+        try {
+          const cfg = parseOutboundProxy(state.editBuffer);
+          parsed = cfg ? cfg.url : null;
+        } catch (err) {
+          return {
+            ...state,
+            editBuffer: null,
+            statusMessage: (err as Error).message.replace(/^--egress-proxy: /, ''),
+            statusKind: 'error',
+          };
+        }
+      }
+    } else {
+      parsed = state.editBuffer;
+    }
   } else {
     parsed = state.editBuffer;
   }

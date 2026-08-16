@@ -28,7 +28,7 @@ import { startProxy, sanitizeError, parseModelAliasSpecs } from './proxy.js';
 import { VALID_EFFORT_VALUES, type EffortValue } from './cc-template.js';
 import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, addAccountViaManualOAuth, addAccountFromKeychain, KeychainImportError, removeAccount, ensureLoginCredentialsInPool, resyncLoginFromCredentialsIfStale, MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
-import { parseOutboundProxy, installOutboundProxyWrapper, type OutboundProxyConfig } from './outbound-proxy.js';
+import { parseOutboundProxy, installOutboundProxyWrapper, installEgressProxy, type OutboundProxyConfig } from './outbound-proxy.js';
 
 // `args` / `command` at module scope — command handlers below close over
 // `args` to read their own flags. Reading argv is harmless on import; only
@@ -526,27 +526,31 @@ async function proxy() {
   // proxy, privoxy/Tor, etc. Localhost calls bypass.
   //
   // Requires Bun runtime — Node's built-in fetch ignores the proxy
-  // option silently. SOCKS5 not supported (rejected at parse time).
+  // option silently. socks5:/socks5h: route through an in-process
+  // loopback CONNECT bridge (src/socks5-bridge.ts) because Bun's fetch
+  // only speaks http:/https: proxies.
   // See docs/vpn-routing.md for the full setup options.
-  const outboundProxyArg = args.find((a) => a.startsWith('--upstream-proxy=')) ?? args.find((a) => a.startsWith('--via='));
-  const outboundProxyRaw = outboundProxyArg
-    ? outboundProxyArg.split('=').slice(1).join('=')
-    : process.env['DARIO_UPSTREAM_PROXY'];
   let outboundProxy: OutboundProxyConfig | null = null;
   try {
-    outboundProxy = parseOutboundProxy(outboundProxyRaw);
+    outboundProxy = parseOutboundProxy(resolveEgressProxyFlag(args, process.env, fileCfg.egressProxy));
   } catch (err) {
     console.error(`[dario] ${(err as Error).message}`);
     process.exit(1);
   }
   if (outboundProxy) {
     try {
-      installOutboundProxyWrapper(outboundProxy);
+      const bridge = await installEgressProxy(outboundProxy);
+      if (bridge) {
+        console.error(`[dario] SOCKS5 bridge listening on ${bridge.url} (loopback only)`);
+      }
     } catch (err) {
       console.error(`[dario] ${(err as Error).message}`);
       process.exit(1);
     }
-    console.error(`[dario] Outbound proxy: ${outboundProxy.display} (all upstream fetches routed; localhost bypasses)`);
+    const dns = outboundProxy.scheme === 'socks5h' ? ', DNS resolved at proxy'
+              : outboundProxy.scheme === 'socks5' ? ', DNS resolved locally'
+              : '';
+    console.error(`[dario] Egress proxy: ${outboundProxy.display} (all upstream fetches routed; localhost bypasses${dns})`);
   }
 
   // --passthrough-betas=name1,name2 — operator-pinned beta allow-list.
@@ -777,6 +781,53 @@ function parseLogFileFlag(args: string[]): string | undefined {
     if (value && !value.startsWith('-')) return value;
   }
   return undefined;
+}
+
+/**
+ * Resolve the egress proxy across all four layers, highest first:
+ *   1. `--egress-proxy URL` / `--egress-proxy=URL`
+ *      (aliases `--upstream-proxy` / `--via`, kept for compatibility)
+ *   2. `DARIO_EGRESS_PROXY`
+ *   3. `DARIO_UPSTREAM_PROXY` (legacy name)
+ *   4. `egressProxy` in ~/.dario/config.json
+ *
+ * An explicitly empty flag or env value (`--egress-proxy=`) disables the
+ * layers below it, matching how `--passthrough-betas=` clears its
+ * env-supplied default. Returns undefined when nothing is configured.
+ *
+ * Exported for tests.
+ */
+export function resolveEgressProxyFlag(
+  args: string[],
+  env: Record<string, string | undefined>,
+  fileValue?: string | null,
+): string | undefined {
+  const NAMES = ['--egress-proxy', '--upstream-proxy', '--via'];
+
+  for (const name of NAMES) {
+    const eqArg = args.find(a => a.startsWith(`${name}=`));
+    if (eqArg) {
+      // Explicit empty value means "no proxy" — stop, don't fall through.
+      return eqArg.slice(name.length + 1) || undefined;
+    }
+    const idx = args.indexOf(name);
+    if (idx >= 0) {
+      const value = args[idx + 1];
+      // A bare flag with no value is a usage error, but treating it as
+      // "unset" would silently route traffic direct. Fail loudly instead.
+      if (!value || value.startsWith('-')) {
+        throw new Error(`${name} requires a URL, e.g. ${name} socks5h://127.0.0.1:1080`);
+      }
+      return value;
+    }
+  }
+
+  for (const key of ['DARIO_EGRESS_PROXY', 'DARIO_UPSTREAM_PROXY']) {
+    const raw = env[key];
+    if (raw !== undefined) return raw.trim() || undefined;
+  }
+
+  return fileValue ?? undefined;
 }
 
 /**
@@ -1625,19 +1676,22 @@ async function help() {
                              client omits \`output_config.format\`. Env:
                              DARIO_PRESERVE_OUTPUT_FORMAT.
 
-    --upstream-proxy=URL / --via=URL
-                             Route all of dario's outbound fetch
+    --egress-proxy=URL       Route all of dario's outbound fetch
                              calls (api.anthropic.com, OpenAI-compat
-                             backends, OAuth) through an HTTP/HTTPS
-                             proxy. Localhost calls bypass. Useful
-                             with a VPN provider's HTTP proxy mode
-                             (Mullvad, AirVPN, corporate proxy,
-                             privoxy/Tor) when you don't want to put
-                             the whole system on a system VPN.
-                             Requires Bun runtime. SOCKS5 not
-                             supported (Bun fetch limitation). See
-                             docs/vpn-routing.md. Env: DARIO_UPSTREAM_PROXY.
-                             (v3.35.0)
+                             backends, OAuth) through a proxy.
+                             Localhost calls bypass. Accepts
+                             http://, https://, socks5h:// (DNS
+                             resolved at the proxy — preferred) and
+                             socks5:// (DNS resolved locally).
+                             Credentials may be embedded in the URL.
+                             SOCKS5 runs through an in-process
+                             loopback CONNECT bridge; TLS still
+                             originates in Bun and terminates at the
+                             origin. Requires Bun runtime. Aliases:
+                             --upstream-proxy, --via. Env:
+                             DARIO_EGRESS_PROXY (legacy:
+                             DARIO_UPSTREAM_PROXY). Config:
+                             egressProxy. See docs/vpn-routing.md.
 
     --system-prompt=<MODE>   System-prompt mode for outbound CC-shaped
                              requests (v3.34.0). One of:

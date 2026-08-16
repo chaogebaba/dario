@@ -1,27 +1,28 @@
-// Optional outbound-proxy routing for upstream API calls. Behind
-// `--upstream-proxy=URL` / `--via=URL` / `DARIO_UPSTREAM_PROXY`, dario
-// routes all of its outbound fetch() calls — `api.anthropic.com`,
-// configured OpenAI-compat backends, OAuth flows, drift checks, doctor
-// probes — through the supplied proxy. Localhost-bound fetches bypass
-// it (the inbound HTTP server is unaffected; this only wraps egress).
+// Optional egress-proxy routing for upstream API calls. Behind
+// `--egress-proxy=URL` (aliases: `--upstream-proxy`, `--via`) or
+// `DARIO_EGRESS_PROXY`, dario routes all of its outbound fetch() calls —
+// `api.anthropic.com`, configured OpenAI-compat backends, OAuth flows,
+// drift checks, doctor probes — through the supplied proxy. Localhost-bound
+// fetches bypass it (the inbound HTTP server is unaffected; this only
+// wraps egress).
 //
 // Use case: security-conscious users who want dario's upstream traffic
-// routed through their VPN provider's HTTP proxy endpoint without
-// putting the entire host on a system-level VPN. Pair with the HTTP
-// proxy mode of Mullvad / AirVPN / a local privoxy-on-Tor / corporate
-// proxy infrastructure / Cloudflare WARP via gateway / etc.
+// routed through their VPN provider's proxy endpoint without putting the
+// entire host on a system-level VPN. Pair with the HTTP or SOCKS5 mode of
+// Mullvad / AirVPN / a local privoxy-on-Tor / corporate proxy
+// infrastructure / Cloudflare WARP via gateway / etc.
 //
 // Runtime constraints:
 //   - Requires Bun. Bun's fetch implements the `proxy` option natively;
 //     Node's built-in fetch (undici-backed) ignores it silently and
 //     would yield a misleading "looks like it's working" failure mode.
-//     dario already auto-relaunches under Bun when available; if the
-//     user is on Node and sets this flag, refuse to start with a clear
-//     "install Bun" message.
-//   - HTTP/HTTPS proxies only. SOCKS5 is not supported by Bun 1.3.x's
-//     fetch (`UnsupportedProxyProtocol`). Most VPN providers expose an
-//     HTTP proxy endpoint alongside their SOCKS5 one (Mullvad, AirVPN);
-//     point the flag at that.
+//   - http:/https: proxies are handed straight to Bun's fetch.
+//   - socks5:/socks5h: are not understood by Bun's fetch, so dario runs
+//     an in-process loopback CONNECT bridge that speaks SOCKS5 upstream
+//     (src/socks5-bridge.ts) and points fetch at that. TLS still
+//     originates in Bun and terminates at the origin.
+//   - socks4/socks4a are not supported: no authentication, no IPv6, and
+//     no remote DNS in socks4. Use socks5h.
 //
 // Wire-fidelity note: the proxy sits *outside* the TLS session — TLS
 // to api.anthropic.com terminates at Anthropic, not at the proxy.
@@ -29,47 +30,62 @@
 // the proxy can see in HTTPS-CONNECT mode is the destination hostname
 // (via SNI) and the byte timing.
 
+import { startSocks5Bridge, type Socks5Bridge } from './socks5-bridge.js';
+
+export type EgressProxyScheme = 'http' | 'https' | 'socks5' | 'socks5h';
+
 export interface OutboundProxyConfig {
-  /** Original URL string supplied by the user. Passed verbatim to fetch's `proxy` option. */
+  /** Original URL string supplied by the user. Passed verbatim to fetch's `proxy` option for http/https. */
   url: string;
-  /** Parsed scheme — http or https. SOCKS rejected at parse time. */
-  scheme: 'http' | 'https';
+  /** Parsed scheme. */
+  scheme: EgressProxyScheme;
   /** Sanitized URL for logging — credentials redacted. */
   display: string;
+  /** Present for socks5/socks5h: the details the bridge needs to dial. */
+  socks?: {
+    host: string;
+    port: number;
+    username?: string;
+    password?: string;
+    /** socks5h → resolve destination at the proxy; socks5 → resolve locally. */
+    remoteDns: boolean;
+  };
 }
 
 /**
- * Parse and validate an outbound-proxy URL. Returns null for empty/undefined
+ * Parse and validate an egress-proxy URL. Returns null for empty/undefined
  * input (no proxy configured). Throws with a clear message on:
  *   - URL parse failure
- *   - SOCKS scheme (unsupported by Bun fetch)
+ *   - socks4/socks4a (obsolete; no auth, no IPv6, no remote DNS)
  *   - Other unsupported schemes
+ *   - SOCKS URLs carrying a path/query/fragment (meaningless — likely a typo)
  */
 export function parseOutboundProxy(raw: string | undefined): OutboundProxyConfig | null {
   if (!raw || raw.trim() === '') return null;
 
   let parsed: URL;
   try {
-    parsed = new URL(raw);
+    parsed = new URL(raw.trim());
   } catch {
     throw new Error(
-      `--upstream-proxy: ${JSON.stringify(raw)} is not a valid URL. Expected http://host:port or https://host:port.`,
+      `--egress-proxy: ${JSON.stringify(raw)} is not a valid URL. Expected http://host:port, https://host:port, socks5h://host:port, or socks5://host:port.`,
     );
   }
 
   const scheme = parsed.protocol.replace(/:$/, '').toLowerCase();
 
-  if (scheme === 'socks5' || scheme === 'socks5h' || scheme === 'socks4' || scheme === 'socks4a' || scheme === 'socks') {
+  if (scheme === 'socks4' || scheme === 'socks4a' || scheme === 'socks') {
     throw new Error(
-      `--upstream-proxy: SOCKS5 is not supported by the underlying fetch runtime (Bun 1.3.x). ` +
-      `Use the HTTP proxy endpoint of your VPN provider instead — e.g. Mullvad / AirVPN / corporate proxy / privoxy-on-Tor all expose http://host:port. ` +
-      `If your provider only exposes SOCKS5, run a local SOCKS-to-HTTP bridge (privoxy with forward-socks5) and point dario at the HTTP side.`,
+      `--egress-proxy: ${JSON.stringify(scheme)} is not supported — SOCKS4 has no authentication, no IPv6, and no remote DNS. ` +
+      `Use socks5h:// (resolves the destination at the proxy) or socks5:// (resolves locally).`,
     );
   }
 
-  if (scheme !== 'http' && scheme !== 'https') {
+  const isSocks = scheme === 'socks5' || scheme === 'socks5h';
+
+  if (scheme !== 'http' && scheme !== 'https' && !isSocks) {
     throw new Error(
-      `--upstream-proxy: unsupported scheme ${JSON.stringify(scheme)}. Use http:// or https://.`,
+      `--egress-proxy: unsupported scheme ${JSON.stringify(scheme)}. Use http://, https://, socks5h://, or socks5://.`,
     );
   }
 
@@ -82,8 +98,46 @@ export function parseOutboundProxy(raw: string | undefined): OutboundProxyConfig
     return safe.toString();
   })();
 
-  return { url: parsed.toString(), scheme: scheme as 'http' | 'https', display };
+  if (!isSocks) {
+    return { url: parsed.toString(), scheme: scheme as 'http' | 'https', display };
+  }
+
+  // ── SOCKS5 ───────────────────────────────────────────────────
+  // A path/query/fragment on a SOCKS URL has no meaning. Silently
+  // ignoring one hides typos like socks5h://host:1080/api, so reject.
+  // Note `new URL('socks5h://h:1')` normalizes pathname to '' (not '/')
+  // for non-special schemes, so a bare host stays clean.
+  if ((parsed.pathname && parsed.pathname !== '' && parsed.pathname !== '/') || parsed.search || parsed.hash) {
+    throw new Error(
+      `--egress-proxy: SOCKS URLs take only host, port, and optional credentials — ` +
+      `drop the path/query from ${JSON.stringify(display)}.`,
+    );
+  }
+
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (!host) {
+    throw new Error(`--egress-proxy: ${JSON.stringify(display)} is missing a host.`);
+  }
+  const port = parsed.port ? Number(parsed.port) : 1080;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`--egress-proxy: ${JSON.stringify(parsed.port)} is not a valid port.`);
+  }
+
+  return {
+    url: parsed.toString(),
+    scheme: scheme as 'socks5' | 'socks5h',
+    display,
+    socks: {
+      host,
+      port,
+      // URL percent-encodes credentials; decode for the wire.
+      username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+      password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+      remoteDns: scheme === 'socks5h',
+    },
+  };
 }
+
 
 /**
  * Heuristic check: does this URL target localhost / loopback?
@@ -128,15 +182,19 @@ export function isLocalhostUrl(input: unknown): boolean {
  * actually go direct). Better to fail loud at startup than fail silent
  * at request time.
  */
-export function installOutboundProxyWrapper(config: OutboundProxyConfig): void {
+export function installOutboundProxyWrapper(config: OutboundProxyConfig, proxyUrl?: string): void {
   const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined';
   if (!isBun) {
     throw new Error(
-      `--upstream-proxy requires the Bun runtime. Node's built-in fetch ignores the \`proxy\` option silently — ` +
+      `--egress-proxy requires the Bun runtime. Node's built-in fetch ignores the \`proxy\` option silently — ` +
       `the flag would appear to work while requests actually went direct. Install Bun (https://bun.sh) and re-run; ` +
       `dario auto-relaunches under Bun when available, or you can run \`bun run\` directly.`,
     );
   }
+
+  // For SOCKS the effective proxy is the loopback bridge, not the user's
+  // URL — Bun's fetch cannot speak SOCKS itself.
+  const effective = proxyUrl ?? config.url;
 
   const originalFetch = globalThis.fetch;
   // Wrap. Localhost targets bypass the proxy (loopback shouldn't tunnel).
@@ -149,8 +207,26 @@ export function installOutboundProxyWrapper(config: OutboundProxyConfig): void {
     }
     // Use a typed cast — Bun's fetch options include `proxy`, but TS's
     // standard fetch types don't.
-    const bunInit = { ...(init || {}), proxy: config.url } as Parameters<typeof fetch>[1];
+    const bunInit = { ...(init || {}), proxy: effective } as Parameters<typeof fetch>[1];
     return originalFetch(input as Parameters<typeof fetch>[0], bunInit);
   }) as typeof fetch;
   globalThis.fetch = wrapped;
+}
+
+/**
+ * Install egress routing for a parsed config, starting the SOCKS5 bridge
+ * first when one is needed. Returns the bridge so the caller can close it
+ * on shutdown (null for http/https, which need no helper process).
+ *
+ * This is the entry point cli.ts uses; `installOutboundProxyWrapper` stays
+ * exported for the http/https-only path and for tests.
+ */
+export async function installEgressProxy(config: OutboundProxyConfig): Promise<Socks5Bridge | null> {
+  if (!config.socks) {
+    installOutboundProxyWrapper(config);
+    return null;
+  }
+  const bridge = await startSocks5Bridge(config.socks);
+  installOutboundProxyWrapper(config, bridge.url);
+  return bridge;
 }
