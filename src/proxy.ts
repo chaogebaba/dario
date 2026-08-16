@@ -3261,9 +3261,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           signal: upstreamAbort.signal,
         });
 
-        // Pool mode: capture rate-limit snapshot from the response. parseRateLimits
-        // returns status='rejected' on 429, which makes the next `select()` call
-        // route traffic away from this account until it resets.
+        // Pool mode: capture the rate-limit snapshot from the response, which
+        // is the ONLY way dario ever learns an account's utilization. This
+        // sits above the stream/non-stream split and the retry loop
+        // re-dispatches through it, so every upstream response is accounted
+        // for exactly once.
+        //
+        // markRejected forces status='rejected' so the next `select()` routes
+        // away from this account until it resets. Both mutators ignore a
+        // snapshot the response didn't actually carry headers for — see
+        // RateLimitSnapshot.measured.
         if (poolAccount) {
           const snapshot = parseRateLimits(upstream.headers);
           if (upstream.status === 429) {
