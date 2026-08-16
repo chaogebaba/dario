@@ -23,9 +23,10 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
+
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { homeDir } from './home-dir.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,7 +35,7 @@ export const SUBAGENT_FILENAME = `${SUBAGENT_NAME}.md`;
 
 /** `~/.claude/agents/dario.md`. */
 export function getSubagentPath(): string {
-  return join(homedir(), '.claude', 'agents', SUBAGENT_FILENAME);
+  return join(homeDir(), '.claude', 'agents', SUBAGENT_FILENAME);
 }
 
 /**

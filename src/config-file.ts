@@ -22,8 +22,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
+
 import { dirname, join } from 'node:path';
+import { homeDir } from './home-dir.js';
 
 /**
  * Bumped on any incompatible shape change. v4.0.0 ships schema v1. A
@@ -36,7 +37,7 @@ export const CONFIG_SCHEMA_VERSION = 1;
  * Default `~/.dario/config.json` location. Override in tests via
  * `loadConfig(path)` / `saveConfig(path, …)`.
  */
-export const DEFAULT_CONFIG_PATH = join(homedir(), '.dario', 'config.json');
+export const DEFAULT_CONFIG_PATH = join(homeDir(), '.dario', 'config.json');
 
 /**
  * Every user-tunable setting. Grouped into sub-objects when the knobs

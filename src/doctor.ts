@@ -14,7 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir, platform, arch, release } from 'node:os';
+import { platform, arch, release } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -36,6 +36,7 @@ import {
 import { detectCCOAuthConfig } from './cc-oauth-detect.js';
 import { runAuthorizeProbe } from './cc-authorize-probe.js';
 import { MIGRATED_LOGIN_ALIAS } from './accounts.js';
+import { homeDir } from './home-dir.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1061,10 +1062,10 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
 
   // ---- ~/.dario dir
   try {
-    const home = join(homedir(), '.dario');
+    const home = join(homeDir(), '.dario');
     checks.push({ status: 'info', label: 'Home', detail: home });
   } catch {
-    // never fails in practice — homedir() is always defined on supported platforms
+    // never fails in practice — homeDir() is always defined on supported platforms
   }
 
   return checks;

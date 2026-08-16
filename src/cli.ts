@@ -21,7 +21,7 @@
 import { unlink } from 'node:fs/promises';
 import { realpathSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+
 import { pathToFileURL } from 'node:url';
 import { startAutoOAuthFlow, startManualOAuthFlow, detectHeadlessEnvironment, getStatus, refreshTokens, loadCredentials } from './oauth.js';
 import { startProxy, sanitizeError, parseModelAliasSpecs } from './proxy.js';
@@ -29,6 +29,7 @@ import { VALID_EFFORT_VALUES, type EffortValue } from './cc-template.js';
 import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, addAccountViaManualOAuth, addAccountFromKeychain, KeychainImportError, removeAccount, ensureLoginCredentialsInPool, resyncLoginFromCredentialsIfStale, MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
 import { parseOutboundProxy, installOutboundProxyWrapper, installEgressProxy, type OutboundProxyConfig } from './outbound-proxy.js';
+import { homeDir } from './home-dir.js';
 
 // `args` / `command` at module scope — command handlers below close over
 // `args` to read their own flags. Reading argv is harmless on import; only
@@ -282,7 +283,7 @@ async function resume() {
 }
 
 async function logout() {
-  const path = join(homedir(), '.dario', 'credentials.json');
+  const path = join(homeDir(), '.dario', 'credentials.json');
   try {
     await unlink(path);
     console.log('[dario] Credentials removed.');

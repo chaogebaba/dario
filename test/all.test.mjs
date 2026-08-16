@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // Top-level parallel test runner — dario#79 (Claude review push-back).
 //
 // Previous shape: `npm test` was a single `node test/a.mjs && node test/b.mjs
@@ -11,23 +11,25 @@
 //      tally; CI log has 34 separate summary lines to scan.
 //
 // This driver wraps every existing `*.mjs` in `test/` (except opt-out E2E /
-// compat files that expect live proxy state) as a `node:test` subtest,
-// spawning the existing file as a subprocess. The existing files stay
-// untouched — their own `check(name, cond)` assertion style and
-// `process.exit(fail === 0 ? 0 : 1)` semantics work as-is. `node --test` on
-// this driver gives us:
+// compat files that expect live proxy state), spawning each as a subprocess
+// with a bounded worker pool. The existing files stay untouched — their own
+// `check(name, cond)` assertion style and `process.exit(fail === 0 ? 0 : 1)`
+// semantics work as-is.
 //
-//   - parallelism (default `--test-concurrency=8`)
-//   - every file's failure surfaces in the same run, not just the first
-//   - TAP / spec reporter (structured, tool-parseable)
+// Run: `bun test/all.test.mjs`
 //
-// Run: `node --test --test-concurrency=8 test/all.test.mjs`
+// Deliberately does NOT use `node:test`: Bun rejects it outside `bun test`
+// ("Cannot use test outside of the test runner"), and `bun test` will not
+// discover `*.mjs` files — it only matches `.test.`/`_test_`/`.spec.` names.
+// Renaming 130+ suites to satisfy a discovery pattern would be a large
+// diff for no behavioural gain, so the driver owns its own scheduling and
+// reporting and stays runtime-agnostic.
 //
 // Zero runtime dependencies. Stays true to the package's dep-hygiene invariant.
 
-import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { readdirSync, mkdtempSync } from 'node:fs';
+import { cpus } from 'node:os';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,41 +88,117 @@ const suiteTemplateCache = join(
 );
 const childEnv = { ...process.env, DARIO_LIVE_TEMPLATE_CACHE: suiteTemplateCache };
 
-for (const f of files) {
-  test(f, { concurrency: true }, async () => {
-    await new Promise((resolve, reject) => {
-      const proc = spawn(process.execPath, [join(__dirname, f)], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        // Inherited env plus the pinned template cache (see above).
-        env: childEnv,
-      });
-      let out = '';
-      proc.stdout.on('data', d => { out += d; });
-      proc.stderr.on('data', d => { out += d; });
-      proc.on('close', code => {
-        if (code === 0) return resolve();
-        reject(new Error(`\n--- ${f} exited with code ${code} ---\n${out}`));
-      });
-      proc.on('error', err => reject(err));
+// ── Runner ───────────────────────────────────────────────────────────
+// Concurrency defaults to half the cores, capped at 8. Each child is a
+// full runtime with its own heap, so this is memory-bound rather than
+// CPU-bound — oversubscribing trades a little wall-clock for a real risk
+// of the OOM killer taking out the run. Override with TEST_CONCURRENCY.
+const CONCURRENCY = Math.max(
+  1,
+  Number(process.env['TEST_CONCURRENCY'] || Math.min(8, Math.ceil(cpus().length / 2))),
+);
+
+// Per-suite output cap. Suites are chatty (some print thousands of
+// assertion lines); retaining all of it for 130+ files at once is what
+// pushed the old runner into swap. Keep a bounded tail — the failing
+// assertions and the summary are always at the end — and drop it
+// entirely the moment a suite passes.
+const MAX_CAPTURE = 64 * 1024;
+
+/**
+ * Bounded tail buffer. Appends are O(chunk); memory stays under
+ * ~MAX_CAPTURE regardless of how much the child prints.
+ */
+function tailBuffer(limit) {
+  let chunks = [];
+  let size = 0;
+  return {
+    push(d) {
+      const s = typeof d === 'string' ? d : d.toString();
+      chunks.push(s);
+      size += s.length;
+      // Amortised trim: only compact once we're well over the cap.
+      if (size > limit * 2) {
+        const joined = chunks.join('').slice(-limit);
+        chunks = [joined];
+        size = joined.length;
+      }
+    },
+    value() {
+      const joined = chunks.join('');
+      return joined.length > limit
+        ? `…(truncated ${joined.length - limit} bytes)…\n${joined.slice(-limit)}`
+        : joined;
+    },
+  };
+}
+
+/** Run one suite file to completion. Resolves with its outcome. */
+function runSuite(file, argv) {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const proc = spawn(argv[0], argv.slice(1), {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Inherited env plus the pinned template cache (see above).
+      env: childEnv,
+    });
+    const buf = tailBuffer(MAX_CAPTURE);
+    proc.stdout.on('data', d => buf.push(d));
+    proc.stderr.on('data', d => buf.push(d));
+    proc.on('close', code => {
+      // Only failures keep their output; passing suites release it now.
+      resolve({ file, code, out: code === 0 ? '' : buf.value(), ms: Date.now() - started });
+    });
+    proc.on('error', err => {
+      resolve({ file, code: 1, out: String(err?.stack || err), ms: Date.now() - started });
     });
   });
 }
 
-for (const f of shellFiles) {
-  test(f, { concurrency: true }, async () => {
-    await new Promise((resolve, reject) => {
-      const proc = spawn('bash', [join(__dirname, f)], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: childEnv,
-      });
-      let out = '';
-      proc.stdout.on('data', d => { out += d; });
-      proc.stderr.on('data', d => { out += d; });
-      proc.on('close', code => {
-        if (code === 0) return resolve();
-        reject(new Error(`\n--- ${f} exited with code ${code} ---\n${out}`));
-      });
-      proc.on('error', err => reject(err));
-    });
-  });
+const jobs = [
+  ...files.map(f => ({ file: f, argv: [process.execPath, join(__dirname, f)] })),
+  // Shell-level suites (packaging/installer) run through bash but are
+  // reported alongside the rest, so a broken installer fails the suite
+  // like any other regression.
+  ...shellFiles.map(f => ({ file: f, argv: ['bash', join(__dirname, f)] })),
+];
+
+const results = [];
+let cursor = 0;
+let passed = 0;
+
+async function worker() {
+  while (cursor < jobs.length) {
+    const job = jobs[cursor++];
+    const r = await runSuite(job.file, job.argv);
+    if (r.code === 0) passed++;
+    // Retain full records only for failures; a passing suite keeps just
+    // its timing, so peak memory doesn't scale with suite count.
+    results.push(r.code === 0 ? { file: r.file, code: 0, ms: r.ms } : r);
+    process.stdout.write(
+      `  ${r.code === 0 ? 'ok  ' : 'FAIL'} ${r.file} (${r.ms}ms)\n`,
+    );
+  }
 }
+
+console.log(`Running ${jobs.length} suites, concurrency ${CONCURRENCY}\n`);
+const wallStart = Date.now();
+await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker));
+const wallMs = Date.now() - wallStart;
+
+const failed = results.filter(r => r.code !== 0).sort((a, b) => a.file.localeCompare(b.file));
+
+// Failure output comes last, so it's what you see without scrolling.
+for (const r of failed) {
+  console.log(`\n${'─'.repeat(70)}\n--- ${r.file} exited with code ${r.code} ---\n${r.out}`);
+}
+
+console.log(
+  `\n${'='.repeat(70)}\n` +
+  `  ${passed}/${results.length} suites passed` +
+  `${failed.length ? ` — ${failed.length} failed: ${failed.map(f => f.file).join(', ')}` : ''}\n` +
+  `  ${(wallMs / 1000).toFixed(1)}s wall\n` +
+  `${'='.repeat(70)}`,
+);
+
+process.exit(failed.length === 0 ? 0 : 1);

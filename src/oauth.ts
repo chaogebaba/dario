@@ -10,10 +10,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { homedir, platform } from 'node:os';
+import { platform } from 'node:os';
 import { detectCCOAuthConfig } from './cc-oauth-detect.js';
 import { redactSecrets } from './redact.js';
 import { durableWriteFile } from './durable-write.js';
+import { homeDir } from './home-dir.js';
 
 // Manual-flow redirect URI. Anthropic's authorize endpoint special-cases
 // this value (also baked into CC as MANUAL_REDIRECT_URL) to render the
@@ -95,7 +96,7 @@ function generatePKCE(): { codeVerifier: string; codeChallenge: string } {
 }
 
 function getDarioCredentialsPath(): string {
-  return join(homedir(), '.dario', 'credentials.json');
+  return join(homeDir(), '.dario', 'credentials.json');
 }
 
 /**
@@ -138,7 +139,7 @@ export function credentialSourcePlan(ignoreCc: boolean): { filePaths: string[]; 
 }
 
 function getClaudeCodeCredentialsPath(): string {
-  return join(homedir(), '.claude', '.credentials.json');
+  return join(homeDir(), '.claude', '.credentials.json');
 }
 
 /**

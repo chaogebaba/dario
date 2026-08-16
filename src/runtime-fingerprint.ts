@@ -205,6 +205,23 @@ export function detectRuntimeFingerprint(): RuntimeFingerprint {
 }
 
 /**
+ * The platform-correct upstream Bun install command, as a string.
+ *
+ * Split out from `bunBootstrap` so callers — and tests — can inspect what
+ * WOULD run without running it. Asserting on the command shape used to
+ * require calling `bunBootstrap()` itself and relying on a cleared PATH to
+ * stop the spawn; that guard does not hold (a `-l` login shell re-sources
+ * the profile and restores PATH), so the suite could reach out and execute
+ * a network installer on the test machine. A pure function removes the
+ * hazard instead of trying to contain it.
+ */
+export function bunBootstrapCommand(platform: string = process.platform): string {
+  return platform === 'win32'
+    ? 'powershell -NoProfile -ExecutionPolicy Bypass -c "irm https://bun.sh/install.ps1 | iex"'
+    : 'curl -fsSL https://bun.sh/install | bash';
+}
+
+/**
  * One-shot Bun installer. Used by `dario doctor --bun-bootstrap` to
  * close the gap between "Bun warn surfaced" and "Bun on PATH" without
  * making the user copy-paste an install line. Picks the platform-correct
@@ -225,13 +242,14 @@ export function detectRuntimeFingerprint(): RuntimeFingerprint {
  * Pinned to bun.sh (not bun.com) because PowerShell's `irm` doesn't
  * follow the bun.com → bun.sh 308 redirect; piping the redirect HTML
  * to `iex` then fails parse. bun.sh serves the install script directly.
+ *
+ * Side-effecting and network-touching by design: never call this from a
+ * test. Assert on `bunBootstrapCommand()` instead.
  */
 export async function bunBootstrap(): Promise<{ exitCode: number; runner: string }> {
   const { spawn } = await import('node:child_process');
   const isWindows = process.platform === 'win32';
-  const runner = isWindows
-    ? 'powershell -NoProfile -ExecutionPolicy Bypass -c "irm https://bun.sh/install.ps1 | iex"'
-    : 'curl -fsSL https://bun.sh/install | bash';
+  const runner = bunBootstrapCommand();
 
   return await new Promise<{ exitCode: number; runner: string }>((resolve) => {
     // Single-shell invocation so the pipe stages execute the way the

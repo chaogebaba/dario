@@ -19,7 +19,7 @@
  */
 import { readFile, mkdir, readdir, unlink } from 'node:fs/promises';
 import { join, basename } from 'node:path';
-import { homedir } from 'node:os';
+
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { detectCCOAuthConfig } from './cc-oauth-detect.js';
@@ -27,10 +27,11 @@ import { loadCredentials, saveCredentialsTokens, buildManualAuthorizeUrl, parseM
 import { openBrowser } from './open-browser.js';
 import { redactSecrets } from './redact.js';
 import { durableWriteFile } from './durable-write.js';
+import { homeDir } from './home-dir.js';
 
 const MANUAL_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
 
-const DARIO_DIR = join(homedir(), '.dario');
+const DARIO_DIR = join(homeDir(), '.dario');
 const ACCOUNTS_DIR = join(DARIO_DIR, 'accounts');
 
 /**
@@ -115,8 +116,8 @@ export async function removeAccount(alias: string): Promise<boolean> {
 /** Detect deviceId + accountUuid from an installed Claude Code. */
 export async function detectClaudeIdentity(): Promise<{ deviceId: string; accountUuid: string } | null> {
   const paths = [
-    join(homedir(), '.claude', '.claude.json'),
-    join(homedir(), '.claude.json'),
+    join(homeDir(), '.claude', '.claude.json'),
+    join(homeDir(), '.claude.json'),
   ];
 
   for (const p of paths) {

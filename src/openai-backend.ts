@@ -14,10 +14,11 @@
  */
 import { readFile, writeFile, mkdir, unlink, readdir } from 'node:fs/promises';
 import { join, basename } from 'node:path';
-import { homedir } from 'node:os';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 
-const DARIO_DIR = join(homedir(), '.dario');
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { homeDir } from './home-dir.js';
+
+const DARIO_DIR = join(homeDir(), '.dario');
 const BACKENDS_DIR = join(DARIO_DIR, 'backends');
 
 /**

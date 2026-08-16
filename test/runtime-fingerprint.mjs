@@ -9,7 +9,7 @@
 
 import {
   classifyRuntimeFingerprint,
-  bunBootstrap,
+  bunBootstrapCommand,
   bunVersionMeetsJa3Floor,
   JA3_VERIFIED_BUN_FLOOR,
 } from '../dist/runtime-fingerprint.js';
@@ -153,27 +153,22 @@ header('classifyRuntimeFingerprint — DARIO_NO_BUN with no Bun → still node-o
 }
 
 // ======================================================================
-//  bunBootstrap — runner string is the canonical upstream installer
+//  bunBootstrapCommand — runner string is the canonical upstream installer
 // ======================================================================
-header('bunBootstrap — installer command shape');
+header('bunBootstrapCommand — installer command shape');
 {
-  // The installer is a side-effecting child process; we don't actually
-  // run it through (would mutate the test machine). Instead we force a
-  // fail-fast by clearing PATH so the spawn can't resolve a shell, and
-  // verify the runner string is the canonical upstream URL regardless
-  // of exit code.
-  const savedPath = process.env.PATH;
-  process.env.PATH = '';
-  const result = await bunBootstrap();
-  process.env.PATH = savedPath;
-  check('returns { exitCode, runner }', typeof result.exitCode === 'number' && typeof result.runner === 'string');
-  check('runner targets the canonical bun.sh URL', result.runner.includes('bun.sh'));
-  check(
-    'runner is platform-correct',
-    process.platform === 'win32'
-      ? result.runner.includes('powershell') && result.runner.includes('install.ps1')
-      : result.runner.includes('curl') && result.runner.includes('install'),
-  );
+  // Assert on the pure command builder. This test used to call
+  // bunBootstrap() itself with PATH cleared, on the theory that the spawn
+  // could not then resolve a shell. That guard does not hold: `bash -lc`
+  // is a LOGIN shell, so it re-sources the profile and restores PATH —
+  // the suite really did run `curl https://bun.sh/install | bash`,
+  // downloading and executing a network installer on the test machine
+  // (and, under a concurrent runner, many at once). Inspect the string;
+  // never spawn it.
+  check('linux/macos targets the canonical bun.sh URL', bunBootstrapCommand('linux').includes('bun.sh'));
+  check('linux/macos uses curl-pipe-bash', bunBootstrapCommand('darwin').includes('curl') && bunBootstrapCommand('darwin').includes('install'));
+  check('windows uses powershell irm', bunBootstrapCommand('win32').includes('powershell') && bunBootstrapCommand('win32').includes('install.ps1'));
+  check('defaults to the running platform', typeof bunBootstrapCommand() === 'string' && bunBootstrapCommand().length > 0);
 }
 
 // ======================================================================

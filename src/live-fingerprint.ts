@@ -89,9 +89,10 @@ import { spawn, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
+
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { homeDir } from './home-dir.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -301,7 +302,7 @@ function liveCachePath(): string {
   const override = process.env['DARIO_LIVE_TEMPLATE_CACHE'];
   return override && override.length > 0
     ? override
-    : join(homedir(), '.dario', 'cc-template.live.json');
+    : join(homeDir(), '.dario', 'cc-template.live.json');
 }
 const LIVE_TTL_MS = 24 * 60 * 60 * 1000; // re-extract once a day
 

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { readFileSync, readdirSync, createWriteStream, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+
 import { setDefaultResultOrder } from 'node:dns';
 import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus, ignoreCcCredentials } from './oauth.js';
@@ -24,6 +24,7 @@ import { route as routeProvider } from './provider-adapter.js';
 import { RequestQueue, QueueFullError, QueueTimeoutError, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_QUEUED, DEFAULT_QUEUE_TIMEOUT_MS } from './request-queue.js';
 import { redactSecrets } from './redact.js';
 import { BAKED_BASE_MODELS, withLongContextVariants, buildOpenAIModelsList, getModelCatalog, getCachedBases, resolveAliasAgainst, prewarmModelCatalog, retryModelCatalogNow, isSuspendedModel, type CatalogDeps } from './model-catalog.js';
+import { homeDir } from './home-dir.js';
 
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
@@ -180,13 +181,13 @@ const OS_NAME = platform === 'win32' ? 'Windows' : platform === 'darwin' ? 'MacO
 // routes them to Extra Usage billing instead of the Max plan allocation.
 function loadClaudeIdentity(): { deviceId: string; accountUuid: string } {
   const paths = [
-    join(homedir(), '.claude.json'),              // Windows / Linux / macOS (live config)
-    join(homedir(), '.claude', '.claude.json'),    // Alternative location
-    join(homedir(), '.claude', 'claude.json'),
+    join(homeDir(), '.claude.json'),              // Windows / Linux / macOS (live config)
+    join(homeDir(), '.claude', '.claude.json'),    // Alternative location
+    join(homeDir(), '.claude', 'claude.json'),
   ];
   // Also check backup files as fallback
   try {
-    const backupDir = join(homedir(), '.claude', 'backups');
+    const backupDir = join(homeDir(), '.claude', 'backups');
     const files = readdirSync(backupDir) as string[];
     const backups = files
       .filter((f: string) => f.startsWith('.claude.json.backup.'))

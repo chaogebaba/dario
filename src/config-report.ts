@@ -18,8 +18,9 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
+
 import { ignoreCcCredentials } from './oauth.js';
+import { homeDir } from './home-dir.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -42,7 +43,7 @@ export interface ConfigReport {
  */
 export async function collectEffectiveConfig(): Promise<ConfigReport> {
   const sections: ConfigSection[] = [];
-  const home = join(homedir(), '.dario');
+  const home = join(homeDir(), '.dario');
 
   // ── Identity
   let version = 'unknown';

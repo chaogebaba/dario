@@ -40,9 +40,10 @@
 
 import { readFile, writeFile, mkdir, stat, open as openFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
+import { platform } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
+import { homeDir } from './home-dir.js';
 
 export interface DetectedOAuthConfig {
   clientId: string;
@@ -128,11 +129,11 @@ export const FALLBACK_FOR_DRIFT_CHECK: Readonly<DetectedOAuthConfig> = FALLBACK;
 // regenerates automatically with the 6-scope set (dario#71). Previous
 // bumps: -v3 → -v4 in v3.19.4 for 6→5 rotation (dario#42); -v4 → -v5 in
 // v3.31.3 for the authorize URL normalization.
-const CACHE_PATH = join(homedir(), '.dario', 'cc-oauth-cache-v6.json');
-const DEFAULT_OVERRIDE_PATH = join(homedir(), '.dario', 'oauth-config.override.json');
+const CACHE_PATH = join(homeDir(), '.dario', 'cc-oauth-cache-v6.json');
+const DEFAULT_OVERRIDE_PATH = join(homeDir(), '.dario', 'oauth-config.override.json');
 
 function candidatePaths(): string[] {
-  const home = homedir();
+  const home = homeDir();
   if (platform() === 'win32') {
     return [
       // CC v2.x ships a Bun-compiled standalone exe under bin/.
