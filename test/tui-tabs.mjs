@@ -427,6 +427,81 @@ header('Accounts tab — empty + populated');
 }
 
 // ─────────────────────────────────────────────────────────────
+// dario reads utilization off the rate-limit headers of responses it
+// proxies, so a proxy that has served nothing knows nothing. Rendering that
+// as `0%` is a claim about the operator's quota that dario has not earned —
+// reported live as `util5h 0%  util7d 0%` on an account whose windows were
+// demonstrably part-spent. `measuredAt` is what tells the two apart.
+header('Accounts tab — never-measured utilization renders as —, not 0%');
+{
+  const strip = (s) => s.replace(/\[[0-9;]*m/g, '');
+  /** The rendered row for one alias, ANSI stripped. */
+  const row = (rendered, alias) =>
+    strip(rendered).split('\n').find((l) => new RegExp(`^\\s{2}${alias}\\s`).test(l)) ?? '';
+  /** Both utilization columns blank — an em dash in each. */
+  const bothDashed = (line) => (line.match(/—/g) ?? []).length === 2;
+
+  const unmeasured = {
+    loading: false,
+    source: 'pool',
+    accounts: [{ alias: 'login', expiresAt: Date.now() + 3600_000, util5h: 0, util7d: 0, status: 'unknown', measuredAt: 0 }],
+    error: null,
+  };
+  const r1 = strip(AccountsTab.render(unmeasured, DIM));
+  check('unmeasured: no 0% claim',         !r1.includes('0%'));
+  check('unmeasured: renders a dash',      bothDashed(row(r1, 'login')));
+  check('unmeasured: explains why',        r1.includes('none seen yet this run'));
+  check('unmeasured: names the probe',     r1.includes('dario doctor --usage'));
+
+  // A measured zero is a real reading and must still print as 0%.
+  const measuredZero = {
+    loading: false,
+    source: 'pool',
+    accounts: [{ alias: 'login', expiresAt: Date.now() + 3600_000, util5h: 0, util7d: 0, status: 'allowed', measuredAt: Date.now() }],
+    error: null,
+  };
+  const r2 = strip(AccountsTab.render(measuredZero, DIM));
+  check('measured zero: prints 0%',        r2.includes('0%'));
+  check('measured zero: drops the hint',   !r2.includes('none seen yet this run'));
+
+  const measured = {
+    loading: false,
+    source: 'pool',
+    accounts: [{ alias: 'login', expiresAt: Date.now() + 3600_000, util5h: 0.62, util7d: 0.31, status: 'allowed', measuredAt: Date.now() }],
+    error: null,
+  };
+  const r3 = strip(AccountsTab.render(measured, DIM));
+  check('measured: prints the figures',    r3.includes('62%') && r3.includes('31%'));
+
+  // A mixed pool must not suppress the hint for the seat that does have data.
+  const mixed = {
+    loading: false,
+    source: 'pool',
+    accounts: [
+      { alias: 'a', expiresAt: Date.now() + 3600_000, util5h: 0.5, util7d: 0.2, status: 'allowed', measuredAt: Date.now() },
+      { alias: 'b', expiresAt: Date.now() + 3600_000, util5h: 0, util7d: 0, status: 'unknown', measuredAt: 0 },
+    ],
+    error: null,
+  };
+  const r4 = strip(AccountsTab.render(mixed, DIM));
+  check('mixed: measured seat keeps its figures', r4.includes('50%') && r4.includes('20%'));
+  check('mixed: unmeasured seat still dashes',    bothDashed(row(r4, 'b')));
+  check('mixed: no pool-wide hint',               !r4.includes('none seen yet this run'));
+
+  // A proxy predating `measuredAt` omits the field. Blanking every column
+  // there would be a regression against the old behaviour, so absence falls
+  // back to the previous "util present means show it" rule.
+  const legacy = {
+    loading: false,
+    source: 'pool',
+    accounts: [{ alias: 'login', expiresAt: Date.now() + 3600_000, util5h: 0.42, util7d: 0.1, status: 'allowed' }],
+    error: null,
+  };
+  const r5 = strip(AccountsTab.render(legacy, DIM));
+  check('legacy proxy without measuredAt still renders', r5.includes('42%'));
+}
+
+// ─────────────────────────────────────────────────────────────
 header('Backends tab — empty + populated');
 {
   const empty = { loading: false, backends: [], error: null };

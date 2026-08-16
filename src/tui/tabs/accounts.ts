@@ -38,6 +38,14 @@ export interface AccountsState {
     util5h?: number;
     util7d?: number;
     status?: string;
+    /**
+     * When the utilization figures were last measured, 0/undefined when
+     * never. dario only sees utilization on responses it proxies, so a
+     * proxy that has served nothing reports `util5h: 0` meaning "no idea",
+     * and rendering that as `0%` tells the operator their quota is
+     * untouched. Unmeasured renders `—`.
+     */
+    measuredAt?: number;
   }>;
   error: string | null;
   /** Where the list came from: the running proxy's pool, the proxy's
@@ -51,9 +59,11 @@ interface AccountsEndpoint {
   accounts?: Array<{
     alias: string;
     expiresInMs?: number;
+    expiresAt?: number;
     util5h?: number;
     util7d?: number;
     status?: string;
+    measuredAt?: number;
   }>;
 }
 
@@ -140,8 +150,12 @@ export const AccountsTab: Tab<AccountsState> = {
       const aliasCol = pad(acc.alias, 20);
       if (hasUtil) {
         const expiresCol = pad(formatExpiry(acc.expiresAt), 14);
-        const u5 = pad(acc.util5h !== undefined ? `${Math.round(acc.util5h * 100)}%` : '—', 9);
-        const u7 = pad(acc.util7d !== undefined ? `${Math.round(acc.util7d * 100)}%` : '—', 9);
+        // `—` when the pool has never seen a response for this account.
+        // Printing the placeholder 0 as `0%` is the whole bug this column
+        // had: it reads as a measurement of an untouched quota.
+        const seen = isMeasured(acc);
+        const u5 = pad(seen ? `${Math.round((acc.util5h ?? 0) * 100)}%` : '—', 9);
+        const u7 = pad(seen ? `${Math.round((acc.util7d ?? 0) * 100)}%` : '—', 9);
         const statusCol = acc.status ?? '—';
         const statusFg = statusCol === 'auth-cooldown' ? fg('yellow', statusCol) : dim(statusCol);
         push('  ' + aliasCol + expiresCol + u5 + u7 + statusFg);
@@ -150,6 +164,16 @@ export const AccountsTab: Tab<AccountsState> = {
         const sourceCol = '~/.dario/accounts/' + acc.alias + '.json';
         push('  ' + aliasCol + expiresCol + dim(sourceCol));
       }
+    }
+
+    // Without this the `—` column is a mystery. dario reads utilization off
+    // the rate-limit headers of responses it proxies and nowhere else, so an
+    // idle proxy genuinely has nothing to show — say so rather than let the
+    // operator conclude the feature is broken.
+    if (hasUtil && !state.accounts.some(isMeasured)) {
+      push('');
+      push('  ' + dim('util is read from proxied responses — none seen yet this run.'));
+      push('  ' + dim('For a reading now: ') + fg('cyan', 'dario doctor --usage'));
     }
 
     push('');
@@ -169,6 +193,17 @@ export const AccountsTab: Tab<AccountsState> = {
 /** Guards the onTick refetch against overlapping in-flight fetches. */
 let refreshInFlight = false;
 
+/**
+ * Has this account's utilization actually been measured? A proxy older than
+ * `measuredAt` omits the field entirely; fall back to the pre-existing
+ * "util present" test there so an old proxy behaves as it did before rather
+ * than blanking every column.
+ */
+function isMeasured(acc: AccountsState['accounts'][number]): boolean {
+  if (acc.measuredAt !== undefined) return acc.measuredAt > 0;
+  return acc.util5h !== undefined;
+}
+
 export async function refreshAccounts(ctx?: TabContext<AccountsState>): Promise<AccountsState> {
   // Preferred source: the running proxy's live pool. This is what actually
   // serves traffic, and it works regardless of which process/host/volume the
@@ -187,10 +222,14 @@ export async function refreshAccounts(ctx?: TabContext<AccountsState>): Promise<
           source: 'pool',
           accounts: r.accounts.map((a) => ({
             alias: a.alias,
-            expiresAt: now + (a.expiresInMs ?? 0),
+            // Prefer the absolute timestamp: `expiresInMs` is clamped at 0
+            // upstream, which renders a long-dead token as `0m` instead of
+            // `expired`. Older proxies send only the clamped remainder.
+            expiresAt: a.expiresAt ?? now + (a.expiresInMs ?? 0),
             util5h: a.util5h,
             util7d: a.util7d,
             status: a.status,
+            measuredAt: a.measuredAt,
           })),
           error: null,
         };

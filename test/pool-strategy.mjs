@@ -54,14 +54,14 @@ function addAccount(pool, alias, { util5h = 0, util7d = 0, perModel7d = {}, reje
     util7d,
     perModel7d,
     status: rejected ? 'rejected' : 'ok',
-    updatedAt: Date.now(),
+    measured: true, updatedAt: Date.now(),
   });
   if (rejected) {
     pool.markRejected(alias, {
       ...EMPTY_SNAPSHOT,
       util5h, util7d, perModel7d,
       status: 'rejected',
-      updatedAt: Date.now(),
+      measured: true, updatedAt: Date.now(),
     });
   }
 }
@@ -101,7 +101,7 @@ header('fill-first spills at the floor and returns on recovery');
   addAccount(pool, 'b-spill', { util5h: 0.5 });
   check('spills to next alias at/below the floor', pool.select()?.alias === 'b-spill');
 
-  pool.updateRateLimits('a-main', { ...EMPTY_SNAPSHOT, util5h: 0.3, status: 'ok', updatedAt: Date.now() });
+  pool.updateRateLimits('a-main', { ...EMPTY_SNAPSHOT, util5h: 0.3, status: 'ok', measured: true, updatedAt: Date.now() });
   check('returns to first alias when headroom recovers', pool.select()?.alias === 'a-main');
 }
 

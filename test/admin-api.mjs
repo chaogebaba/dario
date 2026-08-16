@@ -109,7 +109,7 @@ header('GET /admin/accounts — live pool status merged onto persisted metadata'
     { alias: 'acct2', scopes: ['user:inference'], expiresAt: now + 7_200_000 },
   ];
   const poolStatus = () => new Map([
-    ['acct1', { util5h: 0.12, util7d: 0.34, claim: 'subscription', status: 'active', requestCount: 7 }],
+    ['acct1', { util5h: 0.12, util7d: 0.34, measuredAt: now - 5_000, claim: 'subscription', status: 'active', requestCount: 7 }],
     // acct2 deliberately absent — persisted but not (yet) in the live pool.
   ]);
   const req = mockReq('GET', '/admin/accounts', bearer(TOKEN));
@@ -125,6 +125,10 @@ header('GET /admin/accounts — live pool status merged onto persisted metadata'
   check('live util5h/util7d merged in', a1?.util5h === 0.12 && a1?.util7d === 0.34);
   check('live claim + status merged in', a1?.claim === 'subscription' && a1?.status === 'active');
   check('live request_count merged in', a1?.request_count === 7);
+  // Without this the caller cannot tell 0.12 from a placeholder zero — util
+  // is only ever observed as a side effect of proxied traffic, so a fresh
+  // pool reports 0/0 meaning "not looked yet".
+  check('measured_at travels with the figures', a1?.measured_at === now - 5_000);
   check('account absent from pool snapshot omits live fields', a2 && a2.util5h === undefined && a2.claim === undefined);
   check('no /accounts note when pool status present', json.note === undefined);
 }

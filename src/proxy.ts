@@ -1279,6 +1279,47 @@ export async function resolveSingleAccountStartupStatus(
   return status;
 }
 
+/**
+ * Startup auth line for pool mode, derived from the tokens actually loaded.
+ *
+ * This used to hardcode `authenticated: true, status: 'healthy'` for any
+ * non-empty pool and print the earliest expiry through a `Math.max(0, …)`
+ * clamp. A pool whose only refresh token was dead therefore announced
+ * "OAuth: healthy (expires in 0h 0m)" on the line directly below
+ * "Startup refresh failed for login: invalid_grant" — the banner contradicting
+ * the error above it, and the operator left with a proxy that 503s every
+ * request while claiming to be fine.
+ *
+ * 30s of slack matches `select()`'s eligibility window, so "healthy" here
+ * means the same thing it means to the router: at least one account it would
+ * be willing to pick.
+ */
+export function resolvePoolStartupStatus(
+  accounts: Array<{ expiresAt: number }>,
+  now: number = Date.now(),
+): Awaited<ReturnType<typeof getStatus>> {
+  const live = accounts.filter(a => a.expiresAt > now + 30_000);
+  if (live.length === 0) {
+    const latest = accounts.length > 0 ? Math.max(...accounts.map(a => a.expiresAt)) : 0;
+    return {
+      authenticated: false,
+      status: 'expired',
+      expiresAt: latest,
+      expiresIn: 'run `dario login`',
+    };
+  }
+  // Soonest expiry among the accounts that are still usable; an already-dead
+  // seat alongside a live one must not drag the reported figure to zero.
+  const earliest = Math.min(...live.map(a => a.expiresAt));
+  const msLeft = earliest - now;
+  return {
+    authenticated: true,
+    status: 'healthy',
+    expiresAt: earliest,
+    expiresIn: `${Math.floor(msLeft / 3600000)}h ${Math.floor((msLeft % 3600000) / 60000)}m`,
+  };
+}
+
 export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const port = opts.port ?? DEFAULT_PORT;
   const host = opts.host ?? process.env.DARIO_HOST ?? DEFAULT_HOST;
@@ -1669,14 +1710,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       expiresIn: upstreamApiKey ? 'api-key mode' : 'no accounts yet',
     };
   } else {
-    const earliest = Math.min(...pool.all().map(a => a.expiresAt));
-    const msLeft = Math.max(0, earliest - Date.now());
-    status = {
-      authenticated: true,
-      status: 'healthy',
-      expiresAt: earliest,
-      expiresIn: `${Math.floor(msLeft / 3600000)}h ${Math.floor((msLeft % 3600000) / 60000)}m`,
-    };
+    status = resolvePoolStartupStatus(pool.all());
   }
 
   const cliVersion = detectCliVersion();
@@ -2159,6 +2193,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             snap.set(a.alias, {
               util5h: a.rateLimit.util5h,
               util7d: a.rateLimit.util7d,
+              measuredAt: a.rateLimit.updatedAt,
               claim: a.rateLimit.claim,
               status: isInAuthCooldown(a, snapNow) ? 'auth-cooldown' : a.rateLimit.status,
               requestCount: a.requestCount,
@@ -2244,6 +2279,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           status: inCooldown ? 'auth-cooldown' : a.rateLimit.status,
           requestCount: a.requestCount,
           expiresInMs: Math.max(0, a.expiresAt - now),
+          // Absolute expiry alongside the clamped remainder: `expiresInMs`
+          // floors at 0, so a consumer reading only that field cannot tell
+          // "expires this instant" from "expired three months ago" and
+          // renders both as `0m`.
+          expiresAt: a.expiresAt,
+          // When the utilization above was last actually measured, 0 when
+          // never. Without it every consumer reads a fresh account's
+          // placeholder zeros as "0% of quota used" — see RateLimitSnapshot.measured.
+          measuredAt: a.rateLimit.updatedAt,
           ...(inCooldown
             ? {
                 lastAuthFailureAt: a.lastAuthFailureAt,
@@ -4089,7 +4133,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   server.listen(port, host, () => {
     const modeLine = passthrough
       ? 'Mode: passthrough (OAuth swap only, no injection)'
-      : `OAuth: ${status.status} (expires in ${status.expiresIn})`;
+      : status.authenticated
+        ? `OAuth: ${status.status} (expires in ${status.expiresIn})`
+        : `OAuth: ${status.status} — ${status.expiresIn}`;
     const fastNote = fastModelOverride ? `, ${fastModelOverride} (Haiku-tier sub-agents)` : '';
     const modelLine = modelOverride
       ? `Model: ${modelOverride} (all requests)${fastNote}`

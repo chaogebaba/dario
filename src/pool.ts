@@ -53,6 +53,21 @@ export interface RateLimitSnapshot {
   reset: number;
   fallbackPct: number;
   updatedAt: number;
+  /**
+   * Whether the response this snapshot came from actually carried
+   * rate-limit headers. `false` means every numeric field below is a
+   * placeholder zero, not a measurement.
+   *
+   * The distinction is load-bearing in two places. Upstream responses that
+   * carry no rate-limit headers at all are routine — 401 on an expired
+   * token, 400 on a malformed body, 5xx from the edge — and treating their
+   * all-zero parse as a measurement wiped the account's real utilization
+   * back to 0% (`updateRateLimits` below refuses to). And a pool account
+   * that has never served a request has to render as `—`, not `0%`: an
+   * operator who reads "0% used" on a freshly restarted proxy concludes
+   * their quota is untouched when dario simply has not looked yet.
+   */
+  measured: boolean;
 }
 
 export const EMPTY_SNAPSHOT: RateLimitSnapshot = {
@@ -65,6 +80,7 @@ export const EMPTY_SNAPSHOT: RateLimitSnapshot = {
   reset: 0,
   fallbackPct: 0,
   updatedAt: 0,
+  measured: false,
 };
 
 export interface PoolAccount {
@@ -175,6 +191,29 @@ interface QueuedRequest {
  */
 const PER_MODEL_7D_HEADER = /^anthropic-ratelimit-unified-7d_([a-z0-9-]+)-utilization$/i;
 
+/**
+ * Did this response carry rate-limit headers at all?
+ *
+ * Anthropic attaches them to anything that reached the subscription
+ * accounting layer, and to nothing else — a 401 on a dead token, a 400 on a
+ * bad body, a 502 from the edge all come back bare. `parseRateLimits` maps a
+ * bare response to all-zeros, which is indistinguishable from a genuinely
+ * idle account, so callers need this to know whether the parse is a
+ * measurement or a placeholder. `doctor --usage` has always applied the same
+ * test before trusting a probe response.
+ *
+ * The utilization headers are checked alongside `status` because that is the
+ * field we actually read; a future response that carries one without the
+ * other still counts as measured.
+ */
+export function hasRateLimitHeaders(headers: Headers): boolean {
+  return (
+    headers.get('anthropic-ratelimit-unified-status') !== null ||
+    headers.get('anthropic-ratelimit-unified-5h-utilization') !== null ||
+    headers.get('anthropic-ratelimit-unified-7d-utilization') !== null
+  );
+}
+
 /** Parse an Anthropic response's rate-limit headers into a snapshot. */
 export function parseRateLimits(headers: Headers): RateLimitSnapshot {
   const get = (key: string) => headers.get(`anthropic-ratelimit-unified-${key}`) ?? '';
@@ -204,6 +243,7 @@ export function parseRateLimits(headers: Headers): RateLimitSnapshot {
     reset: parseInt(get('reset')) || 0,
     fallbackPct: parseFloat(get('fallback-percentage')) || 0,
     updatedAt: Date.now(),
+    measured: hasRateLimitHeaders(headers),
   };
 }
 
@@ -584,17 +624,34 @@ export class AccountPool {
     return null;
   }
 
+  /**
+   * Record a response against `alias`. An unmeasured snapshot (the response
+   * carried no rate-limit headers — 401, 400, 5xx) counts as a request but
+   * must not replace what we last measured: overwriting there reset a
+   * genuinely 60%-consumed account to 0% on the first upstream error and
+   * left it there until the next successful call, which is exactly the
+   * window an operator is most likely to be staring at the numbers.
+   */
   updateRateLimits(alias: string, snapshot: RateLimitSnapshot): void {
     const account = this.accounts.get(alias);
     if (!account) return;
-    account.rateLimit = snapshot;
+    if (snapshot.measured) account.rateLimit = snapshot;
     account.requestCount++;
   }
 
+  /**
+   * Route away from `alias` after a 429. Same rule as above for the
+   * utilization figures — a 429 that arrives without rate-limit headers
+   * still means "rejected", but it carries no news about the buckets, and
+   * zeroing them there would make the exhausted account look like the
+   * emptiest one in the pool.
+   */
   markRejected(alias: string, snapshot: RateLimitSnapshot): void {
     const account = this.accounts.get(alias);
     if (!account) return;
-    account.rateLimit = { ...snapshot, status: 'rejected' };
+    account.rateLimit = snapshot.measured
+      ? { ...snapshot, status: 'rejected' }
+      : { ...account.rateLimit, status: 'rejected' };
   }
 
   updateTokens(alias: string, accessToken: string, refreshToken: string, expiresAt: number): void {

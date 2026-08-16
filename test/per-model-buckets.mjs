@@ -138,11 +138,11 @@ header('select(family) — flips routing when one account is sonnet-saturated');
 
   // A: better unified headroom but Sonnet-saturated
   pool.updateRateLimits('account-A', {
-    ...EMPTY_SNAPSHOT, util5h: 0.10, util7d: 0.10, perModel7d: { sonnet: 0.99 }, status: 'allowed', updatedAt: Date.now(),
+    ...EMPTY_SNAPSHOT, util5h: 0.10, util7d: 0.10, perModel7d: { sonnet: 0.99 }, status: 'allowed', measured: true, updatedAt: Date.now(),
   });
   // B: worse unified, but no Sonnet pressure
   pool.updateRateLimits('account-B', {
-    ...EMPTY_SNAPSHOT, util5h: 0.40, util7d: 0.40, perModel7d: { sonnet: 0.05 }, status: 'allowed', updatedAt: Date.now(),
+    ...EMPTY_SNAPSHOT, util5h: 0.40, util7d: 0.40, perModel7d: { sonnet: 0.05 }, status: 'allowed', measured: true, updatedAt: Date.now(),
   });
 
   const noFamily = pool.select();
@@ -166,10 +166,10 @@ header('select(family) — sonnet bucket on one account only, partial signal');
   pool.add('B', { accessToken: 'b', refreshToken: 'b', expiresAt: Date.now() + 3600_000, deviceId: 'b', accountUuid: 'b' });
 
   pool.updateRateLimits('A', {
-    ...EMPTY_SNAPSHOT, util5h: 0.10, util7d: 0.10, perModel7d: { sonnet: 0.50 }, status: 'allowed', updatedAt: Date.now(),
+    ...EMPTY_SNAPSHOT, util5h: 0.10, util7d: 0.10, perModel7d: { sonnet: 0.50 }, status: 'allowed', measured: true, updatedAt: Date.now(),
   });
   pool.updateRateLimits('B', {
-    ...EMPTY_SNAPSHOT, util5h: 0.30, util7d: 0.30, perModel7d: {}, status: 'allowed', updatedAt: Date.now(),
+    ...EMPTY_SNAPSHOT, util5h: 0.30, util7d: 0.30, perModel7d: {}, status: 'allowed', measured: true, updatedAt: Date.now(),
   });
 
   // A: max(0.10, 0.10, 0.50) = 0.50 → headroom 0.50

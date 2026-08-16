@@ -49,14 +49,14 @@ function addAccount(pool, alias, { util5h = 0, util7d = 0, rejected = false, exp
     util5h,
     util7d,
     status: rejected ? 'rejected' : 'ok',
-    updatedAt: Date.now(),
+    measured: true, updatedAt: Date.now(),
   });
   if (rejected) {
     pool.markRejected(alias, {
       ...EMPTY_SNAPSHOT,
       util5h, util7d,
       status: 'rejected',
-      updatedAt: Date.now(),
+      measured: true, updatedAt: Date.now(),
     });
   }
 }
@@ -102,7 +102,7 @@ header('selectSticky — first call binds, second call returns same account');
   // Now alpha burns through a lot of headroom — beta is now the better
   // pick on plain select(). But sticky should hold alpha because the
   // prompt cache for this conversation already lives on alpha.
-  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.6, status: 'ok', updatedAt: Date.now() });
+  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.6, status: 'ok', measured: true, updatedAt: Date.now() });
   const plainBest = pool.select();
   check('plain select would now pick beta (0.5 < 0.6)', plainBest?.alias === 'beta');
   const second = pool.selectSticky(key);
@@ -133,7 +133,7 @@ header('selectSticky — rebinds on rejected bound account');
   const key = computeStickyKey('long agent session query one');
   const first = pool.selectSticky(key);
   check('initially bound to alpha', first?.alias === 'alpha');
-  pool.markRejected('alpha', { ...EMPTY_SNAPSHOT, status: 'rejected', updatedAt: Date.now() });
+  pool.markRejected('alpha', { ...EMPTY_SNAPSHOT, status: 'rejected', measured: true, updatedAt: Date.now() });
   const second = pool.selectSticky(key);
   check('after alpha rejected, sticky rebinds to beta', second?.alias === 'beta');
   check('binding count still 1 (same key, new alias)', pool.stickyCount() === 1);
@@ -151,7 +151,7 @@ header('selectSticky — rebinds on headroom collapse below 2%');
   const key = computeStickyKey('another long session');
   check('first select binds to alpha', pool.selectSticky(key)?.alias === 'alpha');
   // Push alpha to 99% utilization — headroom = 0.01, below the 2% floor.
-  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.99, status: 'ok', updatedAt: Date.now() });
+  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.99, status: 'ok', measured: true, updatedAt: Date.now() });
   const second = pool.selectSticky(key);
   check('after alpha hits 99%, sticky rebinds to beta', second?.alias === 'beta');
 }
@@ -236,7 +236,7 @@ header('multi-conversation — distinct keys bind to distinct accounts');
   check('key1 → alpha (highest headroom)', pick1?.alias === 'alpha');
 
   // Burn alpha down so beta is now the best headroom for a new conversation
-  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.7, status: 'ok', updatedAt: Date.now() });
+  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.7, status: 'ok', measured: true, updatedAt: Date.now() });
 
   const pick2 = pool.selectSticky(key2);
   check('key2 → beta (now highest headroom at pick time)', pick2?.alias === 'beta');
@@ -289,7 +289,7 @@ header('idle TTL — a binding idle past 6h is reaped and re-picks the current b
   check('binds to alpha at t0', pool.selectSticky(key, null, t0)?.alias === 'alpha');
   // alpha drains so a FRESH selection would now prefer beta — but alpha still
   // has 0.4 headroom, above the 2% floor, so stickiness holds it within the TTL.
-  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.6, status: 'ok', updatedAt: Date.now() });
+  pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.6, status: 'ok', measured: true, updatedAt: Date.now() });
   check('return at t0+3h stays on alpha (within idle TTL)', pool.selectSticky(key, null, t0 + 3 * HOUR)?.alias === 'alpha');
   // That t0+3h hit re-based the timer; 7h later (idle > 6h) the binding is reaped
   // and the returning conversation re-picks the current best, which is now beta.
