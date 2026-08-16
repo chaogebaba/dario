@@ -9,6 +9,7 @@
 
 import {
   classifyRuntimeFingerprint,
+  bunBootstrapArgv,
   bunBootstrapCommand,
   bunVersionMeetsJa3Floor,
   JA3_VERIFIED_BUN_FLOOR,
@@ -44,7 +45,7 @@ header('classifyRuntimeFingerprint — running under recent Bun → bun-match');
 // ======================================================================
 header('classifyRuntimeFingerprint — old Bun below JA3 floor → bun-ja3-unverified');
 {
-  // #813: dario auto-relaunches into whatever Bun is on PATH. Bun 1.0.9's
+  // #813: dario runs under whatever Bun is on PATH. Bun 1.0.9's
   // BoringSSL emits a divergent ClientHello (2ae7…) vs CC's e97f…, so being
   // "under Bun" must not report a green match at an old version.
   const out = classifyRuntimeFingerprint(true, '1.0.9', {});
@@ -92,20 +93,8 @@ header('classifyRuntimeFingerprint — Node with Bun on PATH → bun-bypassed');
   check('runtime === "node"', out.runtime === 'node');
   check('runtimeVersion captured from Node', out.runtimeVersion === 'v20.11.1');
   check('availableBunVersion recorded', out.availableBunVersion === '1.1.30');
-  check('bypassReason === "unknown" (no DARIO_NO_BUN)', out.bypassReason === 'unknown');
   check('hint present (actionable)', typeof out.hint === 'string' && out.hint.length > 0);
   check('detail mentions both versions', out.detail.includes('v20.11.1') && out.detail.includes('1.1.30'));
-}
-
-// ======================================================================
-//  DARIO_NO_BUN set → bypassReason recorded as the env var
-// ======================================================================
-header('classifyRuntimeFingerprint — DARIO_NO_BUN is reported as the bypass reason');
-{
-  const out = classifyRuntimeFingerprint(false, '1.1.30', { DARIO_NO_BUN: '1' });
-  check('status === "bun-bypassed"', out.status === 'bun-bypassed');
-  check('bypassReason === "DARIO_NO_BUN"', out.bypassReason === 'DARIO_NO_BUN');
-  check('hint mentions DARIO_NO_BUN', out.hint !== undefined && out.hint.includes('DARIO_NO_BUN'));
 }
 
 // ======================================================================
@@ -117,12 +106,11 @@ header('classifyRuntimeFingerprint — Node without Bun on PATH → node-only');
   check('status === "node-only"', out.status === 'node-only');
   check('runtime === "node"', out.runtime === 'node');
   check('availableBunVersion is undefined', out.availableBunVersion === undefined);
-  check('bypassReason undefined (nothing to bypass)', out.bypassReason === undefined);
   check('hint present', typeof out.hint === 'string' && out.hint.length > 0);
   check('hint mentions bun.sh install URL', out.hint.includes('bun.sh'));
   check(
-    'detail calls out JA3 divergence',
-    out.detail.includes('diverges') || out.detail.includes('diverge'),
+    'detail names the Bun requirement',
+    out.detail.includes('requires the Bun runtime'),
   );
 }
 
@@ -131,25 +119,11 @@ header('classifyRuntimeFingerprint — Node without Bun on PATH → node-only');
 // ======================================================================
 header('classifyRuntimeFingerprint — does not mutate the env argument');
 {
-  const env = { DARIO_NO_BUN: '1', FOO: 'bar' };
+  const env = { FOO: 'bar' };
   const before = JSON.stringify(env);
   classifyRuntimeFingerprint(false, '1.1.30', env);
   const after = JSON.stringify(env);
   check('env unchanged after classify call', before === after);
-}
-
-// ======================================================================
-//  DARIO_NO_BUN set + no Bun installed → still node-only (not bypassed)
-// ======================================================================
-header('classifyRuntimeFingerprint — DARIO_NO_BUN with no Bun → still node-only');
-{
-  // When DARIO_NO_BUN is set but Bun isn't even installed, the user didn't
-  // bypass anything — there's nothing to bypass. Status stays node-only,
-  // with the install-Bun hint, not the unset-DARIO_NO_BUN hint.
-  const out = classifyRuntimeFingerprint(false, undefined, { DARIO_NO_BUN: '1' });
-  check('status === "node-only"', out.status === 'node-only');
-  check('bypassReason undefined', out.bypassReason === undefined);
-  check('hint points at Bun install, not the env var', out.hint.includes('bun.sh'));
 }
 
 // ======================================================================
@@ -165,6 +139,30 @@ header('bunBootstrapCommand — installer command shape');
   // downloading and executing a network installer on the test machine
   // (and, under a concurrent runner, many at once). Inspect the string;
   // never spawn it.
+  // Assert on what actually gets spawned. bunBootstrap() builds its argv
+  // from bunBootstrapArgv(), so these constrain the real command; asserting
+  // only on the rendered string left the spawn free to differ from it.
+  // Exact strings, not `.includes` — the URL is the whole security surface
+  // of a curl-to-shell installer, and `.includes('bun.sh')` is equally
+  // happy with `evil.test/?x=bun.sh`.
+  const nix = bunBootstrapArgv('linux');
+  check('linux spawns bash -lc', nix.cmd === 'bash' && nix.args[0] === '-lc');
+  check('linux runs exactly the upstream curl-pipe-bash',
+    nix.args[1] === 'curl -fsSL https://bun.sh/install | bash', nix.args[1]);
+  check('darwin is identical to linux',
+    JSON.stringify(bunBootstrapArgv('darwin')) === JSON.stringify(nix));
+
+  const win = bunBootstrapArgv('win32');
+  check('windows spawns powershell', win.cmd === 'powershell');
+  check('windows keeps -NoProfile and bypasses execution policy',
+    win.args.includes('-NoProfile') && win.args.includes('Bypass'));
+  // bun.sh, not bun.com: PowerShell's `irm` does not follow the 308, so
+  // the redirect HTML reaches `iex` and fails to parse. The win32 branch
+  // is the one that documents this and the one that never asserted it.
+  check('windows fetches install.ps1 from bun.sh exactly',
+    win.args[win.args.length - 1] === 'irm https://bun.sh/install.ps1 | iex',
+    win.args[win.args.length - 1]);
+
   check('linux/macos targets the canonical bun.sh URL', bunBootstrapCommand('linux').includes('bun.sh'));
   check('linux/macos uses curl-pipe-bash', bunBootstrapCommand('darwin').includes('curl') && bunBootstrapCommand('darwin').includes('install'));
   check('windows uses powershell irm', bunBootstrapCommand('win32').includes('powershell') && bunBootstrapCommand('win32').includes('install.ps1'));

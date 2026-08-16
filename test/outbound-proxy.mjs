@@ -221,19 +221,31 @@ header('resolveEgressProxyFlag — precedence');
   // behaviour is chosen and asserted rather than whatever argument order
   // happens to fall out of the implementation.
 
-  // Repeated flag: first wins. (Many CLIs take the last; this one does
-  // not, and a silent change of mind here would reroute egress.)
-  check('repeated --egress-proxy: the first wins',
-    resolveEgressProxyFlag(['--egress-proxy=http://a:1', '--egress-proxy=http://b:2'], {}, null) === 'http://a:1');
-  check('repeated across forms: the = form wins regardless of position',
-    resolveEgressProxyFlag(['--egress-proxy', 'http://b:2', '--egress-proxy=http://a:1'], {}, null) === 'http://a:1');
+  // Within argv, the LAST occurrence wins, whichever spelling it uses.
+  // This used to scan by flag name, which made the first one win — and
+  // made the case below route direct while the operator was looking at an
+  // explicit proxy URL on the command line.
+  check('repeated --egress-proxy: the last wins',
+    resolveEgressProxyFlag(['--egress-proxy=http://a:1', '--egress-proxy=http://b:2'], {}, null) === 'http://b:2');
+  check('a real URL after an empty one wins (and is not silently dropped)',
+    resolveEgressProxyFlag(['--egress-proxy=', '--egress-proxy=http://real:1080'], {}, null) === 'http://real:1080');
+  check('an empty value last still clears — an explicit override, typed last',
+    resolveEgressProxyFlag(['--egress-proxy=http://real:1080', '--egress-proxy='], {}, null) === undefined);
+  check('mixed forms resolve in argv order, not by form',
+    resolveEgressProxyFlag(['--egress-proxy=http://a:1', '--egress-proxy', 'http://b:2'], {}, null) === 'http://b:2');
 
-  // Alias vs canonical: the canonical name wins wherever it appears,
-  // because the aliases exist only for compatibility.
-  check('--egress-proxy beats --via even when --via comes first',
+  // Aliases are the same layer, so argv order decides between them too.
+  // The old rule ranked by name, so `--via=A --upstream-proxy=B` picked B
+  // regardless of which the operator meant to override.
+  check('--via after --egress-proxy wins',
+    resolveEgressProxyFlag(['--egress-proxy=http://a:1', '--via=http://b:2'], {}, null) === 'http://b:2');
+  check('--egress-proxy after --via wins',
     resolveEgressProxyFlag(['--via=http://b:2', '--egress-proxy=http://a:1'], {}, null) === 'http://a:1');
-  check('--upstream-proxy beats --via',
-    resolveEgressProxyFlag(['--via=http://b:2', '--upstream-proxy=http://a:1'], {}, null) === 'http://a:1');
+
+  // The value of a space-form flag is consumed, so a URL that happens to
+  // look like a later flag's value can't be re-read as one.
+  check('space form consumes its value',
+    resolveEgressProxyFlag(['--egress-proxy', 'http://a:1'], {}, FILE) === 'http://a:1');
 
   // Prefix collisions: a longer flag that merely starts the same must
   // not be mistaken for this one.

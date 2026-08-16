@@ -12,13 +12,13 @@
  * OpenSSL-shaped — distinct from Bun's BoringSSL shape. That's the JA3
  * gap this module flags.
  *
- * Mitigation today: dario auto-relaunches under Bun when Bun is on PATH
- * (see top of `src/cli.ts`). When Bun isn't available the auto-relaunch
- * is a silent no-op, so proxy mode silently runs on Node's TLS stack
- * with no indication to the operator. This module makes the runtime
- * status a first-class check: `dario doctor` reports it, proxy startup
- * warns when the axis is mismatched, and `--strict-tls` hard-fails
- * instead of silently running with a divergent fingerprint.
+ * Bun is now a hard requirement: the CLI refuses to start under Node (see
+ * the main-entry guard at the bottom of `src/cli.ts`), so proxy mode can
+ * no longer silently run on Node's TLS stack. This module makes the
+ * runtime status a first-class check: `dario doctor` reports it, proxy
+ * startup warns when the axis is mismatched, and `--strict-tls` hard-fails
+ * on a Bun version below the JA3-verified floor instead of silently
+ * running with a divergent fingerprint.
  *
  * Pure-function: every input is passed in explicitly so tests can
  * exercise each runtime combination without spawning processes.
@@ -38,7 +38,7 @@ export type RuntimeFingerprintStatus =
    * report a false-green match while emitting a divergent JA3.
    */
   | 'bun-ja3-unverified'
-  /** Running under Node, Bun available on PATH but auto-relaunch was bypassed. */
+  /** Running under Node while Bun is on PATH (unreachable from the CLI, which refuses Node). */
   | 'bun-bypassed'
   /** Running under Node, Bun not installed. */
   | 'node-only';
@@ -51,8 +51,6 @@ export interface RuntimeFingerprint {
   runtimeVersion: string;
   /** Bun version discovered on PATH, if any. undefined when runtime==='bun' or bun-not-found. */
   availableBunVersion?: string;
-  /** Why auto-relaunch didn't fire when `status === 'bun-bypassed'`. */
-  bypassReason?: 'DARIO_NO_BUN' | 'unknown';
   /** Human-readable one-line explanation for the check label. */
   detail: string;
   /** Actionable hint when status !== 'bun-match'. undefined otherwise. */
@@ -60,7 +58,7 @@ export interface RuntimeFingerprint {
 }
 
 /**
- * Probe the Bun binary on PATH without relaunching. Returns undefined
+ * Probe the Bun binary on PATH without spawning dario. Returns undefined
  * when bun isn't installed or the version probe fails for any reason
  * (timeout, non-zero exit, etc.). Kept synchronous to match cli.ts's
  * pre-import flow; doctor.ts is the only other caller and is fine with
@@ -127,7 +125,9 @@ export function bunVersionMeetsJa3Floor(
  * the real environment. Production callers pass
  *   `classifyRuntimeFingerprint(typeof Bun !== 'undefined', probeBunVersion(), process.env)`.
  *
- * The `env` parameter is read-only — this function never mutates it.
+ * The `env` parameter is accepted for signature stability but is not
+ * currently read (the old `DARIO_NO_BUN` bypass reason is gone). It is
+ * never mutated.
  */
 export function classifyRuntimeFingerprint(
   runningUnderBun: boolean,
@@ -142,8 +142,8 @@ export function classifyRuntimeFingerprint(
     const bunVer = availableBunVersion ?? 'unknown';
     // Being on Bun is necessary but NOT sufficient: only Bun ≥ the JA3-verified
     // floor is measured to reproduce CC's ClientHello (#813). A readable version
-    // below the floor is the false-green case — dario auto-relaunches into an
-    // old Bun on PATH and would otherwise report a match while emitting a
+    // below the floor is the false-green case — dario runs under whatever Bun
+    // is on PATH and would otherwise report a match while emitting a
     // divergent JA3. An unreadable version (rare; Bun almost always exposes
     // .version) has nothing to check, so we leave it as a best-effort match.
     if (bunVer !== 'unknown' && bunVersionMeetsJa3Floor(bunVer) === false) {
@@ -163,28 +163,22 @@ export function classifyRuntimeFingerprint(
     };
   }
   if (availableBunVersion !== undefined) {
-    const reason: 'DARIO_NO_BUN' | 'unknown' =
-      env.DARIO_NO_BUN ? 'DARIO_NO_BUN' : 'unknown';
     return {
       status: 'bun-bypassed',
       runtime: 'node',
       runtimeVersion: nodeVersion,
       availableBunVersion,
-      bypassReason: reason,
-      detail: `Node ${nodeVersion} — Bun v${availableBunVersion} on PATH but auto-relaunch bypassed (${reason})`,
-      hint:
-        reason === 'DARIO_NO_BUN'
-          ? 'Unset DARIO_NO_BUN to auto-relaunch under Bun on the next invocation.'
-          : 'Run dario fresh (no inherited DARIO_NO_BUN) so auto-relaunch can fire.',
+      detail: `Node ${nodeVersion} — Bun v${availableBunVersion} on PATH but this process is on Node`,
+      hint: 'dario requires the Bun runtime — re-run it under Bun (`bun dario`).',
     };
   }
   return {
     status: 'node-only',
     runtime: 'node',
     runtimeVersion: nodeVersion,
-    detail: `Node ${nodeVersion} — Bun not installed; proxy-mode TLS fingerprint diverges from Claude Code`,
+    detail: `Node ${nodeVersion} — Bun not installed; dario requires the Bun runtime`,
     hint:
-      'Install Bun (https://bun.sh) so dario can auto-relaunch under it and its TLS ClientHello ' +
+      'Install Bun (https://bun.sh) — dario requires it; its BoringSSL ClientHello is what ' +
       'matches Claude Code\'s.',
   };
 }
@@ -215,10 +209,20 @@ export function detectRuntimeFingerprint(): RuntimeFingerprint {
  * a network installer on the test machine. A pure function removes the
  * hazard instead of trying to contain it.
  */
-export function bunBootstrapCommand(platform: string = process.platform): string {
+export function bunBootstrapArgv(platform: string = process.platform): { cmd: string; args: string[] } {
   return platform === 'win32'
-    ? 'powershell -NoProfile -ExecutionPolicy Bypass -c "irm https://bun.sh/install.ps1 | iex"'
-    : 'curl -fsSL https://bun.sh/install | bash';
+    ? {
+        cmd: 'powershell',
+        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://bun.sh/install.ps1 | iex'],
+      }
+    : { cmd: 'bash', args: ['-lc', 'curl -fsSL https://bun.sh/install | bash'] };
+}
+
+export function bunBootstrapCommand(platform: string = process.platform): string {
+  const { cmd, args } = bunBootstrapArgv(platform);
+  return platform === 'win32'
+    ? `${cmd} -NoProfile -ExecutionPolicy Bypass -c "${args[args.length - 1]}"`
+    : args[args.length - 1]!;
 }
 
 /**
@@ -244,24 +248,21 @@ export function bunBootstrapCommand(platform: string = process.platform): string
  * to `iex` then fails parse. bun.sh serves the install script directly.
  *
  * Side-effecting and network-touching by design: never call this from a
- * test. Assert on `bunBootstrapCommand()` instead.
+ * test. Assert on `bunBootstrapArgv()` instead — the spawn below is
+ * built from it, so those assertions actually constrain what runs. They
+ * did not when this function held its own copy of the command: changing
+ * the URL here left every test green.
  */
 export async function bunBootstrap(): Promise<{ exitCode: number; runner: string }> {
   const { spawn } = await import('node:child_process');
-  const isWindows = process.platform === 'win32';
   const runner = bunBootstrapCommand();
+  const { cmd, args } = bunBootstrapArgv();
 
   return await new Promise<{ exitCode: number; runner: string }>((resolve) => {
     // Single-shell invocation so the pipe stages execute the way the
     // upstream installer expects. Avoids reimplementing the curl-pipe-bash
     // sequencing in Node primitives.
-    const child = isWindows
-      ? spawn('powershell', [
-          '-NoProfile',
-          '-ExecutionPolicy', 'Bypass',
-          '-Command', 'irm https://bun.sh/install.ps1 | iex',
-        ], { stdio: 'inherit' })
-      : spawn('bash', ['-lc', 'curl -fsSL https://bun.sh/install | bash'], { stdio: 'inherit' });
+    const child = spawn(cmd, args, { stdio: 'inherit' });
 
     child.on('error', () => resolve({ exitCode: 1, runner }));
     child.on('exit', (code) => resolve({ exitCode: code ?? 1, runner }));
