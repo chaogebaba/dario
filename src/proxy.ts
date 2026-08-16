@@ -8,6 +8,7 @@ import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus, ignoreCcCredentials } from './oauth.js';
 import { buildHealthResponse, derivePoolStatus, probeRequested, shouldDiscloseHealthInternals, shouldRunServingProbe, type EgressLike } from './health-response.js';
 import { egressIsNotChangingIp, getEgressSnapshot, refreshEgressIpIfStale } from './egress-ip.js';
+import { fetchQuota, type QuotaSnapshot } from './quota.js';
 import { getServingProbe } from './serving-probe.js';
 import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
@@ -1554,6 +1555,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   // eventual `7d_opus`) doesn't slip past unnoticed. Pure observability —
   // routing already handles unknown families generically.
   const seenPerModelBuckets = new Set<string>();
+  // Per-alias quota cache for GET /quota. Short enough that a deliberate
+  // refresh is never stale, long enough that a TUI tick storm can't turn one
+  // keypress into a burst of control-plane calls.
+  const quotaCache = new Map<string, { at: number; snapshot: QuotaSnapshot }>();
+  const QUOTA_CACHE_MS = 60_000;
   // v4 promotion: analytics is always-on so the TUI's Analytics + Hits
   // tabs work for every install. Pre-v4 this was `pool ? new Analytics()
   // : null` — that gated the /analytics endpoint, but burn-rate /
@@ -2304,6 +2310,47 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         stickyBindings: pool.stickyCount(),
         accounts,
       }));
+      return;
+    }
+
+    // Quota endpoint — the control-plane view of each account's usage
+    // windows (5-hour, 7-day, per-model), fetched on demand from
+    // /api/oauth/usage rather than inferred from proxied-response headers.
+    // Lives here rather than in the TUI because this process holds the
+    // access tokens AND has the egress proxy installed on its global fetch;
+    // a TUI-side probe would both need a credential and leak the operator's
+    // real IP past a configured SOCKS5 egress.
+    //
+    // Cached briefly per alias: the TUI refetches on mount and on `r`, and a
+    // pool of several accounts means one keypress fans out to two upstream
+    // calls each. `?refresh=1` bypasses.
+    if (urlPath === '/quota' && req.method === 'GET') {
+      // Match on req.url, not urlPath — the latter is split on '?' at the top
+      // of this handler, so a query-string test against it never fires.
+      const force = /[?&]refresh=1(&|$)/.test(req.url ?? '');
+      const accounts = await Promise.all(pool.all().map(async (a) => {
+        const cached = quotaCache.get(a.alias);
+        if (!force && cached && Date.now() - cached.at < QUOTA_CACHE_MS) {
+          return { alias: a.alias, ...cached.snapshot, cached: true };
+        }
+        try {
+          const snapshot = await fetchQuota(a.accessToken);
+          quotaCache.set(a.alias, { at: Date.now(), snapshot });
+          return { alias: a.alias, ...snapshot, cached: false };
+        } catch (err) {
+          return {
+            alias: a.alias,
+            windows: [],
+            plan: null,
+            extraUsage: null,
+            fetchedAt: Date.now(),
+            cached: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }));
+      res.writeHead(200, JSON_HEADERS);
+      res.end(JSON.stringify({ accounts }));
       return;
     }
 

@@ -107,8 +107,34 @@ utilization only from the rate-limit headers on responses it proxies, so an
 account it has not served yet reports `0` meaning "not looked", not "quota
 untouched" — `measured_at: 0` says so, and any other value is the unix-ms
 timestamp of the reading. A proxy that has just restarted reports zeros for
-every seat until traffic flows. `dario doctor --usage` takes a reading on
-demand.
+every seat until traffic flows.
+
+For a reading that does not depend on traffic, use `GET /quota` (proxy-key
+gated, not admin-token gated). It calls Anthropic's `/api/oauth/usage` and
+`/api/oauth/profile` per account and returns the same windows the Claude
+Code UI shows:
+
+```json
+{"accounts": [{
+  "alias": "login",
+  "plan": "Max",
+  "windows": [
+    {"id": "five-hour",       "label": "5-hour limit",  "remainingPercent": 94, "resetsAt": 1786891799804},
+    {"id": "seven-day",       "label": "7-day limit",   "remainingPercent": 17, "resetsAt": 1787090399804},
+    {"id": "seven-day-fable", "label": "7-day Fable 5", "remainingPercent": 0,  "resetsAt": 1787090399804}
+  ],
+  "cached": false
+}]}
+```
+
+`remainingPercent` is what is LEFT, not what has been spent — the TUI renders
+it as a fuel gauge, and the reference card this mirrors does the same. An
+account at 82% consumed reports 18.
+
+Results are cached 60s per alias; `GET /quota?refresh=1` bypasses that. The
+fetch runs in the proxy process, so it follows a configured `egressProxy`
+like every other upstream call. A per-account `error` field appears instead
+of `windows` when the fetch failed, leaving the rest of the pool readable.
 
 ## Bulk re-auth, in one round-trip
 

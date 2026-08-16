@@ -502,6 +502,78 @@ header('Accounts tab — never-measured utilization renders as —, not 0%');
 }
 
 // ─────────────────────────────────────────────────────────────
+// The quota card, mirroring the cli-proxy-api management-center layout the
+// operator asked for. Every percentage here is REMAINING, so the meter reads
+// as a fuel gauge: a nearly-spent window is a short red stub, not a long one.
+header('Accounts tab — control-plane quota card');
+{
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const NOW = Date.now();
+  const card = {
+    loading: false,
+    source: 'pool',
+    accounts: [{
+      alias: 'login',
+      // Half an hour of slack: `formatExpiry` floors, so an exact 7h
+      // expiry renders `6h 59m` as soon as a millisecond elapses — which it
+      // does whenever the suite runs under load.
+      expiresAt: NOW + 7 * 3600_000 + 30 * 60_000,
+      util5h: 0.03, util7d: 0.82, status: 'allowed_warning', measuredAt: NOW,
+      quota: {
+        plan: 'Max',
+        windows: [
+          { id: 'five-hour', label: '5-hour limit', remainingPercent: 97, resetsAt: NOW + 4 * 3600_000 },
+          { id: 'seven-day', label: '7-day limit', remainingPercent: 18, resetsAt: NOW + 2 * 86_400_000 },
+          { id: 'seven-day-fable', label: '7-day Fable 5', remainingPercent: 0, resetsAt: NOW + 2 * 86_400_000 },
+        ],
+      },
+    }],
+    error: null,
+  };
+  const r = AccountsTab.render(card, DIM);
+  const plain = strip(r);
+
+  check('card: shows the plan',            /Plan\s+Max/.test(plain));
+  check('card: names the alias',           plain.includes('login'));
+  check('card: token expiry still visible', /token\s+7h/.test(plain));
+  check('card: 5-hour row',                /5-hour limit\s+97%/.test(plain));
+  check('card: 7-day row',                 /7-day limit\s+18%/.test(plain));
+  check('card: Fable row uses the model name', /7-day Fable 5\s+0%/.test(plain));
+  check('card: absolute reset instant',    /\d\d\/\d\d, \d\d:\d\d/.test(plain));
+  check('card: relative countdown',        /in \d+ (hour|day|minute)/.test(plain));
+  check('card: refresh hint mentions quota', plain.includes('refresh quota'));
+
+  // The card supersedes the util table — showing both would print the same
+  // account twice under two different conventions (used vs remaining).
+  check('card: util table is suppressed',  !plain.includes('util5h'));
+
+  // Meter direction: a 97%-remaining window is nearly full, a 0% one empty.
+  const bars = plain.split('\n').filter((l) => /[█░]/.test(l));
+  check('card: one meter per window',      bars.length === 3);
+  const filled = (l) => (l.match(/█/g) ?? []).length;
+  check('card: full window has a long bar', filled(bars[0]) > filled(bars[1]));
+  check('card: drained window has no fill', filled(bars[2]) === 0);
+
+  // Banding is on remaining: high green, low red.
+  const colored = r.split('\n').filter((l) => /[█░]/.test(l));
+  check('card: healthy window is green',   colored[0].includes('[32m'));
+  check('card: drained window is not green', !colored[2].includes('[32m'));
+
+  // A quota fetch that failed must say so rather than render a blank card.
+  const failed = {
+    ...card,
+    accounts: [{ ...card.accounts[0], quota: { plan: null, windows: [], error: 'HTTP 401' } }],
+  };
+  const rf = strip(AccountsTab.render(failed, DIM));
+  check('failed fetch: falls back to the util table', rf.includes('util5h'));
+
+  // No quota at all (older proxy) degrades to the pre-existing table.
+  const noQuota = { ...card, accounts: [{ ...card.accounts[0], quota: undefined }] };
+  const rn = strip(AccountsTab.render(noQuota, DIM));
+  check('no quota: util table renders',    rn.includes('util5h') && rn.includes('82%'));
+}
+
+// ─────────────────────────────────────────────────────────────
 header('Backends tab — empty + populated');
 {
   const empty = { loading: false, backends: [], error: null };
