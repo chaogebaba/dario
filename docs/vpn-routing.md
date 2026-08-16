@@ -69,9 +69,28 @@ dario's startup banner confirms when it's active:
 ```
 [dario] SOCKS5 bridge listening on http://127.0.0.1:38471 (loopback only)
 [dario] Egress proxy: socks5h://127.0.0.1:1080 (all upstream fetches routed; localhost bypasses, DNS resolved at proxy)
+[dario] Egress IP: 185.244.213.7 — this is the address Anthropic sees (101ms)
 ```
 
-`dario doctor` surfaces the same:
+### The egress check, and why it's fatal
+
+That last line is the only one that proves anything. A URL that parses, a bridge that binds, a SOCKS5 handshake that completes — all of it is equally consistent with a proxy that accepts your connection and then forwards from this host's own address. Nothing dario can observe from inside the process distinguishes the two. So it asks a remote endpoint and reports what came back.
+
+If that check fails, `dario proxy` **refuses to start**:
+
+```
+[dario] Egress check failed: could not reach https://cloudflare.com/cdn-cgi/trace — ECONNREFUSED
+[dario] Refusing to start: the egress proxy is configured but not usable, and running
+[dario] without it would send your traffic out the address the proxy exists to replace.
+```
+
+It never falls back to direct. The failure being guarded against is subscription traffic silently leaving from your home IP, and that one can't be undone once it's happened. Three ways forward: fix the proxy, clear the setting (`--egress-proxy=`, or empty the Config tab row), or `--skip-egress-check` to start anyway and let individual requests fail.
+
+The endpoint defaults to Cloudflare's `cdn-cgi/trace` — plain text, no key, and already in the path for much of the internet, so asking it reveals nothing it couldn't already see. Point `DARIO_EGRESS_IP_URL` (or config `egressIpUrl`) somewhere else if you'd rather not. The parser takes Cloudflare's `key=value` form, a bare address, or JSON carrying `ip` / `origin` / `address`; anything that isn't a valid IP counts as a failed check, so a captive portal's login page reads as broken rather than as an answer.
+
+The TUI's Status tab carries the same information live, under **Egress** — the route, the address, and how long ago it was checked, going red when the check starts failing. It's re-probed in the background at most once every 5 minutes, so a `/health` poller never pays for it. The row is gated to trusted callers: a `/health` exposed publicly through a Cloudflare tunnel returns liveness only and never your exit IP.
+
+`dario doctor` surfaces the configuration side:
 
 ```
 [INFO]  Outbound proxy   DARIO_UPSTREAM_PROXY=http://10.64.0.1:80/. Upstream fetches routed via this proxy; localhost calls bypass.

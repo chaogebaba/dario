@@ -259,4 +259,18 @@ export interface HealthResponse {
   oauth: string;
   expiresIn?: string;
   requests?: number;
+  /**
+   * Egress route + the address a remote endpoint reported. Present only
+   * when an egress proxy is configured AND the caller cleared /health's
+   * internal-disclosure gate — a public /health never carries it.
+   */
+  egress?: {
+    proxy: string | null;
+    scheme: string | null;
+    ip: string | null;
+    ok: boolean;
+    checkedAt: number;
+    ageMs?: number;
+    error?: string;
+  };
 }

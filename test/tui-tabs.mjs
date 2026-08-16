@@ -91,6 +91,42 @@ header('Status tab — loading + reachable + unreachable');
   check('reachable: shows expiry',            r2.includes('7h 41m'));
   check('reachable: shows requests',          r2.includes('42'));
   check('reachable: shows config path',       r2.includes('config.json'));
+  // No egress proxy configured → /health carries no egress row, and the
+  // tab must not invent one. A row reading "direct" on a direct setup is
+  // noise; its absence is the signal.
+  check('no egress row when none is configured', !r2.includes('Egress'));
+
+  // Egress row (dario#987) — the address is the only thing that proves
+  // the proxy is carrying traffic rather than forwarding from this host.
+  const withEgress = {
+    ...reachable,
+    health: {
+      ...reachable.health,
+      egress: {
+        proxy: 'socks5h://***:***@vpn.example:1080',
+        scheme: 'socks5h',
+        ip: '185.244.213.7',
+        ok: true,
+        checkedAt: Date.now() - 30_000,
+      },
+    },
+  };
+  const rEgress = StatusTab.render(withEgress, DIM);
+  check('egress: shows the address Anthropic sees', rEgress.includes('185.244.213.7'));
+  check('egress: shows the route',                  rEgress.includes('vpn.example:1080'));
+  check('egress: never renders credentials',        !rEgress.includes('hunter2') && rEgress.includes('***'));
+
+  const brokenEgress = {
+    ...withEgress,
+    health: {
+      ...withEgress.health,
+      egress: { ...withEgress.health.egress, ok: false, ip: null, error: 'could not reach https://x — ECONNREFUSED' },
+    },
+  };
+  const rEgressBad = StatusTab.render(brokenEgress, DIM);
+  check('broken egress: says the check is failing', rEgressBad.includes('egress check failing'));
+  check('broken egress: shows the reason',          rEgressBad.includes('ECONNREFUSED'));
+  check('broken egress: does not show a stale IP',  !rEgressBad.includes('185.244.213.7'));
 
   // Mock unreachable proxy
   const unreachable = {

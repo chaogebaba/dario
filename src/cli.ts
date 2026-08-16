@@ -28,7 +28,8 @@ import { startProxy, sanitizeError, parseModelAliasSpecs } from './proxy.js';
 import { VALID_EFFORT_VALUES, type EffortValue } from './cc-template.js';
 import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, addAccountViaManualOAuth, addAccountFromKeychain, KeychainImportError, removeAccount, ensureLoginCredentialsInPool, resyncLoginFromCredentialsIfStale, MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
-import { parseOutboundProxy, installOutboundProxyWrapper, installEgressProxy, type OutboundProxyConfig } from './outbound-proxy.js';
+import { parseOutboundProxy, installOutboundProxyWrapper, installEgressProxy, isLocalhostUrl, type OutboundProxyConfig } from './outbound-proxy.js';
+import { checkEgressIp, egressIpUrl, recordEgressCheck, setEgressRoute } from './egress-ip.js';
 import { homeDir } from './home-dir.js';
 
 // `args` / `command` at module scope — command handlers below close over
@@ -552,6 +553,40 @@ async function proxy() {
               : outboundProxy.scheme === 'socks5' ? ', DNS resolved locally'
               : '';
     console.error(`[dario] Egress proxy: ${outboundProxy.display} (all upstream fetches routed; localhost bypasses${dns})`);
+
+    // Fail closed. Everything above is consistent with a proxy that
+    // accepts the connection and then forwards from this host's own
+    // address, so the route is not proven until something remote reports
+    // back. Starting anyway would mean subscription traffic leaving from
+    // the IP the proxy exists to hide — not a state to discover later.
+    const probeUrl = egressIpUrl(process.env, fileCfg.egressIpUrl);
+    setEgressRoute(outboundProxy.display, outboundProxy.scheme, probeUrl);
+    const skipCheck = args.includes('--skip-egress-check')
+      || /^(1|true|yes)$/i.test(process.env['DARIO_SKIP_EGRESS_CHECK'] ?? '');
+    // Localhost bypasses the proxy wrapper by design, so a loopback probe
+    // endpoint would answer without ever touching the proxy and report a
+    // pass for a route it never used — the exact false-success this check
+    // exists to prevent.
+    if (isLocalhostUrl(probeUrl)) {
+      console.error(`[dario] Egress check endpoint ${probeUrl} is on localhost, which bypasses the egress proxy.`);
+      console.error('[dario] It would confirm a route it never used. Point DARIO_EGRESS_IP_URL at a remote endpoint.');
+      process.exit(1);
+    }
+    const check = await checkEgressIp(probeUrl);
+    recordEgressCheck(check);
+    if (check.ok) {
+      console.error(`[dario] Egress IP: ${check.ip} — this is the address Anthropic sees (${check.latencyMs}ms)`);
+    } else if (skipCheck) {
+      console.error(`[dario] WARNING: egress check failed: ${check.error}`);
+      console.error('[dario] Starting anyway (--skip-egress-check). Upstream requests will fail while the proxy is down.');
+    } else {
+      console.error(`[dario] Egress check failed: ${check.error}`);
+      console.error('[dario] Refusing to start: the egress proxy is configured but not usable, and running');
+      console.error('[dario] without it would send your traffic out the address the proxy exists to replace.');
+      console.error('[dario] Fix the proxy, clear it (`--egress-proxy=` or empty the Config tab field),');
+      console.error('[dario] or start anyway with --skip-egress-check.');
+      process.exit(1);
+    }
   }
 
   // --passthrough-betas=name1,name2 — operator-pinned beta allow-list.
@@ -1693,6 +1728,17 @@ async function help() {
                              DARIO_EGRESS_PROXY (legacy:
                              DARIO_UPSTREAM_PROXY). Config:
                              egressProxy. See docs/vpn-routing.md.
+
+    --skip-egress-check      Start even when the egress-IP check
+                             fails. By default dario verifies the
+                             route through a remote endpoint and
+                             refuses to start if it can't — a proxy
+                             that accepts the connection but forwards
+                             from this host looks identical from
+                             inside the process. Never falls back to
+                             direct. Env: DARIO_SKIP_EGRESS_CHECK=1.
+                             Endpoint: DARIO_EGRESS_IP_URL / config
+                             egressIpUrl (default: Cloudflare trace).
 
     --system-prompt=<MODE>   System-prompt mode for outbound CC-shaped
                              requests (v3.34.0). One of:

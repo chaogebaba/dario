@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { setDefaultResultOrder } from 'node:dns';
 import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus, ignoreCcCredentials } from './oauth.js';
-import { buildHealthResponse, derivePoolStatus, probeRequested, shouldDiscloseHealthInternals, shouldRunServingProbe } from './health-response.js';
+import { buildHealthResponse, derivePoolStatus, probeRequested, shouldDiscloseHealthInternals, shouldRunServingProbe, type EgressLike } from './health-response.js';
+import { getEgressSnapshot, refreshEgressIpIfStale } from './egress-ip.js';
 import { getServingProbe } from './serving-probe.js';
 import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
@@ -2080,11 +2081,31 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             upstreamApiKey: upstreamApiKey || undefined,
           })
         : undefined;
+      // Egress route (dario#987). Only for internal callers — see
+      // EgressLike. The probe itself is refreshed in the background when
+      // stale, so /health always answers from cache and a poller never
+      // pays the round-trip.
+      let egress: EgressLike | undefined;
+      if (includeInternal) {
+        const snap = getEgressSnapshot();
+        if (snap.proxy || snap.last) {
+          if (snap.proxy) refreshEgressIpIfStale();
+          egress = {
+            proxy: snap.proxy,
+            scheme: snap.scheme,
+            ip: snap.last?.ip ?? null,
+            ok: snap.last?.ok ?? false,
+            checkedAt: snap.last?.checkedAt ?? 0,
+            ...(snap.last?.error ? { error: snap.last.error } : {}),
+          };
+        }
+      }
       const { httpStatus, body } = buildHealthResponse(
         {
           ...s,
           version: darioVersion(),
           ...(probe ? { probe } : {}),
+          ...(egress ? { egress } : {}),
           // pool.size === 0 is single-account mode (session-id registry drives
           // the SESSION_ID slot); a loaded pool routes via sticky bindings.
           sessions: pool.size === 0

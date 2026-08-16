@@ -342,5 +342,49 @@ header('shouldRunServingProbe — stricter than disclosure, because it spends mo
       R({ requested: true, discloseInternals: d, viaCfRay: c }) === (d && !c))));
 }
 
+// ── Egress disclosure (dario#987) ───────────────────────────────────
+// The egress row names the operator's VPN / residential-proxy exit IP.
+// That is the single most identifying thing dario knows about its own
+// deployment, so it has to sit behind the same gate as the OAuth
+// internals — a world-readable /health behind a Cloudflare tunnel must
+// never hand it out.
+{
+  const egress = {
+    proxy: 'socks5h://***:***@vpn.example:1080',
+    scheme: 'socks5h',
+    ip: '203.0.113.7',
+    ok: true,
+    checkedAt: 1_700_000_000_000,
+  };
+  const s = { status: 'healthy', expiresIn: '7h 41m', egress };
+
+  const internal = buildHealthResponse(s, 3, true, 1_700_000_060_000);
+  check('internal caller sees the egress row', internal.body.egress?.ip === '203.0.113.7');
+  check('internal caller sees the route', internal.body.egress?.proxy === 'socks5h://***:***@vpn.example:1080');
+  check('egress carries an age so a stale check is visible',
+    internal.body.egress?.ageMs === 60_000, String(internal.body.egress?.ageMs));
+
+  const publicView = buildHealthResponse(s, 3, false, 1_700_000_060_000);
+  check('public caller gets NO egress row', publicView.body.egress === undefined);
+  check('public caller body is liveness only',
+    JSON.stringify(publicView.body) === JSON.stringify({ status: 'ok' }), JSON.stringify(publicView.body));
+  check('egress IP appears nowhere in the public body',
+    !JSON.stringify(publicView.body).includes('203.0.113.7'));
+
+  // A failing check must still render — the whole point is that the TUI
+  // can go red — but it must not turn /health's HTTP status red, which
+  // uptime monitors key on for a different question.
+  const failing = buildHealthResponse(
+    { ...s, egress: { ...egress, ok: false, ip: null, error: 'could not reach https://x — ECONNREFUSED' } },
+    3, true, 1_700_000_060_000,
+  );
+  check('a failing egress check is reported', failing.body.egress?.ok === false);
+  check('a failing egress check carries the reason', /ECONNREFUSED/.test(failing.body.egress?.error ?? ''));
+  check('a failing egress check does not flip /health to 503', failing.httpStatus === 200);
+
+  check('no egress configured → no row at all',
+    buildHealthResponse({ status: 'healthy' }, 0, true).body.egress === undefined);
+}
+
 console.log(`\nhealth-response: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

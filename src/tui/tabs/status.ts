@@ -30,17 +30,12 @@ import type { Tab, TabContext } from '../tab.js';
 import { fg, dim, brand, truncate } from '../render.js';
 import { renderKvRow } from '../layout.js';
 import { fitPanels, type Panel } from '../panels.js';
-import type { OverageGuardStatus } from '../proxy-client.js';
+import type { OverageGuardStatus, HealthResponse } from '../proxy-client.js';
 
 export interface StatusState {
   loading: boolean;
   /** Proxy /health response, or null if unreachable. */
-  health: {
-    status: string;
-    oauth: string;
-    expiresIn?: string;
-    requests?: number;
-  } | null;
+  health: HealthResponse | null;
   /** Config-file load source: file | missing | invalid. */
   configSource: 'file' | 'missing' | 'invalid' | null;
   /** Advertised model ids from /v1/models — null if unreachable. */
@@ -156,6 +151,40 @@ export const StatusTab: Tab<StatusState> = {
     lines.push('');
     // Reachability is the tab's reason to exist — never dropped.
     panels.push({ lines, priority: 1, required: true });
+
+    // ── Egress section (dario#987) ─────────────────────────────
+    // Only rendered when an egress proxy is configured. The address is
+    // the whole point: local checks cannot distinguish "routed through
+    // the proxy" from "the proxy forwarded from this host", so seeing
+    // the IP is the only confirmation that the route is real. Ranked
+    // just under reachability — a proxy that has stopped carrying
+    // traffic is the failure this tab needs to make loud.
+    const egress = state.health?.egress;
+    if (egress) {
+      lines = [];
+      lines.push(' ' + brand('Egress'));
+      lines.push('  ' + renderKvRow('Via', `${egress.proxy ?? 'direct'}${egress.scheme ? dim(` (${egress.scheme})`) : ''}`, w - 4));
+      if (egress.ok && egress.ip) {
+        lines.push('  ' + renderKvRow('IP seen by Anthropic', fg('green', egress.ip), w - 4));
+      } else {
+        lines.push('  ' + renderKvRow('IP seen by Anthropic', fg('red', 'unknown — egress check failing'), w - 4));
+        if (egress.error) lines.push('  ' + renderKvRow('Error', dim(egress.error), w - 4));
+        lines.push('  ' + dim('Upstream requests will fail until the proxy works or the setting is cleared.'));
+      }
+      if (egress.checkedAt) {
+        lines.push('  ' + renderKvRow('Checked', dim(formatAgo(egress.checkedAt)), w - 4));
+      }
+      lines.push('');
+      panels.push({
+        lines,
+        collapsed: [
+          '  ' + renderKvRow('Egress IP',
+            egress.ok && egress.ip ? fg('green', egress.ip) : fg('red', 'check failing'), w - 4),
+          '',
+        ],
+        priority: 2,
+      });
+    }
 
     // ── Config section ─────────────────────────────────────────
     lines = [];

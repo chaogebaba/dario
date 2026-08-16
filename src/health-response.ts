@@ -57,6 +57,30 @@ export interface HealthStatusLike {
    * for", never "failed".
    */
   probe?: ServingProbeLike;
+
+  /**
+   * Egress route + the address a remote endpoint reported (dario#987),
+   * surfaced to internal callers only. This names the operator's VPN or
+   * residential-proxy exit IP, which is precisely what a public /health
+   * must not hand out — it belongs in the same bucket as the OAuth
+   * internals, not next to the liveness verdict.
+   */
+  egress?: EgressLike;
+}
+
+/**
+ * The subset of egress-ip.ts's snapshot that /health renders. Declared
+ * structurally, like ServingProbeLike, so this module keeps no dependency
+ * on the probe's network machinery.
+ */
+export interface EgressLike {
+  /** Credential-redacted proxy URL, or null when routing direct. */
+  proxy: string | null;
+  scheme: string | null;
+  ip: string | null;
+  ok: boolean;
+  checkedAt: number;
+  error?: string;
 }
 
 /**
@@ -209,6 +233,7 @@ export function buildHealthResponse(
         ...(s.sessions ? { sessions: s.sessions } : {}),
         ...(s.queue ? { queue: withStalledFor(s.queue, now) } : {}),
         ...(s.probe ? { probe: { ...s.probe, ageMs: Math.max(0, now - s.probe.checkedAt) } } : {}),
+        ...(s.egress ? { egress: { ...s.egress, ageMs: Math.max(0, now - s.egress.checkedAt) } } : {}),
         ...(s.refreshFailures ? { refreshFailures: s.refreshFailures } : {}),
       }
     : liveness;

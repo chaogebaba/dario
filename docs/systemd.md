@@ -69,6 +69,21 @@ Two hardening options are **deliberately absent**:
 
 If you point `logFile` somewhere outside `~/.dario`, add that path to `ReadWritePaths` via a drop-in, or the write fails under `ProtectSystem=strict`.
 
+## Egress proxies under systemd
+
+With an egress proxy configured, `dario proxy` verifies the route before it serves and exits non-zero if it can't (see [`vpn-routing.md`](./vpn-routing.md)). Under `Restart=on-failure` that means a proxy which is down at boot produces restart attempts rather than a running-but-leaking proxy — which is the behaviour you want, and systemd's default start-rate limit (5 attempts in 10s) puts the unit in `failed` state rather than looping forever.
+
+The common cause is ordering: a local SOCKS5 proxy (a VPN client, an SSH tunnel) that hasn't come up yet. Order against it rather than raising the timeout:
+
+```bash
+systemctl --user edit dario.service
+# [Unit]
+# After=my-vpn.service
+# Requires=my-vpn.service
+```
+
+`journalctl --user -u dario.service` shows the exact check failure. `--skip-egress-check` starts anyway if you would rather have dario up and returning errors.
+
 ## Removing it
 
 ```bash

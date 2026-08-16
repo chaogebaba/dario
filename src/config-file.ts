@@ -162,6 +162,13 @@ export interface DarioConfig {
   egressProxy?: string | null;
 
   /**
+   * Endpoint asked "what address do you see?" to verify the egress proxy
+   * is really carrying traffic. Empty/unset uses Cloudflare's cdn-cgi
+   * trace. Overridden by `DARIO_EGRESS_IP_URL`.
+   */
+  egressIpUrl?: string | null;
+
+  /**
    * Overage-guard — halt the proxy on the first response carrying
    * `representative-claim: overage`. Subscribers should never see a
    * single overage hit during normal operation; one means something
@@ -230,6 +237,7 @@ export function defaultConfig(): DarioConfig {
     preserveOrchestrationTags: false,
     logFile: null,
     egressProxy: null,
+    egressIpUrl: null,
     overageGuard: {
       enabled: true,
       behavior: 'halt',
@@ -518,6 +526,9 @@ function sanitize(parsed: Record<string, unknown>): DarioConfig {
 
   const egressProxy = pickStringOrNull('egressProxy');
   if (egressProxy !== undefined) out.egressProxy = egressProxy;
+
+  const egressIpUrl = pickStringOrNull('egressIpUrl');
+  if (egressIpUrl !== undefined) out.egressIpUrl = egressIpUrl;
 
   if (isPlainObject(parsed.overageGuard)) {
     out.overageGuard = {};
