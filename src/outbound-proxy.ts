@@ -53,12 +53,28 @@ export interface OutboundProxyConfig {
 }
 
 /**
+ * Strip userinfo from a proxy URL that may not parse.
+ *
+ * `display` only exists once `new URL()` has succeeded, so the one error
+ * that reports a *parse failure* is also the one that cannot use it — and
+ * that error is echoed to stderr, into `dario doctor --json`, and into the
+ * TUI status bar. An egress proxy URL routinely carries a residential
+ * proxy password, and a parse failure (a typo'd port, say) is exactly when
+ * an operator pastes the output into a bug report.
+ */
+export function redactProxyUrl(raw: string): string {
+  return raw.replace(/^([a-z0-9+.-]+:\/\/)[^/?#@]*@/i, '$1***:***@');
+}
+
+/**
  * Parse and validate an egress-proxy URL. Returns null for empty/undefined
  * input (no proxy configured). Throws with a clear message on:
  *   - URL parse failure
  *   - socks4/socks4a (obsolete; no auth, no IPv6, no remote DNS)
  *   - Other unsupported schemes
  *   - SOCKS URLs carrying a path/query/fragment (meaningless — likely a typo)
+ *
+ * Every thrown message is safe to paste into a bug report.
  */
 export function parseOutboundProxy(raw: string | undefined): OutboundProxyConfig | null {
   if (!raw || raw.trim() === '') return null;
@@ -68,7 +84,7 @@ export function parseOutboundProxy(raw: string | undefined): OutboundProxyConfig
     parsed = new URL(raw.trim());
   } catch {
     throw new Error(
-      `--egress-proxy: ${JSON.stringify(raw)} is not a valid URL. Expected http://host:port, https://host:port, socks5h://host:port, or socks5://host:port.`,
+      `--egress-proxy: ${JSON.stringify(redactProxyUrl(raw.trim()))} is not a valid URL. Expected http://host:port, https://host:port, socks5h://host:port, or socks5://host:port.`,
     );
   }
 
@@ -187,8 +203,8 @@ export function installOutboundProxyWrapper(config: OutboundProxyConfig, proxyUr
   if (!isBun) {
     throw new Error(
       `--egress-proxy requires the Bun runtime. Node's built-in fetch ignores the \`proxy\` option silently — ` +
-      `the flag would appear to work while requests actually went direct. Install Bun (https://bun.sh) and re-run; ` +
-      `dario auto-relaunches under Bun when available, or you can run \`bun run\` directly.`,
+      `the flag would appear to work while requests actually went direct. Install Bun (https://bun.sh); ` +
+      `dario requires it.`,
     );
   }
 

@@ -22,7 +22,7 @@
 
 import type { Tab } from '../tab.js';
 import { fg, dim, brand, inverse, pad, truncate } from '../render.js';
-import { parseOutboundProxy } from '../../outbound-proxy.js';
+import { parseOutboundProxy, redactProxyUrl } from '../../outbound-proxy.js';
 import {
   CONFIG_SCHEMA_VERSION,
   defaultConfig,
@@ -237,6 +237,17 @@ function renderValue(field: FieldDef, value: unknown, changed: boolean): string 
   if (field.type === 'bool') text = value === true ? 'on' : 'off';
   else if (value === null || value === undefined) text = '—';
   else text = String(value);
+  // The egress proxy URL carries the credential for a metered residential
+  // proxy, and this row is on screen for the whole session — long enough
+  // to end up in a screenshot or a screen share. `display` is the redacted
+  // form; the real value stays in state and goes to disk.
+  if (field.path === 'egressProxy' && typeof value === 'string' && value !== '') {
+    try {
+      text = parseOutboundProxy(value)?.display ?? text;
+    } catch {
+      text = redactProxyUrl(value);
+    }
+  }
   // Yellow if changed-from-snapshot; green for bool-on; default otherwise
   if (changed) return fg('yellow', text);
   if (field.type === 'bool' && value === true) return fg('green', text);

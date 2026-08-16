@@ -38,6 +38,7 @@ import { runAuthorizeProbe } from './cc-authorize-probe.js';
 import { MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { homeDir } from './home-dir.js';
 import { bunVersionMeetsJa3Floor, JA3_VERIFIED_BUN_FLOOR } from './runtime-fingerprint.js';
+import { redactProxyUrl } from './outbound-proxy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -560,10 +561,18 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
   // Credentials in the URL are masked; only scheme/host:port is shown.
   try {
     const envProxy = process.env['DARIO_EGRESS_PROXY'] ?? process.env['DARIO_UPSTREAM_PROXY'];
-    const envVar = process.env['DARIO_EGRESS_PROXY'] ? 'DARIO_EGRESS_PROXY' : 'DARIO_UPSTREAM_PROXY';
+    // Presence, not truthiness: an empty DARIO_EGRESS_PROXY is exactly the
+    // case reported below, and picking the name by truthiness would blame
+    // the legacy variable for it.
+    const envVar = process.env['DARIO_EGRESS_PROXY'] !== undefined ? 'DARIO_EGRESS_PROXY' : 'DARIO_UPSTREAM_PROXY';
     let source = envVar;
     let rawProxy = envProxy;
-    if (!rawProxy || rawProxy.trim() === '') {
+    // An env var that is present but empty means "route direct", and it
+    // stops the chain — that is what resolveEgressProxyFlag does, so
+    // falling through to the config file here would have doctor report a
+    // proxy that `dario proxy` will not use.
+    const clearedByEnv = envProxy !== undefined && envProxy.trim() === '';
+    if (!clearedByEnv && (!rawProxy || rawProxy.trim() === '')) {
       try {
         const { loadConfig } = await import('./config-file.js');
         const fileProxy = loadConfig().config.egressProxy;
@@ -573,8 +582,16 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
         }
       } catch { /* config unreadable — env-only reporting is fine */ }
     }
-    if (rawProxy && rawProxy.trim() !== '') {
-      let display = rawProxy;
+    if (clearedByEnv) {
+      checks.push({
+        status: 'info',
+        label: 'Egress proxy',
+        detail: `${envVar} is set but empty — egress routing is explicitly disabled and any config.json egressProxy is ignored. Upstream fetches go direct.`,
+      });
+    } else if (rawProxy && rawProxy.trim() !== '') {
+      // Unparseable values still reach an operator's terminal and bug
+      // report, so redact before falling back to the raw string.
+      let display = redactProxyUrl(rawProxy);
       let note = '';
       try {
         const u = new URL(rawProxy);
@@ -584,7 +601,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
         const scheme = u.protocol.replace(/:$/, '').toLowerCase();
         if (scheme === 'socks5h') note = ' DNS resolved at the proxy; routed via an in-process loopback CONNECT bridge.';
         else if (scheme === 'socks5') note = ' DNS resolved locally; routed via an in-process loopback CONNECT bridge.';
-      } catch { /* leave raw if unparseable; CLI will error at startup */ }
+      } catch { /* leave the redacted raw; CLI will error at startup */ }
       checks.push({
         status: 'info',
         label: 'Egress proxy',
