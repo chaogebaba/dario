@@ -144,11 +144,14 @@ export function extractSessionAffinityKey(
   const claudeSession = claudeMetadataSessionId(body);
   if (claudeSession) return claudeSession;
 
-  const promptCacheKey = namespaced('prompt-cache', body.prompt_cache_key);
-  if (promptCacheKey) return promptCacheKey;
-
   const conversation = conversationId(body);
   if (conversation) return conversation;
+
+  // Conversation identity is stable across turns even when a client starts
+  // sending a prompt-cache key later. Prefer it so adding cache metadata does
+  // not silently rebind an active session to the next round-robin account.
+  const promptCacheKey = namespaced('prompt-cache', body.prompt_cache_key);
+  if (promptCacheKey) return promptCacheKey;
 
   const metadata = objectValue(body.metadata);
   const legacyUser = namespaced('user', metadata?.user_id);

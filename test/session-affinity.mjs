@@ -73,10 +73,15 @@ header('body identifiers');
     extractSessionAffinityKey({}, { metadata: { user_id: { sessionId: 'claude-object' } } }) === 'claude:claude-object');
   check('legacy Claude metadata suffix is accepted',
     extractSessionAffinityKey({}, { metadata: { user_id: 'user_x_account_y_session_legacy-id' } }) === 'claude:legacy-id');
-  check('prompt cache key precedes conversation id',
+  check('conversation id precedes prompt cache metadata',
     extractSessionAffinityKey({}, {
       prompt_cache_key: 'cache-key', conversation: { id: 'conversation-id' },
-    }) === 'prompt-cache:cache-key');
+    }) === 'conversation:conversation-id');
+  check('conversation id remains stable when prompt cache metadata appears later',
+    extractSessionAffinityKey({}, { conversation: { id: 'conversation-id' } })
+      === extractSessionAffinityKey({}, {
+        prompt_cache_key: 'cache-key', conversation: { id: 'conversation-id' },
+      }));
   check('conversation object id is accepted',
     extractSessionAffinityKey({}, { conversation: { id: 'conversation-id' } }) === 'conversation:conversation-id');
   check('conversation string is accepted',
