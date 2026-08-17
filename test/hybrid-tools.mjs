@@ -16,13 +16,21 @@
  * Runs in-process. No proxy, no OAuth, no upstream.
  */
 
-import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper } from '../dist/cc-template.js';
+import { buildCCRequest, reverseMapResponse, createStreamingReverseMapper, rejectsAssistantPrefill } from '../dist/cc-template.js';
 
 let pass = 0, fail = 0;
 function check(label, cond) {
   if (cond) { pass++; console.log(`  ✅ ${label}`); }
   else { fail++; console.log(`  ❌ ${label}`); }
 }
+
+check('modern Claude families reject assistant prefills',
+  rejectsAssistantPrefill('claude-opus-4-6')
+    && rejectsAssistantPrefill('claude-fable-5')
+    && rejectsAssistantPrefill('claude-opus-5-20260801')
+    && rejectsAssistantPrefill('claude-mythos-preview'));
+check('legacy Claude family keeps explicit prefill compatibility',
+  !rejectsAssistantPrefill('claude-opus-4-1-20250805'));
 function header(name) {
   console.log(`\n${'='.repeat(70)}\n  ${name}\n${'='.repeat(70)}`);
 }
@@ -640,13 +648,11 @@ header('dario#36 — drop trailing assistant/empty turns (prefill rejection)');
 // ======================================================================
 //
 // ======================================================================
-header('dario#37 — trailing assistant with real content is preserved (runaway loop fix)');
+header('trailing assistant with real content gets an explicit continuation');
 {
-  // v3.10.1 popped any trailing assistant, including ones with real
-  // text/tool_use content. That caused OpenClaw to runaway-loop: client
-  // appends its assistant reply locally, dario strips it from the next
-  // request, model regenerates the same reply, dario strips that, never
-  // terminates. v3.10.2 drops ONLY empty trailing turns.
+  // Keep the partial assistant output so the model can see it, then add a
+  // user continuation instead of silently popping history or sending a
+  // rejected assistant prefill.
   const body = {
     model: 'claude-opus-4-6',
     messages: [
@@ -662,8 +668,30 @@ header('dario#37 — trailing assistant with real content is preserved (runaway 
     {},
   );
   const finalMessages = built.body.messages;
-  check('trailing assistant with text content preserved', finalMessages.length === 2);
-  check('last message is still the assistant turn', finalMessages[1].role === 'assistant');
+  check('trailing assistant with text content preserved', finalMessages.length === 3);
+  check('assistant history remains before continuation', finalMessages[1].role === 'assistant');
+  check('continuation is a user turn', finalMessages[2].role === 'user');
+  check('continuation asks model to continue', finalMessages[2].content[0].text === 'Please continue where you left off.');
+}
+
+{
+  const body = {
+    model: 'claude-opus-4-6',
+    messages: [
+      { role: 'user', content: 'run the tool' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] },
+    ],
+  };
+  const built = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  const finalMessages = built.body.messages;
+  check('tool-use tail is not followed by an invalid text continuation',
+    finalMessages.length === 2 && finalMessages.at(-1).role === 'assistant');
 }
 
 // ======================================================================

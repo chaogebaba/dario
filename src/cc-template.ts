@@ -1723,6 +1723,33 @@ export function isGenuineCCClient(clientBody: Record<string, unknown>): boolean 
   return CC_ORIGIN_SYSTEM_OPENERS.some((opener) => text.startsWith(opener)) || text.includes('Claude Agent SDK');
 }
 
+/** Claude's current model families reject a trailing assistant prefill. */
+export function rejectsAssistantPrefill(modelId: string): boolean {
+  const model = modelId.toLowerCase();
+  return /(?:opus|sonnet|haiku)-4-[6-9](?:\D|$)/.test(model)
+    || /(?:fable|mythos|opus|sonnet)-5(?:\D|$)/.test(model)
+    || /mythos-preview(?:\D|$)/.test(model);
+}
+
+/** Keep interrupted assistant output, then ask the model to continue. */
+export function appendPrefillContinuation(messages: Array<Record<string, unknown>>, modelId: string): void {
+  if (!rejectsAssistantPrefill(modelId)) return;
+  const last = messages.at(-1);
+  if (!last || last.role !== 'assistant') return;
+  const content = last.content;
+  const hasContent = typeof content === 'string'
+    ? content.trim().length > 0
+    : Array.isArray(content) && content.length > 0;
+  if (!hasContent) return;
+  if (Array.isArray(content) && content.some((block) => (
+    typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool_use'
+  ))) return;
+  messages.push({
+    role: 'user',
+    content: [{ type: 'text', text: 'Please continue where you left off.' }],
+  });
+}
+
 export function buildCCRequest(
   clientBody: Record<string, unknown>,
   billingTag: string,
@@ -1752,11 +1779,13 @@ export function buildCCRequest(
   //   - cache breakpoints: client stamps are stripped and re-placed (system
   //     here, conversation in applyCcPromptCaching) so the 4-breakpoint
   //     budget stays deterministic.
-  // Messages, thinking, effort, max_tokens, top-level key order: untouched —
-  // the client is the authority on its own wire shape. Outranks the
+  // Messages (apart from a required continuation after a trailing assistant
+  // turn), thinking, effort, max_tokens, top-level key order: untouched — the
+  // client is the authority on its own wire shape. Outranks the
   // tool-mode flags: those configure how NON-CC clients are dressed up as
   // CC, which a genuine CC client doesn't need.
   if (isGenuineCCClient(clientBody)) {
+    appendPrefillContinuation(messages, model);
     const clientSystem = clientBody.system as Array<Record<string, unknown>>;
     const system = clientSystem.map((b, i) => {
       const copy = { ...b };
@@ -1854,6 +1883,7 @@ export function buildCCRequest(
     }
     break;
   }
+  appendPrefillContinuation(messages, model);
 
   // ── Build tool mapping ──
   // In preserveTools mode, skip the tool name/arg rewriting entirely.

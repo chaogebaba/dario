@@ -157,6 +157,33 @@ async function sendGenuineClaudeCode(sessionId, assistantContent, model = 'claud
   return { status: response.status, callback };
 }
 
+async function sendGenuineTrailingAssistant(sessionId) {
+  const response = await realFetch(`${BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'x-api-key': 'dario',
+      'x-claude-code-session-id': 'shared-cpa-session',
+    },
+    body: JSON.stringify({
+      model: 'claude-fable-5',
+      max_tokens: 8,
+      system: [
+        { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.234;' },
+        { type: 'text', text: 'You are a Claude agent, built on the Claude Agent SDK.' },
+      ],
+      metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'continue the interrupted task' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'The partial result is' }] },
+      ],
+    }),
+  });
+  await response.text();
+  return response.status;
+}
+
 const thinkingTail = await sendGenuineClaudeCode('callback-thinking', [
   { type: 'thinking', thinking: 'waiting' },
   { type: 'text', text: 'Waiting for the result.' },
@@ -180,6 +207,14 @@ check('supported Fable preserves native system turns',
   callbackBodies.slice(0, 2).every((body) => body.messages.some((message) => message.role === 'system')));
 check('unsupported Sonnet folds system turns into user content',
   callbackBodies[2]?.messages.every((message) => message.role !== 'system'));
+
+const trailingStatus = await sendGenuineTrailingAssistant('callback-trailing-assistant');
+const trailingBody = upstreamBodies.at(-1);
+check('genuine CC trailing assistant request succeeds', trailingStatus === 200);
+check('trailing assistant history is preserved with a continuation user turn',
+  trailingBody?.messages.at(-2)?.role === 'assistant'
+    && trailingBody?.messages.at(-1)?.role === 'user'
+    && trailingBody?.messages.at(-1)?.content[0]?.text === 'Please continue where you left off.');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
