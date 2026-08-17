@@ -43,13 +43,6 @@ export interface ConfigReport {
   sections: ConfigSection[];
 }
 
-const PROXY_ROW_SPECS = [
-  ['port', 'DARIO_PORT', '3456'],
-  ['host', 'DARIO_HOST', '127.0.0.1'],
-  ['model', 'DARIO_MODEL', '(passthrough — client picks)'],
-  ['effort', 'DARIO_EFFORT', '(CC default)'],
-] as const;
-
 /** Build the config-derived sections without touching disk. */
 export function buildRuntimeConfigSections(
   config: DarioConfig,
@@ -71,14 +64,17 @@ export function buildRuntimeConfigSections(
       egressValue = `INVALID — ${(err as Error).message}`;
     }
   }
+  const strictTls = triStateEnv(env['DARIO_STRICT_TLS']) ?? config.strictTls;
 
   return [
     {
       title: 'Proxy (on `dario proxy`)',
-      rows: PROXY_ROW_SPECS.map(([label, envName, fallback]) => ({
-        label,
-        value: envOrDefault(env, envName, fallback),
-      })),
+      rows: [
+        { label: 'port', value: envOrDefault(env, 'DARIO_PORT', String(config.port ?? 3456)) },
+        { label: 'host', value: envOrDefault(env, 'DARIO_HOST', config.host ?? '127.0.0.1') },
+        { label: 'model', value: envOrDefault(env, 'DARIO_MODEL', config.model || '(passthrough — client picks)') },
+        { label: 'effort', value: envOrDefault(env, 'DARIO_EFFORT', config.effort || '(CC default)') },
+      ],
     },
     {
       title: 'Egress',
@@ -104,7 +100,7 @@ export function buildRuntimeConfigSections(
         },
         {
           label: 'DARIO_STRICT_TLS',
-          value: env['DARIO_STRICT_TLS'] === '1' ? 'on' : 'off',
+          value: strictTls ? 'on' : 'off',
         },
       ],
     },
@@ -231,6 +227,14 @@ export async function collectEffectiveConfig(): Promise<ConfigReport> {
 
 function envOrDefault(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
   return env[name] ? `${env[name]}  (from ${name})` : fallback;
+}
+
+function triStateEnv(value: string | undefined): boolean | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === undefined) return undefined;
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
 }
 
 function describeCreds(path: string): string {

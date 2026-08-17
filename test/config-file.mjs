@@ -226,14 +226,20 @@ withSandbox((dir) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-header('saveConfig — overwrites schema version even if caller set wrong one');
+header('saveConfig — upgrades old schemas and refuses future schemas');
 withSandbox((dir) => {
   const path = join(dir, 'c.json');
   const cfg = defaultConfig();
-  cfg.version = 999;  // caller tampered
+  cfg.version = 0;
   saveConfig(path, cfg);
   const on_disk = JSON.parse(readFileSync(path, 'utf-8'));
-  check('saved version is schema constant', on_disk.version === CONFIG_SCHEMA_VERSION);
+  check('old version is upgraded to the current schema', on_disk.version === CONFIG_SCHEMA_VERSION);
+  cfg.version = CONFIG_SCHEMA_VERSION + 1;
+  let futureError = '';
+  try { saveConfig(path, cfg); } catch (error) { futureError = error.message; }
+  const unchanged = JSON.parse(readFileSync(path, 'utf-8'));
+  check('future version save is refused', futureError.includes('newer than this dario build'));
+  check('refused future save leaves the file unchanged', unchanged.version === CONFIG_SCHEMA_VERSION);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -288,22 +294,24 @@ withSandbox((dir) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-header('Unknown future fields are ignored');
+header('Future config schemas are readable but never rewritten');
 withSandbox((dir) => {
   const path = join(dir, 'c.json');
-  // Schema v2-style future shape with new top-level field.
-  writeFileSync(path, JSON.stringify({
+  const futureConfig = {
     version: 2,
     port: 3456,
-    futureSetting: { newThing: true },   // unknown to current sanitize()
-  }));
+    futureSetting: { newThing: true },
+    pool: { strategy: { name: 'weighted' }, futurePolicy: 'new' },
+  };
+  writeFileSync(path, JSON.stringify(futureConfig));
   const r = loadConfig(path);
-  // The sanitizer owns the accepted schema. Saving the loaded config must
-  // not reintroduce opaque keys that current code cannot validate.
-  saveConfig(path, r.config);
+  let saveError = '';
+  try { saveConfig(path, r.config); } catch (error) { saveError = error.message; }
   const reread = JSON.parse(readFileSync(path, 'utf-8'));
-  check('unknown field dropped on save', reread.futureSetting === undefined);
-  check('known fields survived',  reread.port === 3456);
+  check('compatible future fields remain readable', r.config.port === 3456);
+  check('future schema save is refused', saveError.includes('newer than this dario build'));
+  check('unknown and reshaped fields remain byte-for-byte intact',
+    JSON.stringify(reread) === JSON.stringify(futureConfig));
 });
 
 // ─────────────────────────────────────────────────────────────

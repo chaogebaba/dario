@@ -163,33 +163,21 @@ header('sticky bindings win over fill order in both modes');
   }
 }
 
-header('round-robin with sticky hint avoids double-advance');
+header('round-robin affinity commits exactly one selection');
 {
-  // Simulate the proxy flow: pool.select() picks an account (the hint),
-  // then selectSticky(key, family, now, hint) should use the hint for a new
-  // binding instead of calling select() again (which double-advances the index).
   const pool = new AccountPool('round-robin', { sessionAffinity: true });
   addAccount(pool, 'alpha', { util5h: 0.3 });
   addAccount(pool, 'beta', { util5h: 0.3 });
 
-  // First "request": proxy calls select() → gets alpha (sorted order idx=0)
-  const hint1 = pool.select();
-  check('rr hint1 is alpha', hint1?.alias === 'alpha');
-  // Then selectSticky with hint → should bind to alpha (the hint), NOT call select() again
   const key1 = computeStickyKey('conversation one first message');
-  const sticky1 = pool.selectSticky(key1, null, Date.now(), hint1);
-  check('sticky uses hint (alpha) for new binding', sticky1?.alias === 'alpha');
+  const sticky1 = pool.selectSticky(key1);
+  check('first new binding commits alpha', sticky1?.alias === 'alpha');
 
-  // Second "request" (new conversation): proxy calls select() → gets beta (idx=1)
-  const hint2 = pool.select();
-  check('rr hint2 is beta', hint2?.alias === 'beta');
   const key2 = computeStickyKey('conversation two first message');
-  const sticky2 = pool.selectSticky(key2, null, Date.now(), hint2);
-  check('sticky uses hint (beta) for new binding', sticky2?.alias === 'beta');
+  const sticky2 = pool.selectSticky(key2);
+  check('second new binding commits beta', sticky2?.alias === 'beta');
 
-  // Third "request" (follow-up to conversation one): sticky returns existing binding
-  const hint3 = pool.select(); // advances again, but sticky should override
-  const sticky3 = pool.selectSticky(key1, null, Date.now(), hint3);
+  const sticky3 = pool.selectSticky(key1);
   check('existing binding returned for conv1', sticky3?.alias === 'alpha');
 
   // Verify even distribution: both accounts got bound
@@ -208,7 +196,7 @@ header('round-robin without sticky hint (affinity off) still alternates');
   check('alternates alpha/beta', picks[0] === 'alpha' && picks[1] === 'beta' && picks[2] === 'alpha');
   // selectSticky with affinity off falls through to select()
   const key = computeStickyKey('some message');
-  const s = pool.selectSticky(key, null, Date.now(), null);
+  const s = pool.selectSticky(key);
   check('affinity off: selectSticky delegates to select()', s?.alias === 'beta' || s?.alias === 'alpha');
 }
 
@@ -231,15 +219,13 @@ header('plan-based routing: fable restricted to Max');
   for (let i = 0; i < 4; i++) sonnetPicks.add(pool.select('sonnet')?.alias);
   check('sonnet routes to both accounts', sonnetPicks.has('pro-account') && sonnetPicks.has('max-account'));
 
-  // selectSticky: fable hint pointing to Pro should be rejected
-  const proHint = pool.get('pro-account');
   const fableKey = computeStickyKey('fable conversation');
-  const stickyFable = pool.selectSticky(fableKey, 'fable', Date.now(), proHint);
-  check('sticky rejects Pro hint for fable, picks Max', stickyFable?.alias === 'max-account');
+  const stickyFable = pool.selectSticky(fableKey, 'fable');
+  check('sticky picks a Max account for fable', stickyFable?.alias === 'max-account');
 
   // selectSticky: existing binding to Pro for fable should rebind to Max
   pool.rebindSticky(computeStickyKey('bound-to-pro'), 'pro-account', 'fable');
-  const rebound = pool.selectSticky(computeStickyKey('bound-to-pro'), 'fable', Date.now(), proHint);
+  const rebound = pool.selectSticky(computeStickyKey('bound-to-pro'), 'fable');
   check('sticky rebinds from Pro to Max for fable', rebound?.alias === 'max-account');
 }
 
@@ -253,7 +239,7 @@ header('plan-based routing: unknown plan fails closed for restricted family');
   check('unknown plan still serves unrestricted families', pool.select('sonnet')?.alias === 'unknown-plan');
 }
 
-header('selectSticky with null hint and exhausted pool returns null');
+header('selectSticky with exhausted pool returns null');
 {
   const pool = new AccountPool('round-robin', { sessionAffinity: true });
   addAccount(pool, 'only-account', { util5h: 0.1, expiresInMs: 5_000 }); // expires in 5s (< 30s threshold)
@@ -262,14 +248,9 @@ header('selectSticky with null hint and exhausted pool returns null');
   // by !isInAuthCooldown only, but expiry check in ineligibleReason blocks it)
   pool.markAuthFailure('only-account');
   check('select() returns null when all in auth cooldown', pool.select() === null);
-  // selectSticky with null hint should gracefully return null
   const key = computeStickyKey('orphan conversation');
-  const result = pool.selectSticky(key, null, Date.now(), null);
-  check('selectSticky returns null with null hint + exhausted pool', result === null);
-  // selectSticky with a stale hint (cooldown account) should also return null
-  const staleHint = pool.get('only-account');
-  const result2 = pool.selectSticky(key, null, Date.now(), staleHint);
-  check('selectSticky returns null with cooldown hint + exhausted pool', result2 === null);
+  const result = pool.selectSticky(key);
+  check('selectSticky returns null when the pool is exhausted', result === null);
 }
 
 header('round-robin with 3+ accounts distributes evenly');
@@ -379,15 +360,29 @@ header('proxy peek is replaced by one family-aware committed selection');
   check('the peek consumed no hidden round-robin turn', pool.select('opus')?.alias === 'alpha');
 }
 
-header('affinity disabled reuses the proxy hint without double-selecting');
+header('proxy availability peeks do not freeze affinity rotation');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: true });
+  addAccount(pool, 'alpha', { util5h: 0.2 });
+  addAccount(pool, 'beta', { util5h: 0.2 });
+
+  check('first request availability peek sees alpha', pool.peek()?.alias === 'alpha');
+  check('first new session commits alpha',
+    pool.selectSticky(computeStickyKey('proxy session one'))?.alias === 'alpha');
+  check('second request availability peek sees beta', pool.peek()?.alias === 'beta');
+  check('second new session commits beta',
+    pool.selectSticky(computeStickyKey('proxy session two'))?.alias === 'beta');
+}
+
+header('affinity disabled still commits round-robin selections');
 {
   const pool = new AccountPool('round-robin', { sessionAffinity: false });
   addAccount(pool, 'alpha', { util5h: 0.2 });
   addAccount(pool, 'beta', { util5h: 0.2 });
 
-  const hint = pool.select();
-  const picked = pool.selectSticky(computeStickyKey('new request'), null, Date.now(), hint);
-  check('disabled affinity keeps the pre-selected alpha hint', picked?.alias === 'alpha');
+  pool.peek();
+  const picked = pool.selectSticky(computeStickyKey('new request'));
+  check('disabled affinity commits alpha after a non-consuming peek', picked?.alias === 'alpha');
   check('the next request gets beta', pool.select()?.alias === 'beta');
 }
 
@@ -397,10 +392,9 @@ header('affinity TTL is enforced on lookup, not only periodic cleanup');
   addAccount(pool, 'alpha', { util5h: 0.1 });
   addAccount(pool, 'beta', { util5h: 0.2 });
   const key = computeStickyKey('ttl-bound conversation');
-  const bound = pool.get('beta');
   pool.rebindSticky(key, 'beta');
   const bindingTime = Date.now();
-  check('binding is initially reused', pool.selectSticky(key, null, bindingTime, bound)?.alias === 'beta');
+  check('binding is initially reused', pool.selectSticky(key, null, bindingTime)?.alias === 'beta');
   check('expired binding is reselected before cleanup interval', pool.selectSticky(key, null, bindingTime + 11)?.alias === 'alpha');
 }
 

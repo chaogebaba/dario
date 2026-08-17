@@ -14,7 +14,7 @@ import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
-import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy } from './pool.js';
+import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinityKey } from './session-affinity.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
@@ -47,6 +47,29 @@ function retryAfterMs(value: string | null): number | null {
   if (!Number.isFinite(date)) return null;
   const delta = date - Date.now();
   return delta > 0 ? delta : null;
+}
+
+export function rewritePoolIdentity(
+  body: Buffer | undefined,
+  identity: { deviceId: string; accountUuid: string; sessionId: string },
+): Buffer | undefined {
+  if (!body) return body;
+  try {
+    const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+    const metadata = parsed.metadata as Record<string, unknown> | undefined;
+    if (!metadata || typeof metadata.user_id !== 'string') return body;
+    const userId = JSON.parse(metadata.user_id) as Record<string, unknown>;
+    if (!userId || typeof userId !== 'object' || Array.isArray(userId)) return body;
+    metadata.user_id = JSON.stringify({
+      ...userId,
+      device_id: identity.deviceId,
+      account_uuid: identity.accountUuid,
+      session_id: identity.sessionId,
+    });
+    return Buffer.from(JSON.stringify(parsed));
+  } catch {
+    return body;
+  }
 }
 
 // A host is "loopback" if it's one of the well-known localhost literals.
@@ -2060,10 +2083,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     'X-Frame-Options': 'DENY',
     'Cache-Control': 'no-store',
   };
+  const CORS_RESPONSE_HEADERS = {
+    'Access-Control-Allow-Origin': corsOrigin,
+    'Access-Control-Expose-Headers': 'Retry-After, Request-Id',
+  };
 
   // Pre-serialize static responses
   const CORS_HEADERS = {
-    'Access-Control-Allow-Origin': corsOrigin,
+    ...CORS_RESPONSE_HEADERS,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     // *-wildcard covers custom headers in non-credentialed mode, except
     // Authorization, which is a CORS non-wildcard request-header name.
@@ -2385,7 +2412,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',  // disable any proxy buffering
-        'Access-Control-Allow-Origin': corsOrigin,
+        ...CORS_RESPONSE_HEADERS,
       };
       res.writeHead(200, sseHeaders);
       // Backlog: replay recent records so a TUI attaching mid-session
@@ -2446,7 +2473,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // non-loopback). GET returns the current state for read-only queries.
     if (urlPath === '/admin/resume' && req.method === 'GET') {
       const state = overageGuard.state();
-      res.writeHead(200, { ...JSON_HEADERS, 'Access-Control-Allow-Origin': corsOrigin });
+      res.writeHead(200, { ...JSON_HEADERS, ...CORS_RESPONSE_HEADERS });
       res.end(JSON.stringify({
         halted: state !== null,
         state,
@@ -2457,7 +2484,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     if (urlPath === '/admin/resume' && req.method === 'POST') {
       const wasHalted = overageGuard.state() !== null;
       overageGuard.clear('manual');
-      res.writeHead(200, { ...JSON_HEADERS, 'Access-Control-Allow-Origin': corsOrigin });
+      res.writeHead(200, { ...JSON_HEADERS, ...CORS_RESPONSE_HEADERS });
       res.end(JSON.stringify({
         ok: true,
         wasHalted,
@@ -2478,7 +2505,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       const advertised = withLongContextVariants(catalog.bases);
       const aliasNames = Object.keys(modelAliases).filter((n) => !advertised.includes(n));
       const body = JSON.stringify(buildOpenAIModelsList(advertised.concat(aliasNames)));
-      res.writeHead(200, { ...JSON_HEADERS, 'Access-Control-Allow-Origin': corsOrigin });
+      res.writeHead(200, { ...JSON_HEADERS, ...CORS_RESPONSE_HEADERS });
       res.end(body);
       return;
     }
@@ -2509,7 +2536,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         ts: new Date().toISOString(), req: requestCount,
         method: req.method ?? '', path: urlPath, status: 503, reject: 'overage-halt',
       });
-      res.writeHead(503, { ...JSON_HEADERS, 'Access-Control-Allow-Origin': corsOrigin });
+      res.writeHead(503, { ...JSON_HEADERS, ...CORS_RESPONSE_HEADERS });
       res.end(JSON.stringify(buildHaltErrorBody(state)));
       return;
     }
@@ -2565,6 +2592,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     let requestModel = '';
     let detectedClientForLog: string | undefined;
     let preserveToolsEffective: boolean = Boolean(opts.preserveTools);
+    let poolAccount: PoolAccount | null = null;
+    let stickyKey: string | null = null;
+    let stickyLease: StickyLease | null = null;
     // Per-request: did isGenuineCCClient recognise the caller as real Claude
     // Code? Hoisted because the header build below needs it and `genuineCC` is
     // block-scoped where buildCCRequest destructures it. NOT the same thing as
@@ -2577,7 +2607,6 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // is a pool of one). Upstream-api-key mode is the sole path with no pool
       // account. Inside-request 429/auth failover retries the next-best account
       // before surfacing an error to the client (see the dispatch loop below).
-      let poolAccount: PoolAccount | null = null;
       let poolSelectionCommitted = false;
       let accessToken: string;
       if (upstreamApiKey) {
@@ -2812,7 +2841,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // provider body identifiers, then hashes the first user turn as a
       // stable fallback. Header-only requests work immediately; JSON bodies
       // enrich the identity after translation below.
-      let stickyKey: string | null = extractSessionAffinityKey(req.headers, undefined);
+      stickyKey = extractSessionAffinityKey(req.headers, undefined);
       // Outbound session id resolved once — either inside the template build
       // (so body metadata matches) or below for passthrough (no body build).
       let preBodySessionId: string | undefined;
@@ -2837,6 +2866,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           // back to a fresh parse when the earlier block didn't run (e.g. the body
           // was not JSON, or an OpenAI-backend reroute skipped it).
           const parsed = parsedBody ?? (JSON.parse(body.toString()) as Record<string, unknown>);
+          stickyKey = extractSessionAffinityKey(req.headers, parsed);
           // Strip orchestration tags from messages (Aider, Cursor, etc.)
           sanitizeMessages(parsed, opts.preserveOrchestrationTags);
           // Tier-aware routing: under a forced --model, a Haiku-tier sub-agent
@@ -2848,7 +2878,6 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           const result = isOpenAI ? openaiToAnthropic(parsed, effectiveOverride) : (effectiveOverride ? { ...parsed, model: effectiveOverride } : parsed);
           const r = result as Record<string, unknown>;
           requestModel = (r.model as string || '').toLowerCase();
-          stickyKey = extractSessionAffinityKey(req.headers, r);
           // Suspended-model guard. Empty by default (Fable 5 returned globally
           // 2026-07-01, so nothing is suspended out of the box). Operators can
           // still suspend a family via DARIO_SUSPENDED_MODELS — e.g. a model
@@ -2900,9 +2929,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // Rotating off mid-session costs cache-create on every turn.
             const family = modelFamily(requestModel);
             const previousAlias = poolAccount?.alias ?? 'none';
-            const preferred = stickyKey
-              ? pool.selectSticky(stickyKey, family, Date.now(), poolAccount)
-              : pool.select(family);
+            const stickySelection = stickyKey
+              ? pool.selectStickyWithLease(stickyKey, family)
+              : { account: pool.select(family), lease: null };
+            const preferred = stickySelection.account;
+            stickyLease = stickySelection.lease;
             poolSelectionCommitted = true;
             poolAccount = preferred;
             accessToken = preferred?.accessToken ?? '';
@@ -3101,9 +3132,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // forever and plan gates would be skipped for requests without text.
       if (!poolSelectionCommitted) {
         const family = modelFamily(requestModel);
-        poolAccount = stickyKey
-          ? pool.selectSticky(stickyKey, family, Date.now(), poolAccount)
-          : pool.select(family);
+        const stickySelection = stickyKey
+          ? pool.selectStickyWithLease(stickyKey, family)
+          : { account: pool.select(family), lease: null };
+        poolAccount = stickySelection.account;
+        stickyLease = stickySelection.lease;
         poolSelectionCommitted = true;
         accessToken = poolAccount?.accessToken ?? '';
         if (verbose && poolAccount) {
@@ -3274,6 +3307,24 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         'x-stainless-timeout': forwardedIdentity['x-stainless-timeout'] ?? '600',
       };
 
+      const activatePoolAccount = (account: PoolAccount): void => {
+        poolAccount = account;
+        accessToken = account.accessToken;
+        headers['Authorization'] = `Bearer ${accessToken}`;
+        const sessionId = resolveOutboundSession(account, clientSessionKey).sessionId;
+        headers['x-claude-code-session-id'] = sessionId;
+        if (!passthrough && !isCountTokens) {
+          finalBody = rewritePoolIdentity(finalBody, {
+            deviceId: account.identity.deviceId,
+            accountUuid: account.identity.accountUuid,
+            sessionId,
+          });
+          if (finalBody && process.env.DARIO_CCH !== 'random') {
+            finalBody = Buffer.from(stampCch(finalBody.toString('utf8'), cliVersion));
+          }
+        }
+      };
+
       // Client-disconnect abort: if the client drops the connection before
       // we've finished sending the response, we default to aborting the
       // upstream fetch so Anthropic stops generating (and billing) a
@@ -3333,6 +3384,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // Skipped in passthrough mode — passthrough means "don't shape the
         // request to look like CC," and reordering is a form of shaping.
         const outboundHeaders = passthrough ? headers : orderHeadersForOutbound(headers);
+        const observedRejectionEpoch = poolAccount?.rejectionEpoch;
         upstream = await upstreamFetch(targetBase, {
           method: req.method ?? 'POST',
           headers: outboundHeaders,
@@ -3366,6 +3418,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               snapshot,
               requestFamily,
               upstream.status >= 200 && upstream.status < 300,
+              observedRejectionEpoch,
             );
           }
           // First-sight detector for per-model rate-limit buckets. Anthropic
@@ -3469,7 +3522,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // the chain's terminal 400 branch won't run for us.
             const responseHeaders: Record<string, string> = {
               'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
-              'Access-Control-Allow-Origin': corsOrigin,
+              ...CORS_RESPONSE_HEADERS,
               ...SECURITY_HEADERS,
             };
             for (const [key, value] of upstream.headers.entries()) {
@@ -3515,7 +3568,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // Couldn't rebuild the body — forward the upstream 400 (already consumed).
             const responseHeaders: Record<string, string> = {
               'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
-              'Access-Control-Allow-Origin': corsOrigin,
+              ...CORS_RESPONSE_HEADERS,
               ...SECURITY_HEADERS,
             };
             for (const [key, value] of upstream.headers.entries()) {
@@ -3558,7 +3611,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // Couldn't rebuild the body — forward the upstream 400 (already consumed).
             const responseHeaders: Record<string, string> = {
               'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
-              'Access-Control-Allow-Origin': corsOrigin,
+              ...CORS_RESPONSE_HEADERS,
               ...SECURITY_HEADERS,
             };
             for (const [key, value] of upstream.headers.entries()) {
@@ -3602,24 +3655,22 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
             if (nextAccount) {
               triedAliases.add(nextAccount.alias);
-              poolAccount = nextAccount;
-              accessToken = nextAccount.accessToken;
-              headers['Authorization'] = `Bearer ${accessToken}`;
-              headers['x-claude-code-session-id'] = resolveOutboundSession(nextAccount, clientSessionKey).sessionId;
-              pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
+              activatePoolAccount(nextAccount);
+              stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
               peekedBody = null;
               continue dispatchLoop;
             }
-            pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
+            pool.releaseStickyLease(stickyLease);
+            stickyLease = null;
           }
           const enriched = enrich429(peekedBody, upstream.headers);
           const responseHeaders: Record<string, string> = {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': corsOrigin,
+            ...CORS_RESPONSE_HEADERS,
             ...SECURITY_HEADERS,
           };
           for (const [key, value] of upstream.headers.entries()) {
-            if (key.startsWith('x-ratelimit') || key.startsWith('anthropic-ratelimit') || key === 'request-id') {
+            if (key.startsWith('x-ratelimit') || key.startsWith('anthropic-ratelimit') || key === 'request-id' || key === 'retry-after') {
               responseHeaders[key] = value;
             }
           }
@@ -3648,7 +3699,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           // The body is already consumed, so we write it straight out.
           const responseHeaders: Record<string, string> = {
             'Content-Type': upstream.headers.get('content-type') ?? 'application/json',
-            'Access-Control-Allow-Origin': corsOrigin,
+            ...CORS_RESPONSE_HEADERS,
             ...SECURITY_HEADERS,
           };
           for (const [key, value] of upstream.headers.entries()) {
@@ -3676,16 +3727,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
         if (nextAccount) {
           triedAliases.add(nextAccount.alias);
-          poolAccount = nextAccount;
-          accessToken = nextAccount.accessToken;
-          headers['Authorization'] = `Bearer ${accessToken}`;
-          headers['x-claude-code-session-id'] = resolveOutboundSession(nextAccount, clientSessionKey).sessionId;
-          pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
+          activatePoolAccount(nextAccount);
+          stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
           continue dispatchLoop;
         }
         // No peer available — fall through to normal forwarding so the
         // client sees the upstream's 401/403. Don't swallow the error.
-        pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
+        pool.releaseStickyLease(stickyLease);
+        stickyLease = null;
       }
 
       // Enrich 429 errors with rate limit details from headers (Anthropic only returns "Error")
@@ -3695,14 +3744,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
           if (nextAccount) {
             triedAliases.add(nextAccount.alias);
-            poolAccount = nextAccount;
-            accessToken = nextAccount.accessToken;
-            headers['Authorization'] = `Bearer ${accessToken}`;
-            headers['x-claude-code-session-id'] = resolveOutboundSession(nextAccount, clientSessionKey).sessionId;
-            pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
+            activatePoolAccount(nextAccount);
+            stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
             continue dispatchLoop;
           }
-          pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
+          pool.releaseStickyLease(stickyLease);
+          stickyLease = null;
         }
         // Pool-exhausted fallback: no peer left to fail over to. For an
         // OpenAI-shape request with the fallback armed, re-point the
@@ -3728,11 +3775,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         const enriched = enrich429(errBody, upstream.headers);
         const responseHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': corsOrigin,
+          ...CORS_RESPONSE_HEADERS,
           ...SECURITY_HEADERS,
         };
         for (const [key, value] of upstream.headers.entries()) {
-          if (key.startsWith('x-ratelimit') || key.startsWith('anthropic-ratelimit') || key === 'request-id') {
+          if (key.startsWith('x-ratelimit') || key.startsWith('anthropic-ratelimit') || key === 'request-id' || key === 'retry-after') {
             responseHeaders[key] = value;
           }
         }
@@ -3758,7 +3805,8 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // selector and can establish a fresh binding, matching the upstream
       // SessionAffinitySelector's failure invalidation.
       if (poolAccount && upstream.status >= 500 && upstream.status <= 599) {
-        pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
+        pool.releaseStickyLease(stickyLease);
+        stickyLease = null;
       }
 
       // Non-429 — exit dispatch loop and forward the response to client.
@@ -3767,6 +3815,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // so its consecutive-failure counter resets. dario#234.
       if (poolAccount && upstream.status >= 200 && upstream.status < 300) {
         pool.clearAuthFailure(poolAccount.alias);
+        pool.confirmSticky(stickyLease);
       }
       break;
       } // end dispatchLoop: while (true)
@@ -3778,7 +3827,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // Forward response headers
       const responseHeaders: Record<string, string> = {
         'Content-Type': contentType || 'application/json',
-        'Access-Control-Allow-Origin': corsOrigin,
+        ...CORS_RESPONSE_HEADERS,
         ...SECURITY_HEADERS,
       };
 
@@ -4103,6 +4152,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         if (verbose) console.log(`[dario] #${requestCount} aborted (client disconnected)`);
         writeLogLine(logFileStream, { ...errLogBase, reject: 'client-closed' });
       } else if (upstreamAbortReason === 'timeout') {
+        if (poolAccount) pool.releaseStickyLease(stickyLease);
         console.error(`[dario] #${requestCount} upstream timeout after ${upstreamTimeoutMs / 1000}s`);
         if (!res.headersSent) {
           res.writeHead(504, JSON_HEADERS);
@@ -4112,6 +4162,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         }
         writeLogLine(logFileStream, { ...errLogBase, status: 504, error: 'upstream-timeout' });
       } else {
+        if (poolAccount) pool.releaseStickyLease(stickyLease);
         // Log full error server-side, return generic message to client
         console.error('[dario] Proxy error:', sanitizeError(err));
         if (!res.headersSent) {

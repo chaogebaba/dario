@@ -33,8 +33,18 @@ header('explicit header priority and normalization');
     extractSessionAffinityKey({ 'X-SESSION-ID': ['', ' session-two '] }, body) === 'header:session-two');
   check('OpenCode affinity header is accepted',
     extractSessionAffinityKey({ 'x-session-affinity': 'open-code' }, body) === 'affinity:open-code');
-  check('client request id is the last explicit-header fallback',
-    extractSessionAffinityKey({ 'x-client-request-id': 'request-session' }, body) === 'client-request:request-session');
+  check('Amp thread id is accepted',
+    extractSessionAffinityKey({ 'x-amp-thread-id': 'amp-session' }, body) === 'amp:amp-session');
+  check('dario client session header is accepted',
+    extractSessionAffinityKey({ 'x-client-session-id': 'client-session' }, body) === 'client-session:client-session');
+  check('stable body identity wins over a per-request id',
+    extractSessionAffinityKey({ 'x-client-request-id': 'request-one' }, body) === 'session:body-session');
+  check('client request id is only used when no stable body identity exists',
+    extractSessionAffinityKey({ 'x-client-request-id': 'request-session' }, {}) === 'client-request:request-session');
+  check('client request id precedes the message-hash fallback',
+    extractSessionAffinityKey({ 'x-client-request-id': 'request-session' }, {
+      messages: [{ role: 'user', content: 'a message that can be hashed' }],
+    }) === 'client-request:request-session');
   check('Headers objects are supported',
     extractSessionAffinityKey(new Headers({ 'x-session-id': 'headers-object' }), body) === 'header:headers-object');
 }

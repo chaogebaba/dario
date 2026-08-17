@@ -126,8 +126,9 @@ export function extractSessionAffinityKey(
     ['session-id', 'codex'],
     ['session_id', 'codex'],
     ['x-session-id', 'header'],
+    ['x-client-session-id', 'client-session'],
     ['x-session-affinity', 'affinity'],
-    ['x-client-request-id', 'client-request'],
+    ['x-amp-thread-id', 'amp'],
   ];
   for (const [header, namespace] of explicitHeaders) {
     const value = headerValue(headers, header);
@@ -156,5 +157,7 @@ export function extractSessionAffinityKey(
   const legacyConversation = namespaced('conversation', body.conversation_id);
   if (legacyConversation) return legacyConversation;
 
+  const requestId = headerValue(headers, 'x-client-request-id');
+  if (requestId) return `client-request:${requestId}`;
   return messageHash(body);
 }

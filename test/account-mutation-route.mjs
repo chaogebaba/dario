@@ -89,7 +89,11 @@ try {
   check('GET /accounts is handled by the extracted route',
     accountsRes.status === 200 && accountsBody.accounts?.[0]?.alias === 'alpha');
 
-  pool.markRejected('alpha', { ...EMPTY_SNAPSHOT }, 'sonnet', 60_000);
+  pool.markRejected('alpha', {
+    ...EMPTY_SNAPSHOT,
+    perModel7d: { sonnet: 1 },
+    measured: true,
+  }, 'sonnet', 60_000);
   const cooldownBody = await (await fetch(`${base}/accounts`)).json();
   check('GET /accounts exposes model-scoped quota cooldowns',
     cooldownBody.accounts?.[0]?.status === 'quota-cooldown'

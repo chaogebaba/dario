@@ -30,7 +30,16 @@ export class AccountsController {
     if (this.refreshing) return undefined;
     this.refreshing = true;
     try {
-      return await loadAccounts(ctx, false, this.quota);
+      const next = await loadAccounts(ctx, false, this.quota);
+      ctx.setState((previous) => mergeLoadedState(previous, next));
+      return undefined;
+    } catch (error) {
+      ctx.setState({
+        loading: false,
+        message: `Refresh failed: ${(error as Error).message}`,
+        messageKind: 'error',
+      });
+      return undefined;
     } finally {
       this.refreshing = false;
     }
@@ -56,6 +65,11 @@ export class AccountsController {
         return loadAccounts(ctx, action.forceQuota, this.quota);
       })()
         .then((next) => ctx.setState(next))
+        .catch((error) => ctx.setState({
+          loading: false,
+          message: `Refresh failed: ${(error as Error).message}`,
+          messageKind: 'error',
+        }))
         .finally(() => { this.refreshing = false; });
       return;
     }
@@ -98,6 +112,7 @@ export class AccountsController {
           });
         },
       });
+      abortController.signal.throwIfAborted();
       ctx.setState({
         mode: 'finishing',
         authorizeUrl: null,
@@ -110,7 +125,7 @@ export class AccountsController {
           const profileResponse = await fetch(CLAUDE_PROFILE_URL, {
             method: 'GET',
             headers: { authorization: `Bearer ${creds.accessToken}` },
-            signal: AbortSignal.timeout(5000),
+            signal: AbortSignal.any([abortController.signal, AbortSignal.timeout(5000)]),
           });
           if (profileResponse.ok) {
             const profile = await profileResponse.json() as { account?: { email_address?: string } };
@@ -126,8 +141,11 @@ export class AccountsController {
         }
       }
 
+      abortController.signal.throwIfAborted();
       await ctx.client.reconcilePool();
+      abortController.signal.throwIfAborted();
       const next = await loadAccounts(ctx, true, this.quota);
+      abortController.signal.throwIfAborted();
       ctx.setState({
         ...next,
         message: `Account "${alias}" added.`,
@@ -211,6 +229,23 @@ export class AccountsController {
       ctx.setState({ message: `Rename failed: ${(error as Error).message}`, messageKind: 'error', editBuffer: null });
     }
   }
+}
+
+function mergeLoadedState(previous: AccountsState, next: AccountsState): AccountsState {
+  const interactionActive = previous.mode !== 'normal'
+    || previous.editBuffer !== null
+    || previous.pendingAction !== null;
+  if (!interactionActive) return next;
+  return {
+    ...next,
+    selectedIdx: Math.min(previous.selectedIdx, Math.max(0, next.accounts.length - 1)),
+    mode: previous.mode,
+    editBuffer: previous.editBuffer,
+    message: previous.message,
+    messageKind: previous.messageKind,
+    authorizeUrl: previous.authorizeUrl,
+    pendingAction: previous.pendingAction,
+  };
 }
 
 const standaloneQuota = new AccountsQuotaStore();

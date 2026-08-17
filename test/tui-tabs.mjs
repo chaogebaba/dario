@@ -103,6 +103,33 @@ header('Accounts actions are state-owned and mount refreshes once');
   await mounted;
   check('mount + idle tick fetch /accounts once', calls.filter((path) => path === '/accounts').length === 1);
   check('mount + idle tick fetch /quota once', calls.filter((path) => path === '/quota').length === 1);
+
+  const delayedTab = createAccountsTab();
+  let releaseAccounts;
+  const accountsReady = new Promise((resolve) => { releaseAccounts = resolve; });
+  let liveState = delayedTab.initialState();
+  const delayedCtx = {
+    client: {
+      getJson: async (path) => {
+        if (path === '/accounts') {
+          await accountsReady;
+          return { mode: 'pool', accounts: [{ alias: 'loaded', expiresAt: Date.now() + 60_000 }] };
+        }
+        return { accounts: [] };
+      },
+    },
+    setState: (updater) => {
+      liveState = typeof updater === 'function' ? updater(liveState) : { ...liveState, ...updater };
+    },
+    registerCleanup: () => {},
+  };
+  const delayedMount = delayedTab.onMount(liveState, delayedCtx);
+  liveState = delayedTab.onKey(liveState, key('n'));
+  liveState = delayedTab.onKey(liveState, key('x'));
+  releaseAccounts();
+  await delayedMount;
+  check('late mount data preserves in-progress alias input',
+    liveState.mode === 'input-alias' && liveState.editBuffer === 'x' && liveState.accounts[0]?.alias === 'loaded');
 }
 
 // ─────────────────────────────────────────────────────────────

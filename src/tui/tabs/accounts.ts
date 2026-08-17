@@ -29,7 +29,10 @@ export function createAccountsTab(): Tab<AccountsState> {
     hotkey: 'a',
     capturesGlobalKeys: accountsCaptureGlobalKeys,
     initialState: initialAccountsState,
-    onMount: (_state, ctx) => controller.mount(ctx),
+    onMount: (_state, ctx) => {
+      ctx.registerCleanup(() => controller.cancelAdd());
+      return controller.mount(ctx);
+    },
     onKey: (state, key) => {
       if (state.mode === 'adding' && key.name === 'escape') controller.cancelAdd();
       return reduceAccountsKey(state, key);

@@ -36,6 +36,11 @@ header('buildRuntimeConfigSections — precedence and redaction');
 {
   const config = defaultConfig();
   config.apiKey = 'file-key';
+  config.port = 9876;
+  config.host = '0.0.0.0';
+  config.model = 'claude-test';
+  config.effort = 'high';
+  config.strictTls = true;
   config.egressProxy = 'http://alice:secret@proxy.example:8080';
   config.egressIpUrl = 'https://check.example/ip';
 
@@ -44,6 +49,12 @@ header('buildRuntimeConfigSections — precedence and redaction');
   const row = (title, label) => section(title)?.rows.find((candidate) => candidate.label === label)?.value;
 
   check('returns proxy, egress, and auth sections', sections.length === 3);
+  check('persisted proxy values are reported',
+    row('Proxy (on `dario proxy`)', 'port') === '9876'
+      && row('Proxy (on `dario proxy`)', 'host') === '0.0.0.0'
+      && row('Proxy (on `dario proxy`)', 'model') === 'claude-test'
+      && row('Proxy (on `dario proxy`)', 'effort') === 'high');
+  check('persisted strict TLS setting is reported', row('Auth gate', 'DARIO_STRICT_TLS') === 'on');
   check('persisted API key is reported by length', row('Auth gate', 'DARIO_API_KEY')?.includes('length 8'));
   check('API key value is never reported', !JSON.stringify(sections).includes('file-key'));
   check('egress credentials are redacted', row('Egress', 'egress proxy') === 'http://***:***@proxy.example:8080/');
@@ -61,6 +72,10 @@ header('buildRuntimeConfigSections — precedence and redaction');
   check('proxy environment source is retained', envRow('Proxy (on `dario proxy`)', 'port') === '4567  (from DARIO_PORT)');
   check('strict TLS environment flag is retained', envRow('Auth gate', 'DARIO_STRICT_TLS') === 'on');
   check('empty primary egress env disables persisted proxy', envRow('Egress', 'egress proxy') === 'unset — upstream fetches go direct');
+  check('invalid strict TLS env falls through to persisted config',
+    row('Auth gate', 'DARIO_STRICT_TLS') === 'on'
+      && buildRuntimeConfigSections({ ...config, strictTls: true }, { DARIO_STRICT_TLS: 'garbage' })
+        .find((candidate) => candidate.title === 'Auth gate')?.rows.find((candidate) => candidate.label === 'DARIO_STRICT_TLS')?.value === 'on');
 }
 
 // ─────────────────────────────────────────────────────────────

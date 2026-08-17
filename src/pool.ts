@@ -111,6 +111,8 @@ export interface PoolAccount {
   consecutiveAuthFailures: number;
   /** Per-model quota cooldowns established by 429 responses. */
   rateLimitCooldowns: Record<string, RateLimitCooldown>;
+  /** Monotonic rejection version used to ignore stale concurrent successes. */
+  rejectionEpoch: number;
 }
 
 interface RateLimitCooldown {
@@ -169,6 +171,7 @@ export function ineligibleReason(
 
 const RATE_LIMIT_COOLDOWN_BASE_MS = 1_000;
 const RATE_LIMIT_COOLDOWN_MAX_MS = 30 * 60 * 1000;
+const RATE_LIMIT_HINT_MAX_MS = 8 * 24 * 60 * 60 * 1000;
 const GLOBAL_RATE_LIMIT_SCOPE = '*';
 
 function rateLimitScope(family?: string | null): string {
@@ -193,6 +196,13 @@ export function isInRateLimitCooldown(
 
 function hasActiveRateLimitCooldown(account: PoolAccount, now: number): boolean {
   return Object.values(account.rateLimitCooldowns ?? {}).some((cooldown) => cooldown.until > now);
+}
+
+function rejectionCooldownScope(snapshot: RateLimitSnapshot, family?: string | null): string {
+  if (!family) return GLOBAL_RATE_LIMIT_SCOPE;
+  const unifiedExhausted = Math.max(snapshot.util5h, snapshot.util7d) >= 1 - POOL_HEADROOM_FLOOR;
+  const familyExhausted = (snapshot.perModel7d[family] ?? 0) >= 1 - POOL_HEADROOM_FLOOR;
+  return familyExhausted && !unifiedExhausted ? rateLimitScope(family) : GLOBAL_RATE_LIMIT_SCOPE;
 }
 
 export interface PoolStatus {
@@ -382,6 +392,18 @@ interface StickyBinding {
   alias: string;
   boundAt: number;    // creation time — retained for observability/debugging
   lastUsedAt: number; // last time this binding was returned; drives the idle TTL and LRU eviction
+  generation: number;
+}
+
+export interface StickyLease {
+  bindingKey: string;
+  alias: string;
+  generation: number;
+}
+
+export interface StickySelection {
+  account: PoolAccount | null;
+  lease: StickyLease | null;
 }
 const STICKY_IDLE_TTL_MS_DEFAULT = 60 * 60 * 1000; // default 1h; overridden by sessionAffinity.ttlMs
 const STICKY_MAX_ENTRIES = 2_000;          // lazy cleanup cap
@@ -452,6 +474,8 @@ export class AccountPool {
   private queueTimeoutMs = 60_000;
   private drainTimer: ReturnType<typeof setInterval> | null = null;
   private sticky: Map<string, StickyBinding> = new Map();
+  private stickySuccesses: Map<string, StickyBinding> = new Map();
+  private nextStickyGeneration = 0;
   // Amortize the O(n) sticky TTL/orphan sweep — timestamp of the last run.
   private lastStickyCleanup = 0;
   // Alias most recently returned by round-robin. An alias cursor remains
@@ -486,6 +510,7 @@ export class AccountPool {
       || (existing.identity.deviceId !== '' && opts.deviceId !== '' && existing.identity.deviceId !== opts.deviceId)
     );
     const preserved = identityChanged ? undefined : existing;
+    if (identityChanged) this.dropStickyForAlias(alias);
     this.accounts.set(alias, {
       alias,
       accessToken: opts.accessToken,
@@ -506,11 +531,14 @@ export class AccountPool {
       lastAuthFailureAt: preserved?.lastAuthFailureAt,
       consecutiveAuthFailures: preserved?.consecutiveAuthFailures ?? 0,
       rateLimitCooldowns: preserved?.rateLimitCooldowns ?? {},
+      rejectionEpoch: preserved?.rejectionEpoch ?? 0,
     });
   }
 
   remove(alias: string): boolean {
-    return this.accounts.delete(alias);
+    const removed = this.accounts.delete(alias);
+    if (removed) this.dropStickyForAlias(alias);
+    return removed;
   }
 
   get size(): number {
@@ -628,13 +656,18 @@ export class AccountPool {
    *
    * Also performs lazy cleanup of expired bindings (TTL or size cap).
    */
-  selectSticky(stickyKey: string | null, family?: string | null, now: number = Date.now(), hint?: PoolAccount | null): PoolAccount | null {
-    if (!stickyKey) return this.select(family);
-    // A caller may have selected before it obtained the body-derived sticky
-    // key. With affinity disabled, keep that valid hint instead of selecting a
-    // second time and skipping every other round-robin seat.
-    if (!this.stickyEnabled) {
-      return this.validHint(hint, family, now) ?? this.select(family);
+  selectSticky(stickyKey: string | null, family?: string | null, now: number = Date.now()): PoolAccount | null {
+    return this.selectStickyWithLease(stickyKey, family, now).account;
+  }
+
+  /** Select with affinity and return a request-scoped lease for completion. */
+  selectStickyWithLease(
+    stickyKey: string | null,
+    family?: string | null,
+    now: number = Date.now(),
+  ): StickySelection {
+    if (!stickyKey || !this.stickyEnabled) {
+      return { account: this.select(family), lease: null };
     }
     this.cleanupSticky(now);
 
@@ -652,35 +685,21 @@ export class AccountPool {
         // be reaped or rebound while active — that would strand its warm prompt
         // cache — so the TTL is re-based to now on every hit.
         binding.lastUsedAt = now;
-        return bound;
+        binding.generation = ++this.nextStickyGeneration;
+        return { account: bound, lease: this.leaseFor(bindingKey, binding) };
       }
     }
 
-    // For new bindings, an already-selected `hint` avoids double-advancing
-    // round-robin. Only use it if it passes the same health + plan checks the
-    // binding validator uses.
-    let picked: PoolAccount | null = null;
-    const validHint = this.validHint(hint, family, now);
-    if (validHint) {
-      picked = validHint;
-    } else {
-      picked = this.select(family);
-    }
-    if (picked) {
-      this.sticky.set(bindingKey, { alias: picked.alias, boundAt: now, lastUsedAt: now });
-    }
-    return picked;
-  }
-
-  private validHint(
-    hint: PoolAccount | null | undefined,
-    family: string | null | undefined,
-    now: number,
-  ): PoolAccount | null {
-    if (!hint || this.accounts.get(hint.alias) !== hint) return null;
-    if (ineligibleReason(hint, now, family) !== null) return null;
-    if (computeHeadroom(hint.rateLimit, family) <= POOL_HEADROOM_FLOOR) return null;
-    return planEligible(hint, family) ? hint : null;
+    const picked = this.select(family);
+    if (!picked) return { account: null, lease: null };
+    const next = {
+      alias: picked.alias,
+      boundAt: now,
+      lastUsedAt: now,
+      generation: ++this.nextStickyGeneration,
+    };
+    this.sticky.set(bindingKey, next);
+    return { account: picked, lease: this.leaseFor(bindingKey, next) };
   }
 
   /**
@@ -689,11 +708,36 @@ export class AccountPool {
    * the next turn of the same conversation would re-select the exhausted
    * account via the stale binding, eat another 429, and failover again.
    */
-  rebindSticky(stickyKey: string | null, alias: string, family?: string | null): void {
-    if (!stickyKey || !this.stickyEnabled) return;
-    if (!this.accounts.has(alias)) return;
+  rebindSticky(stickyKey: string | null, alias: string, family?: string | null): StickyLease | null {
+    if (!stickyKey || !this.stickyEnabled || !this.accounts.has(alias)) return null;
     const now = Date.now();
-    this.sticky.set(this.stickyBindingKey(stickyKey, family), { alias, boundAt: now, lastUsedAt: now });
+    const bindingKey = this.stickyBindingKey(stickyKey, family);
+    const next = { alias, boundAt: now, lastUsedAt: now, generation: ++this.nextStickyGeneration };
+    this.sticky.set(bindingKey, next);
+    return this.leaseFor(bindingKey, next);
+  }
+
+  /** Record a successful request without overwriting a newer in-flight lease. */
+  confirmSticky(lease: StickyLease | null): void {
+    if (!lease || !this.stickyEnabled || !this.accounts.has(lease.alias)) return;
+    const now = Date.now();
+    const successful = { alias: lease.alias, boundAt: now, lastUsedAt: now, generation: lease.generation };
+    const previousSuccess = this.stickySuccesses.get(lease.bindingKey);
+    if (!previousSuccess || previousSuccess.generation < lease.generation) {
+      this.stickySuccesses.set(lease.bindingKey, successful);
+    }
+    const current = this.sticky.get(lease.bindingKey);
+    if (!current || current.generation <= lease.generation) this.sticky.set(lease.bindingKey, successful);
+  }
+
+  /** Release only this failed request's lease, restoring the latest success. */
+  releaseStickyLease(lease: StickyLease | null): void {
+    if (!lease || !this.stickyEnabled) return;
+    const current = this.sticky.get(lease.bindingKey);
+    if (!current || current.generation !== lease.generation || current.alias !== lease.alias) return;
+    const successful = this.stickySuccesses.get(lease.bindingKey);
+    if (successful && this.accounts.has(successful.alias)) this.sticky.set(lease.bindingKey, { ...successful });
+    else this.sticky.delete(lease.bindingKey);
   }
 
   /** Release a failed binding, optionally only when it still points at alias. */
@@ -706,6 +750,19 @@ export class AccountPool {
 
   private stickyBindingKey(stickyKey: string, family?: string | null): string {
     return `${rateLimitScope(family)}\u0000${stickyKey}`;
+  }
+
+  private leaseFor(bindingKey: string, binding: StickyBinding): StickyLease {
+    return { bindingKey, alias: binding.alias, generation: binding.generation };
+  }
+
+  private dropStickyForAlias(alias: string): void {
+    for (const [key, binding] of this.sticky) {
+      if (binding.alias === alias) this.sticky.delete(key);
+    }
+    for (const [key, binding] of this.stickySuccesses) {
+      if (binding.alias === alias) this.stickySuccesses.delete(key);
+    }
   }
 
   /**
@@ -727,6 +784,7 @@ export class AccountPool {
         // an actively-running conversation is never reaped here.
         if (!this.accounts.has(b.alias) || now - b.lastUsedAt > this.stickyIdleTtlMs) {
           this.sticky.delete(key);
+          this.stickySuccesses.delete(key);
         }
       }
     }
@@ -739,7 +797,10 @@ export class AccountPool {
       const target = Math.floor(STICKY_MAX_ENTRIES * 0.8);
       const sorted = [...this.sticky.entries()].sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
       const toDrop = sorted.slice(0, this.sticky.size - target);
-      for (const [key] of toDrop) this.sticky.delete(key);
+      for (const [key] of toDrop) {
+        this.sticky.delete(key);
+        this.stickySuccesses.delete(key);
+      }
     }
   }
 
@@ -835,10 +896,12 @@ export class AccountPool {
     snapshot: RateLimitSnapshot,
     family?: string | null,
     successful: boolean = true,
+    observedRejectionEpoch?: number,
   ): void {
     const account = this.accounts.get(alias);
     if (!account) return;
-    if (successful) {
+    if (successful && (observedRejectionEpoch ?? account.rejectionEpoch) === account.rejectionEpoch) {
+      delete account.rateLimitCooldowns[GLOBAL_RATE_LIMIT_SCOPE];
       delete account.rateLimitCooldowns[rateLimitScope(family)];
       if (!hasActiveRateLimitCooldown(account, Date.now()) && account.rateLimit.status === 'rejected') {
         account.rateLimit.status = snapshot.measured ? snapshot.status : 'unknown';
@@ -864,22 +927,30 @@ export class AccountPool {
   ): void {
     const account = this.accounts.get(alias);
     if (!account) return;
-    const scope = rateLimitScope(family);
+    account.rejectionEpoch++;
+    const scope = rejectionCooldownScope(snapshot, family);
     const previous = account.rateLimitCooldowns[scope];
     const inFlightBurst = Boolean(previous && previous.until > now);
     const backoffLevel = inFlightBurst ? previous!.backoffLevel : (previous?.backoffLevel ?? 0);
-    const fallbackMs = rateLimitCooldownMs(backoffLevel);
-    const requestedMs = Number.isFinite(retryAfterMs) && (retryAfterMs ?? 0) > 0
-      ? Math.floor(retryAfterMs!)
-      : fallbackMs;
-    const until = now + Math.min(requestedMs, RATE_LIMIT_COOLDOWN_MAX_MS);
+    const hintedDeadlines: number[] = [];
+    if (Number.isFinite(retryAfterMs) && (retryAfterMs ?? 0) > 0) {
+      hintedDeadlines.push(now + Math.min(Math.floor(retryAfterMs!), RATE_LIMIT_HINT_MAX_MS));
+    }
+    const resetAt = snapshot.reset * 1000;
+    if (Number.isFinite(resetAt) && resetAt > now) {
+      hintedDeadlines.push(Math.min(resetAt, now + RATE_LIMIT_HINT_MAX_MS));
+    }
+    const requestedUntil = hintedDeadlines.length > 0
+      ? Math.max(...hintedDeadlines)
+      : inFlightBurst ? previous!.until : now + rateLimitCooldownMs(backoffLevel);
     account.rateLimitCooldowns[scope] = {
-      until: inFlightBurst ? Math.max(previous!.until, until) : until,
+      until: inFlightBurst ? Math.max(previous!.until, requestedUntil) : requestedUntil,
       backoffLevel: inFlightBurst ? backoffLevel : backoffLevel + 1,
     };
     account.rateLimit = snapshot.measured
       ? { ...snapshot, status: 'rejected' }
       : { ...account.rateLimit, status: 'rejected' };
+    account.requestCount++;
   }
 
   private expireRateLimitCooldowns(now: number): void {

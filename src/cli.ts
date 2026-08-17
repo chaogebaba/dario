@@ -373,13 +373,17 @@ async function proxy() {
   // hard guardrail for operators who want certainty that the JA3 the
   // proxy presents to Anthropic is Bun's BoringSSL ClientHello, not
   // Node's OpenSSL one. v3.23 (direction #3).
-  const strictTls = args.includes('--strict-tls');
+  const strictTls = args.includes('--strict-tls')
+    ? true
+    : parseTriStateEnv(process.env['DARIO_STRICT_TLS']) ?? fileCfg.strictTls ?? false;
   // --no-claude-auth: don't load/refresh the Claude OAuth pool (OpenAI-only
   // proxies). Stops dario rotating a shared refresh token out from under an
   // interactive Claude Code on the same machine.
   const noClaudeAuth = args.includes('--no-claude-auth');
   const modelArg = args.find(a => a.startsWith('--model='));
-  const model = modelArg ? modelArg.split('=')[1] : undefined;
+  const model = modelArg
+    ? modelArg.split('=')[1]
+    : (process.env['DARIO_MODEL'] || fileCfg.model || undefined);
   // --fast-model=MODEL: route Haiku-tier (CC sub-agent) requests to this
   // model instead of the forced --model, so sub-agents stay cheap.
   const fastModelArg = args.find(a => a.startsWith('--fast-model='));
@@ -503,7 +507,7 @@ async function proxy() {
   // to 'overage' billing. Users opting in should watch the
   // `representative-claim` response header via -v logs and revert to default
   // if subscription billing breaks.
-  const effort = resolveEffortFlag(args, process.env['DARIO_EFFORT']);
+  const effort = resolveEffortFlag(args, process.env['DARIO_EFFORT'] || fileCfg.effort || undefined);
 
   // --max-tokens=<N|client> — override outbound max_tokens (dario#88,
   // Hermes compat). Default unset pins 32000 (CC 2.1.116's wire default).

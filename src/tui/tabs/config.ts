@@ -24,7 +24,6 @@ import type { Tab } from '../tab.js';
 import { fg, dim, brand, inverse, pad, truncate } from '../render.js';
 import { parseOutboundProxy, redactProxyUrl } from '../../outbound-proxy.js';
 import {
-  CONFIG_SCHEMA_VERSION,
   defaultConfig,
   loadConfig,
   saveConfig,
@@ -360,7 +359,7 @@ const STRING_ENUMS: Record<string, readonly string[]> = {
 
 function doSave(state: ConfigState): ConfigState {
   try {
-    saveConfig(undefined, { ...state.config, version: CONFIG_SCHEMA_VERSION });
+    saveConfig(undefined, state.config);
     return {
       ...state,
       snapshot: structuredClone(state.config),

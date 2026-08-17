@@ -15,10 +15,9 @@
  * shape `atomicWriteJson` in src/live-fingerprint.ts uses for the
  * captured CC template.
  *
- * Unknown keys in the loaded file are ignored. Validation is best-effort,
- * not strict: a corrupt or partial file falls back to defaults rather than
- * aborting the process. New settings must be added to both the config type
- * and the sanitizer schema below so ownership stays explicit.
+ * Unknown keys in the loaded file are preserved for forward compatibility.
+ * Known fields are validated best-effort: a corrupt or partial file falls
+ * back to defaults rather than aborting the process.
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -280,8 +279,8 @@ export function defaultConfig(): DarioConfig {
  *                 returned. The TUI surfaces this so the user knows
  *                 their saved settings were ignored.
  *
- * The loaded shape is type-checked field-by-field: unknown keys and known
- * keys with wrong types are dropped.
+ * The loaded shape is type-checked field-by-field: unknown keys pass through
+ * while known keys with wrong types are dropped.
  * Strict validation would force a config migration on every shape
  * tweak; loose-but-typed lets the file evolve without breaking older
  * dario installs that haven't been restarted.
@@ -345,6 +344,11 @@ export function saveConfig(
   path: string = DEFAULT_CONFIG_PATH,
   config: DarioConfig,
 ): void {
+  if (config.version > CONFIG_SCHEMA_VERSION) {
+    throw new Error(
+      `config schema v${config.version} is newer than this dario build (v${CONFIG_SCHEMA_VERSION}); upgrade dario before saving`,
+    );
+  }
   const parent = dirname(path);
   if (!existsSync(parent)) {
     mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -462,10 +466,11 @@ function enumValue<const T extends string>(...allowed: T[]): ValueSanitizer {
 function objectValue(fields: Record<string, ValueSanitizer>): ValueSanitizer {
   return (value) => {
     if (!isPlainObject(value)) return undefined;
-    const out: Record<string, unknown> = {};
+    const out: Record<string, unknown> = { ...value };
     for (const [key, sanitizer] of Object.entries(fields)) {
       const sanitized = sanitizer(value[key]);
-      if (sanitized !== undefined) out[key] = sanitized;
+      if (sanitized === undefined) delete out[key];
+      else out[key] = sanitized;
     }
     return out;
   };
@@ -540,12 +545,13 @@ const CONFIG_FIELD_SANITIZERS = {
   }),
 } satisfies Record<keyof DarioConfig, ValueSanitizer>;
 
-/** Drop unknown or ill-typed fields, leaving defaults to fill the gaps. */
+/** Preserve unknown fields and drop ill-typed known fields. */
 function sanitize(parsed: Record<string, unknown>): DarioConfig {
-  const out: Record<string, unknown> = { version: CONFIG_SCHEMA_VERSION };
+  const out: Record<string, unknown> = { ...parsed, version: CONFIG_SCHEMA_VERSION };
   for (const [key, sanitizer] of Object.entries(CONFIG_FIELD_SANITIZERS)) {
     const value = sanitizer(parsed[key]);
-    if (value !== undefined) out[key] = value;
+    if (value === undefined) delete out[key];
+    else out[key] = value;
   }
   return out as unknown as DarioConfig;
 }
