@@ -427,12 +427,15 @@ export class AccountPool {
   private readonly stickyIdleTtlMs: number;
 
   constructor(
-    private readonly strategy: PoolStrategy = 'headroom',
+    private readonly _strategy: PoolStrategy = 'headroom',
     opts?: { sessionAffinity?: boolean; sessionAffinityTtlMs?: number },
   ) {
     this.stickyEnabled = opts?.sessionAffinity ?? true;
     this.stickyIdleTtlMs = opts?.sessionAffinityTtlMs ?? STICKY_IDLE_TTL_MS_DEFAULT;
   }
+
+  /** Current pool routing strategy. */
+  get strategy(): PoolStrategy { return this._strategy; }
 
   add(alias: string, opts: {
     accessToken: string;
@@ -530,14 +533,14 @@ export class AccountPool {
     }
 
     if (eligible.length > 0) {
-      if (this.strategy === 'fill-first') {
+      if (this._strategy === 'fill-first') {
         const first = pickFillFirst(eligible, family);
         if (first) return first;
         // Every eligible account is at/below the floor — the terminal state
         // both strategies share. Fall through to max-headroom so the caller
         // still gets the least-drained account instead of null.
       }
-      if (this.strategy === 'round-robin') {
+      if (this._strategy === 'round-robin') {
         return this.pickRoundRobin(eligible);
       }
       return pickMaxHeadroom(eligible, family);
@@ -575,7 +578,7 @@ export class AccountPool {
    *
    * Also performs lazy cleanup of expired bindings (TTL or size cap).
    */
-  selectSticky(stickyKey: string | null, family?: string | null, now: number = Date.now()): PoolAccount | null {
+  selectSticky(stickyKey: string | null, family?: string | null, now: number = Date.now(), hint?: PoolAccount | null): PoolAccount | null {
     if (!stickyKey || !this.stickyEnabled) return this.select(family);
     this.cleanupSticky(now);
 
@@ -597,7 +600,23 @@ export class AccountPool {
       }
     }
 
-    const picked = this.select(family);
+    // For new bindings: prefer the already-selected `hint` (from the initial
+    // pool.select() that the proxy ran before the body parse). This avoids
+    // a double-advance of the round-robin counter that would permanently
+    // skew all new conversations to the same account. Only use the hint if
+    // it passes the same health + plan checks the binding validator uses.
+    let picked: PoolAccount | null = null;
+    if (hint
+      && hint.rateLimit.status !== 'rejected'
+      && hint.expiresAt > now + 30_000
+      && !isInAuthCooldown(hint, now)
+      && computeHeadroom(hint.rateLimit, family) > POOL_HEADROOM_FLOOR
+      && planEligible(hint, family)
+    ) {
+      picked = hint;
+    } else {
+      picked = this.select(family);
+    }
     if (picked) {
       this.sticky.set(stickyKey, { alias: picked.alias, boundAt: now, lastUsedAt: now });
     }
@@ -707,11 +726,11 @@ export class AccountPool {
       // after a 429 is the next alias in line, not the max-headroom seat —
       // otherwise a single failover would defeat the concentration the
       // strategy exists to provide.
-      if (this.strategy === 'fill-first') {
+      if (this._strategy === 'fill-first') {
         const first = pickFillFirst(eligible, family);
         if (first) return first;
       }
-      if (this.strategy === 'round-robin') {
+      if (this._strategy === 'round-robin') {
         return this.pickRoundRobin(eligible);
       }
       return pickMaxHeadroom(eligible, family);

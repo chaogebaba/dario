@@ -2686,6 +2686,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // Pool is the one credential model (v5.0): a plain `dario login` is a
         // pool of one, so every OAuth request selects from the pool.
         poolAccount = pool.select();
+        if (verbose && poolAccount) {
+          console.log(`[dario] #${requestCount} pool.select → ${poolAccount.alias} (strategy=${pool.strategy})`);
+        }
         if (!poolAccount) {
           // Pool-exhausted fallback: when armed, the pool HAS accounts (all
           // drained / cooling), and the client speaks OpenAI shape, defer —
@@ -2996,13 +2999,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // Rotating off mid-session costs cache-create on every turn.
             stickyKey = computeStickyKey(userMsg);
             if (stickyKey) {
-              const preferred = pool.selectSticky(stickyKey, modelFamily(requestModel));
+              const preferred = pool.selectSticky(stickyKey, modelFamily(requestModel), undefined, poolAccount);
               if (preferred && preferred.alias !== poolAccount?.alias) {
+                if (verbose) {
+                  console.log(`[dario] #${requestCount} sticky: rebind ${stickyKey} → ${preferred.alias} (was ${poolAccount?.alias ?? 'none'}, model=${requestModel}, family=${modelFamily(requestModel) ?? 'null'})`);
+                }
                 poolAccount = preferred;
                 accessToken = preferred.accessToken;
-                if (verbose) {
-                  console.log(`[dario] #${requestCount} sticky: bind ${stickyKey} → ${preferred.alias}`);
-                }
+              } else if (preferred && verbose) {
+                console.log(`[dario] #${requestCount} sticky: reuse ${preferred.alias} for key=${stickyKey}`);
               }
             }
 

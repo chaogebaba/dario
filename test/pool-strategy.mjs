@@ -163,5 +163,94 @@ header('sticky bindings win over fill order in both modes');
   }
 }
 
+header('round-robin with sticky hint avoids double-advance');
+{
+  // Simulate the proxy flow: pool.select() picks an account (the hint),
+  // then selectSticky(key, family, now, hint) should use the hint for a new
+  // binding instead of calling select() again (which double-advances the index).
+  const pool = new AccountPool('round-robin', { sessionAffinity: true });
+  addAccount(pool, 'alpha', { util5h: 0.3 });
+  addAccount(pool, 'beta', { util5h: 0.3 });
+
+  // First "request": proxy calls select() → gets alpha (sorted order idx=0)
+  const hint1 = pool.select();
+  check('rr hint1 is alpha', hint1?.alias === 'alpha');
+  // Then selectSticky with hint → should bind to alpha (the hint), NOT call select() again
+  const key1 = computeStickyKey('conversation one first message');
+  const sticky1 = pool.selectSticky(key1, null, Date.now(), hint1);
+  check('sticky uses hint (alpha) for new binding', sticky1?.alias === 'alpha');
+
+  // Second "request" (new conversation): proxy calls select() → gets beta (idx=1)
+  const hint2 = pool.select();
+  check('rr hint2 is beta', hint2?.alias === 'beta');
+  const key2 = computeStickyKey('conversation two first message');
+  const sticky2 = pool.selectSticky(key2, null, Date.now(), hint2);
+  check('sticky uses hint (beta) for new binding', sticky2?.alias === 'beta');
+
+  // Third "request" (follow-up to conversation one): sticky returns existing binding
+  const hint3 = pool.select(); // advances again, but sticky should override
+  const sticky3 = pool.selectSticky(key1, null, Date.now(), hint3);
+  check('existing binding returned for conv1', sticky3?.alias === 'alpha');
+
+  // Verify even distribution: both accounts got bound
+  check('both accounts got at least one binding', sticky1?.alias !== sticky2?.alias);
+}
+
+header('round-robin without sticky hint (affinity off) still alternates');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'alpha', { util5h: 0.3 });
+  addAccount(pool, 'beta', { util5h: 0.3 });
+
+  const picks = [];
+  for (let i = 0; i < 6; i++) picks.push(pool.select()?.alias);
+  // round-robin with 2 accounts in sorted order: alpha, beta, alpha, beta...
+  check('alternates alpha/beta', picks[0] === 'alpha' && picks[1] === 'beta' && picks[2] === 'alpha');
+  // selectSticky with affinity off falls through to select()
+  const key = computeStickyKey('some message');
+  const s = pool.selectSticky(key, null, Date.now(), null);
+  check('affinity off: selectSticky delegates to select()', s?.alias === 'beta' || s?.alias === 'alpha');
+}
+
+header('plan-based routing: fable restricted to Max');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: true });
+  addAccount(pool, 'pro-account', { util5h: 0.1 });
+  addAccount(pool, 'max-account', { util5h: 0.3 });
+  pool.updatePlan('pro-account', 'Pro');
+  pool.updatePlan('max-account', 'Max');
+
+  // Fable family should only route to Max
+  const fable1 = pool.select('fable');
+  check('fable routes to max-account only', fable1?.alias === 'max-account');
+  const fable2 = pool.select('fable');
+  check('fable always routes to max (never pro)', fable2?.alias === 'max-account');
+
+  // Sonnet should route to both accounts over multiple calls (round-robin)
+  const sonnetPicks = new Set();
+  for (let i = 0; i < 4; i++) sonnetPicks.add(pool.select('sonnet')?.alias);
+  check('sonnet routes to both accounts', sonnetPicks.has('pro-account') && sonnetPicks.has('max-account'));
+
+  // selectSticky: fable hint pointing to Pro should be rejected
+  const proHint = pool.get('pro-account');
+  const fableKey = computeStickyKey('fable conversation');
+  const stickyFable = pool.selectSticky(fableKey, 'fable', Date.now(), proHint);
+  check('sticky rejects Pro hint for fable, picks Max', stickyFable?.alias === 'max-account');
+
+  // selectSticky: existing binding to Pro for fable should rebind to Max
+  pool.rebindSticky(computeStickyKey('bound-to-pro'), 'pro-account');
+  const rebound = pool.selectSticky(computeStickyKey('bound-to-pro'), 'fable', Date.now(), proHint);
+  check('sticky rebinds from Pro to Max for fable', rebound?.alias === 'max-account');
+}
+
+header('plan-based routing: unknown plan passes through');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'unknown-plan', { util5h: 0.1 });
+  // plan not set (null) — should still be eligible for fable
+  const pick = pool.select('fable');
+  check('unknown plan account is eligible for fable', pick?.alias === 'unknown-plan');
+}
+
 console.log(`\n${'='.repeat(70)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(70)}`);
 process.exit(fail > 0 ? 1 : 0);
