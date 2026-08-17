@@ -48,7 +48,7 @@ header('buildRuntimeConfigSections — precedence and redaction');
   const section = (title) => sections.find((candidate) => candidate.title === title);
   const row = (title, label) => section(title)?.rows.find((candidate) => candidate.label === label)?.value;
 
-  check('returns proxy, egress, and auth sections', sections.length === 3);
+  check('returns proxy, egress, routing, and auth sections', sections.length === 4);
   check('persisted proxy values are reported',
     row('Proxy (on `dario proxy`)', 'port') === '9876'
       && row('Proxy (on `dario proxy`)', 'host') === '0.0.0.0'
@@ -59,12 +59,19 @@ header('buildRuntimeConfigSections — precedence and redaction');
   check('API key value is never reported', !JSON.stringify(sections).includes('file-key'));
   check('egress credentials are redacted', row('Egress', 'egress proxy') === 'http://***:***@proxy.example:8080/');
   check('configured IP check is reported', row('Egress', 'ip check') === 'https://check.example/ip');
+  check('routing defaults are reported',
+    row('Routing', 'pool strategy') === 'headroom'
+      && row('Routing', 'session affinity') === 'on'
+      && row('Routing', 'Claude session source') === 'header');
 
   const envSections = buildRuntimeConfigSections(config, {
     DARIO_API_KEY: 'environment-key',
     DARIO_PORT: '4567',
     DARIO_STRICT_TLS: '1',
     DARIO_EGRESS_PROXY: '',
+    DARIO_POOL_STRATEGY: 'round-robin',
+    DARIO_SESSION_AFFINITY: '0',
+    DARIO_SESSION_AFFINITY_CLAUDE_SOURCE: 'body',
   });
   const envSection = (title) => envSections.find((candidate) => candidate.title === title);
   const envRow = (title, label) => envSection(title)?.rows.find((candidate) => candidate.label === label)?.value;
@@ -72,6 +79,10 @@ header('buildRuntimeConfigSections — precedence and redaction');
   check('proxy environment source is retained', envRow('Proxy (on `dario proxy`)', 'port') === '4567  (from DARIO_PORT)');
   check('strict TLS environment flag is retained', envRow('Auth gate', 'DARIO_STRICT_TLS') === 'on');
   check('empty primary egress env disables persisted proxy', envRow('Egress', 'egress proxy') === 'unset — upstream fetches go direct');
+  check('routing environment overrides are reported',
+    envRow('Routing', 'pool strategy') === 'round-robin  (from DARIO_POOL_STRATEGY)'
+      && envRow('Routing', 'session affinity') === 'off  (from DARIO_SESSION_AFFINITY)'
+      && envRow('Routing', 'Claude session source') === 'body  (from DARIO_SESSION_AFFINITY_CLAUDE_SOURCE)');
   check('invalid strict TLS env falls through to persisted config',
     row('Auth gate', 'DARIO_STRICT_TLS') === 'on'
       && buildRuntimeConfigSections({ ...config, strictTls: true }, { DARIO_STRICT_TLS: 'garbage' })

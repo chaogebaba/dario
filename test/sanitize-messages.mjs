@@ -258,6 +258,30 @@ header('dario#78 — resolvePreserveOrchestrationTags parses CLI + env');
     body.messages.length === 1 && body.messages[0].content[0].text.includes('system-reminder'));
 }
 
+// Genuine Claude Code uses orchestration tags as protocol turns. In
+// particular, callback completion can be a tag-only final user message. If it
+// is scrubbed, the request ends on the preceding assistant turn and Fable 5
+// rejects it as unsupported assistant prefill.
+{
+  const callback = '<system-reminder><task-notification><summary>Agent finished</summary></task-notification></system-reminder>';
+  const body = {
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.234;' },
+      { type: 'text', text: 'You are a Claude agent, built on the Claude Agent SDK.' },
+    ],
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'delegate this task' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Waiting for the result.' }] },
+      { role: 'user', content: [{ type: 'text', text: callback }] },
+    ],
+  };
+  sanitizeMessages(body);
+  check('genuine CC tag-only callback remains the final user turn',
+    body.messages.length === 3
+      && body.messages[2].role === 'user'
+      && body.messages[2].content[0].text === callback);
+}
+
 // ─────────────────────────────────────────────────────────────
 header('no-`<` fast path — output identical to the full regex loop');
 {

@@ -11,11 +11,11 @@ import { egressIsNotChangingIp, getEgressSnapshot, refreshEgressIpIfStale } from
 import { fetchPlan } from './quota.js';
 import { getServingProbe } from './serving-probe.js';
 import { darioVersion } from './version.js';
-import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
+import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
 import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
-import { extractSessionAffinitySignals, selectSessionAffinitySignal, type SessionAffinitySignal } from './session-affinity.js';
+import { extractSessionAffinitySignals, selectSessionAffinitySignal, type ClaudeSessionIdentitySource, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
@@ -668,6 +668,51 @@ export function buildOrchestrationPatterns(preserveTags?: Set<string>): RegExp[]
   ]);
 }
 
+/** Models that accept role:"system" entries inside the messages array. */
+export function supportsMidConversationSystemMessages(modelId: string): boolean {
+  const model = stripContext1mTag(modelId).toLowerCase();
+  return model.includes('fable-5')
+    || model.includes('mythos-5')
+    || model.includes('opus-4-8')
+    || model.includes('opus-5');
+}
+
+function mergeMessageContent(left: unknown, right: unknown): unknown {
+  if (typeof left === 'string' && typeof right === 'string') {
+    return `${left}\n\n${right}`;
+  }
+  const blocks = (content: unknown): unknown[] => {
+    if (Array.isArray(content)) return content;
+    if (typeof content === 'string') return [{ type: 'text', text: content }];
+    return [];
+  };
+  return [...blocks(left), ...blocks(right)];
+}
+
+/** Fold unsupported mid-conversation system turns into the preceding user turn. */
+export function normalizeMidConversationSystemMessages(body: Record<string, unknown>): void {
+  const messages = body.messages as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(messages) || !messages.some((message) => message.role === 'system')) return;
+
+  const normalized: Array<Record<string, unknown>> = [];
+  for (const message of messages) {
+    if (message.role !== 'system') {
+      normalized.push(message);
+      continue;
+    }
+    const previous = normalized[normalized.length - 1];
+    if (previous?.role === 'user') {
+      normalized[normalized.length - 1] = {
+        ...previous,
+        content: mergeMessageContent(previous.content, message.content),
+      };
+    } else {
+      normalized.push({ ...message, role: 'user' });
+    }
+  }
+  body.messages = normalized;
+}
+
 const ORCHESTRATION_PATTERNS_DEFAULT = buildOrchestrationPatterns();
 
 /** Strip orchestration wrapper tags from message content. */
@@ -713,6 +758,12 @@ function orchestrationPatternsFor(preserveTags?: Set<string>): RegExp[] {
  * opt any tag out of the scrub. dario#78.
  */
 export function sanitizeMessages(body: Record<string, unknown>, preserveTags?: Set<string>): void {
+  // Claude Code owns these tags as protocol messages (task callbacks, model
+  // switches, token counters). Removing a tag-only final user turn exposes the
+  // preceding assistant turn as an unsupported prefill on newer models. A
+  // genuine client is already sent through buildCCRequest's byte-faithful path.
+  if (isGenuineCCClient(body)) return;
+
   const messages = body.messages as Array<{ role: string; content: unknown }> | undefined;
   if (!messages) return;
   const patterns = orchestrationPatternsFor(preserveTags);
@@ -970,6 +1021,8 @@ interface ProxyOptions {
   sessionAffinity?: boolean;
   /** Session affinity idle TTL in ms. Default 3600000 (1h). */
   sessionAffinityTtlMs?: number;
+  /** Preferred Claude identity when header and body metadata disagree. */
+  sessionAffinityClaudeSource?: ClaudeSessionIdentitySource;
   /** Max concurrent in-flight requests. Default 10. dario#80. */
   maxConcurrent?: number;
   /** Max requests buffered waiting for a concurrency slot. Default 128. dario#80. */
@@ -1607,6 +1660,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     sessionAffinity: opts.sessionAffinity ?? true,
     sessionAffinityTtlMs: opts.sessionAffinityTtlMs,
   });
+  const sessionAffinityClaudeSource = opts.sessionAffinityClaudeSource ?? 'header';
   const routingTrace = new RoutingTraceStore(256);
   if (poolStrategy !== 'headroom') {
     const desc = poolStrategy === 'fill-first'
@@ -2912,7 +2966,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // include them in the request log line.
       // Header-only requests expose diagnostics immediately; parsing the body
       // below enriches the candidates before the pool selection is committed.
-      affinitySignals = extractSessionAffinitySignals(req.headers, undefined);
+      affinitySignals = extractSessionAffinitySignals(
+        req.headers, undefined, sessionAffinityClaudeSource,
+      );
       stickyKey = selectSessionAffinitySignal(affinitySignals)?.key ?? null;
       // Outbound session id resolved once — either inside the template build
       // (so body metadata matches) or below for passthrough (no body build).
@@ -2938,7 +2994,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           // back to a fresh parse when the earlier block didn't run (e.g. the body
           // was not JSON, or an OpenAI-backend reroute skipped it).
           const parsed = parsedBody ?? (JSON.parse(body.toString()) as Record<string, unknown>);
-          affinitySignals = extractSessionAffinitySignals(req.headers, parsed);
+          affinitySignals = extractSessionAffinitySignals(
+            req.headers, parsed, sessionAffinityClaudeSource,
+          );
           stickyKey = selectSessionAffinitySignal(affinitySignals)?.key ?? null;
           // Strip orchestration tags from messages (Aider, Cursor, etc.)
           sanitizeMessages(parsed, opts.preserveOrchestrationTags);
@@ -2951,6 +3009,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           const result = isOpenAI ? openaiToAnthropic(parsed, effectiveOverride) : (effectiveOverride ? { ...parsed, model: effectiveOverride } : parsed);
           const r = result as Record<string, unknown>;
           requestModel = (r.model as string || '').toLowerCase();
+          if (!supportsMidConversationSystemMessages(requestModel)) {
+            normalizeMidConversationSystemMessages(r);
+          }
           // Suspended-model guard. Empty by default (Fable 5 returned globally
           // 2026-07-01, so nothing is suspended out of the box). Operators can
           // still suspend a family via DARIO_SUSPENDED_MODELS — e.g. a model

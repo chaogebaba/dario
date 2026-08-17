@@ -34,6 +34,7 @@ for (const alias of ['alpha', 'beta']) {
 
 const realFetch = globalThis.fetch;
 const upstreamAccounts = [];
+const upstreamBodies = [];
 const fakeFetch = async (url, init) => {
   if (String(url).includes('/api/oauth/profile')) {
     return new Response(JSON.stringify({ account: { has_claude_max: true } }), {
@@ -47,6 +48,13 @@ const fakeFetch = async (url, init) => {
     const authorization = headers.get('authorization') ?? '';
     upstreamAccounts.push(authorization.includes('token-alpha') ? 'alpha'
       : authorization.includes('token-beta') ? 'beta' : 'unknown');
+    const rawBody = init?.body;
+    const bodyText = typeof rawBody === 'string'
+      ? rawBody
+      : ArrayBuffer.isView(rawBody)
+        ? Buffer.from(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength).toString('utf8')
+        : '';
+    upstreamBodies.push(JSON.parse(bodyText));
   }
   return new Response(JSON.stringify({
     id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-opus-4-8',
@@ -74,6 +82,7 @@ await startProxy({
   fetchImpl: fakeFetch,
   poolStrategy: 'round-robin',
   sessionAffinity: true,
+  sessionAffinityClaudeSource: 'body',
   pacingMinMs: 0,
   pacingJitterMs: 0,
   noLiveCapture: true,
@@ -90,8 +99,8 @@ async function send(sessionId) {
       'content-type': 'application/json',
       'anthropic-version': '2023-06-01',
       'x-api-key': 'dario',
-      // Simulate a coarse intermediary header. Claude metadata must win.
-      'x-session-id': 'shared-intermediary-session',
+      // CPA can reuse this header across terminals. Body metadata must win.
+      'x-claude-code-session-id': 'shared-cpa-session',
     },
     body: JSON.stringify({
       model: 'claude-opus-4-8',
@@ -117,6 +126,60 @@ check('routing trace selected exact Claude body provenance',
 check('repeat is an affinity hit while fresh sessions are new bindings',
   events.filter((event) => event.affinity.result === 'new').length === 2
     && events.filter((event) => event.affinity.result === 'hit').length === 1);
+
+async function sendGenuineClaudeCode(sessionId, assistantContent, model = 'claude-fable-5') {
+  const callback = '<system-reminder><task-notification><summary>Agent finished</summary></task-notification></system-reminder>';
+  const response = await realFetch(`${BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'x-api-key': 'dario',
+      'x-claude-code-session-id': 'shared-cpa-session',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 8,
+      system: [
+        { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.234;' },
+        { type: 'text', text: 'You are a Claude agent, built on the Claude Agent SDK.' },
+      ],
+      metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'delegate this task' }] },
+        { role: 'system', content: '<total_tokens>100</total_tokens>' },
+        { role: 'assistant', content: assistantContent },
+        { role: 'user', content: [{ type: 'text', text: callback }] },
+      ],
+    }),
+  });
+  await response.text();
+  return { status: response.status, callback };
+}
+
+const thinkingTail = await sendGenuineClaudeCode('callback-thinking', [
+  { type: 'thinking', thinking: 'waiting' },
+  { type: 'text', text: 'Waiting for the result.' },
+]);
+const textTail = await sendGenuineClaudeCode('callback-text', [
+  { type: 'text', text: 'Waiting for the result.' },
+]);
+const unsupportedSystem = await sendGenuineClaudeCode('callback-sonnet', [
+  { type: 'text', text: 'Waiting for the result.' },
+], 'claude-sonnet-4-6');
+const callbackBodies = upstreamBodies.slice(-3);
+check('genuine CC callback requests succeed through the proxy path',
+  thinkingTail.status === 200 && textTail.status === 200 && unsupportedSystem.status === 200);
+check('genuine CC callback remains the final user turn for both assistant shapes',
+  callbackBodies.every((body) => body.messages.at(-1)?.role === 'user'));
+check('genuine CC callback content reaches upstream structurally unchanged',
+  callbackBodies[0]?.messages.at(-1)?.content[0]?.text === thinkingTail.callback
+    && callbackBodies[1]?.messages.at(-1)?.content[0]?.text === textTail.callback
+    && callbackBodies[2]?.messages.at(-1)?.content[0]?.text === unsupportedSystem.callback);
+check('supported Fable preserves native system turns',
+  callbackBodies.slice(0, 2).every((body) => body.messages.some((message) => message.role === 'system')));
+check('unsupported Sonnet folds system turns into user content',
+  callbackBodies[2]?.messages.every((message) => message.role !== 'system'));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

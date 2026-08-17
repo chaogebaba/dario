@@ -65,6 +65,12 @@ export function buildRuntimeConfigSections(
     }
   }
   const strictTls = triStateEnv(env['DARIO_STRICT_TLS']) ?? config.strictTls;
+  const affinityEnv = env['DARIO_SESSION_AFFINITY'];
+  const affinityEnabled = affinityEnv === '0'
+    ? 'off  (from DARIO_SESSION_AFFINITY)'
+    : affinityEnv === '1'
+      ? 'on  (from DARIO_SESSION_AFFINITY)'
+      : config.sessionAffinity?.enabled === false ? 'off' : 'on';
 
   return [
     {
@@ -86,6 +92,24 @@ export function buildRuntimeConfigSections(
           value: env['DARIO_SKIP_EGRESS_CHECK']
             ? 'start anyway (DARIO_SKIP_EGRESS_CHECK)'
             : 'refuse to start',
+        },
+      ],
+    },
+    {
+      title: 'Routing',
+      rows: [
+        {
+          label: 'pool strategy',
+          value: envOrDefault(env, 'DARIO_POOL_STRATEGY', config.pool?.strategy ?? 'headroom'),
+        },
+        { label: 'session affinity', value: affinityEnabled },
+        {
+          label: 'Claude session source',
+          value: envOrDefault(
+            env,
+            'DARIO_SESSION_AFFINITY_CLAUDE_SOURCE',
+            config.sessionAffinity?.claudeSessionSource ?? 'header',
+          ),
         },
       ],
     },

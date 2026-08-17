@@ -61,6 +61,7 @@ const FIELDS: FieldDef[] = [
   { path: 'pool.strategy',              label: 'Pool strategy',         type: 'string', hint: '"headroom", "fill-first", or "round-robin"' },
   { path: 'sessionAffinity.enabled',    label: 'Session affinity',      type: 'bool',   hint: 'pin conversations to one account for cache locality' },
   { path: 'sessionAffinity.ttlMs',      label: 'Affinity TTL (ms)',     type: 'number', hint: 'idle timeout before binding expires; default 3600000 (1h)' },
+  { path: 'sessionAffinity.claudeSessionSource', label: 'Claude session source', type: 'string', hint: '"header" (default) or "body" for uncloaked CPA metadata' },
   { path: 'egressProxy',                label: 'Egress proxy',          type: 'string', hint: 'socks5h://host:1080, http://host:port, or empty' },
   // ── Overage-guard (v4.1, dario#288) ─────────────────────────
   { path: 'overageGuard.enabled',       label: 'Overage-guard',         type: 'bool',   hint: 'halt proxy on any representative-claim=overage' },
@@ -355,6 +356,7 @@ function commitEdit(state: ConfigState): ConfigState {
 const STRING_ENUMS: Record<string, readonly string[]> = {
   'overageGuard.behavior': ['halt', 'warn'],
   'pool.strategy': ['headroom', 'fill-first', 'round-robin'],
+  'sessionAffinity.claudeSessionSource': ['header', 'body'],
 };
 
 function doSave(state: ConfigState): ConfigState {

@@ -147,6 +147,8 @@ export interface SessionAffinitySignal {
   bindingEligible: boolean;
 }
 
+export type ClaudeSessionIdentitySource = 'header' | 'body';
+
 interface ClaudeMetadataSessionSignal {
   source: Extract<SessionAffinitySource,
     | 'body:metadata.user_id.session_id'
@@ -159,6 +161,7 @@ interface ClaudeMetadataSessionSignal {
 export function extractSessionAffinitySignals(
   headers: SessionAffinityHeaders | undefined,
   parsedBody: unknown,
+  claudeSessionSource: ClaudeSessionIdentitySource = 'header',
 ): SessionAffinitySignal[] {
   const signals: SessionAffinitySignal[] = [];
   const add = (source: SessionAffinitySource, key: string | null, bindingEligible = true): void => {
@@ -166,13 +169,15 @@ export function extractSessionAffinitySignals(
   };
 
   const body = objectValue(parsedBody);
-  add('header:x-claude-code-session-id', namespaced('claude', headerValue(headers, 'x-claude-code-session-id')));
-
-  // Native Claude body metadata is the next strongest signal. CPA and other
-  // Anthropic-compatible routers may also forward coarse generic headers;
-  // those must not collapse distinct Claude sessions.
   const claudeSession = body ? claudeMetadataSessionSignal(body) : null;
-  if (claudeSession) add(claudeSession.source, claudeSession.key);
+  const claudeHeader = namespaced('claude', headerValue(headers, 'x-claude-code-session-id'));
+  if (claudeSessionSource === 'body') {
+    if (claudeSession) add(claudeSession.source, claudeSession.key);
+    add('header:x-claude-code-session-id', claudeHeader);
+  } else {
+    add('header:x-claude-code-session-id', claudeHeader);
+    if (claudeSession) add(claudeSession.source, claudeSession.key);
+  }
 
   const explicitHeaders: Array<[string, SessionAffinitySource, string]> = [
     ['session-id', 'header:session-id', 'session'],
@@ -217,14 +222,17 @@ export function selectSessionAffinitySignal(
 /**
  * Resolve a stable conversation identity for account affinity.
  *
- * Native Claude header/body identity takes precedence, followed by explicit
- * generic client/session signals and stable conversation fields.
+ * The configured native Claude identity takes precedence, followed by the
+ * alternate Claude identity, explicit client signals, and conversation fields.
  * Request IDs, prompt-cache keys, legacy user IDs, and message hashes remain
  * available as diagnostics but are deliberately excluded from bindings.
  */
 export function extractSessionAffinityKey(
   headers: SessionAffinityHeaders | undefined,
   parsedBody: unknown,
+  claudeSessionSource: ClaudeSessionIdentitySource = 'header',
 ): string | null {
-  return selectSessionAffinitySignal(extractSessionAffinitySignals(headers, parsedBody))?.key ?? null;
+  return selectSessionAffinitySignal(
+    extractSessionAffinitySignals(headers, parsedBody, claudeSessionSource),
+  )?.key ?? null;
 }

@@ -496,6 +496,18 @@ async function proxy() {
   const sessionAffinityTtlMs = parsePositiveIntFlag('--session-affinity-ttl=')
     ?? parsePositiveIntEnv(process.env['DARIO_SESSION_AFFINITY_TTL_MS'])
     ?? fileCfg.sessionAffinity?.ttlMs;
+  const sessionAffinityClaudeSourceFromFlag = args
+    .find((arg) => arg.startsWith('--session-affinity-claude-source='))
+    ?.split('=')[1];
+  const sessionAffinityClaudeSource = sessionAffinityClaudeSourceFromFlag
+    ?? process.env['DARIO_SESSION_AFFINITY_CLAUDE_SOURCE']
+    ?? fileCfg.sessionAffinity?.claudeSessionSource;
+  if (sessionAffinityClaudeSource !== undefined
+      && sessionAffinityClaudeSource !== 'header'
+      && sessionAffinityClaudeSource !== 'body') {
+    console.error('[dario] Invalid Claude session source. Must be header or body.');
+    process.exit(1);
+  }
 
   // --effort=low|medium|high|xhigh|ultracode|max|client — pin the outbound
   // output_config.effort (dario#87). Default (unset) forwards the client's
@@ -774,7 +786,7 @@ async function proxy() {
     process.exit(1);
   }
 
-  await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, sessionAffinity, sessionAffinityTtlMs, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat });
+  await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, sessionAffinity, sessionAffinityTtlMs, sessionAffinityClaudeSource, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat });
 }
 
 /**
@@ -1692,6 +1704,12 @@ async function help() {
                              Idle TTL before a session binding expires.
                              Default: 3600000 (1h).
                              Env: DARIO_SESSION_AFFINITY_TTL_MS.
+    --session-affinity-claude-source=<header|body>
+                             Identity used when Claude's session header and
+                             metadata disagree. Default: header. Use body for
+                             CPA routes that reuse one header across terminals
+                             and forward stable, uncloaked body metadata.
+                             Env: DARIO_SESSION_AFFINITY_CLAUDE_SOURCE.
     --pool-fallback=<model>  When every pool seat is drained or cooling,
                              forward OpenAI-shape requests to the
                              configured openai-compat backend as <model>

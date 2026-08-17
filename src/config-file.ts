@@ -125,6 +125,8 @@ export interface DarioConfig {
     enabled?: boolean;
     /** Idle TTL in milliseconds before a binding is reaped. Default 3600000 (1h). */
     ttlMs?: number;
+    /** Preferred Claude identity when header and body disagree. */
+    claudeSessionSource?: 'header' | 'body';
   };
 
   // Per-request overrides
@@ -242,7 +244,7 @@ const CONFIG_DEFAULTS: DarioConfig = {
   },
   queue: { maxConcurrent: null, maxQueued: null, timeoutMs: null },
   pool: { strategy: 'headroom' },
-  sessionAffinity: { enabled: true, ttlMs: 3_600_000 },
+  sessionAffinity: { enabled: true, ttlMs: 3_600_000, claudeSessionSource: 'header' },
   effort: null,
   maxTokens: null,
   poolFallback: { model: null },
@@ -523,7 +525,11 @@ const CONFIG_FIELD_SANITIZERS = {
     timeoutMs: numberOrNull,
   }),
   pool: objectValue({ strategy: enumValue('headroom', 'fill-first', 'round-robin') }),
-  sessionAffinity: objectValue({ enabled: booleanValue, ttlMs: nonNegativeNumber }),
+  sessionAffinity: objectValue({
+    enabled: booleanValue,
+    ttlMs: nonNegativeNumber,
+    claudeSessionSource: enumValue('header', 'body'),
+  }),
   effort: stringOrNull,
   maxTokens: (value) =>
     value === null || value === 'client' ? value : finiteNumber(value),

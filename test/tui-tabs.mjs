@@ -739,9 +739,12 @@ header('Config tab — body fits its row budget at every size');
   // Every field must be reachable — the selected row is always rendered.
   let s = ConfigTab.initialState();
   const dimv = { cols: 100, rows: 19 };
+  let sawClaudeSessionSource = false;
   for (let i = 0; i < 30; i++) {
+    sawClaudeSessionSource ||= ConfigTab.render(s, dimv).includes('Claude session source');
     s = ConfigTab.onKey(s, { name: 'down', ch: '', ctrl: false, shift: false, meta: false }) ?? s;
   }
+  check('Claude session source field is reachable', sawClaudeSessionSource);
   check('scrolled to bottom: last field visible',
     ConfigTab.render(s, dimv).includes('Overage OS-notify'));
 }

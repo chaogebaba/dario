@@ -52,6 +52,7 @@ header('defaultConfig() — shape + values');
   check('session.idleRotateMs = 15min', d.session?.idleRotateMs === 900_000);
   check('session.maxAgeMs null',  d.session?.maxAgeMs === null);
   check('queue.maxConcurrent null', d.queue?.maxConcurrent === null);
+  check('Claude session source defaults to header', d.sessionAffinity?.claudeSessionSource === 'header');
   check('passthroughBetas []',    Array.isArray(d.passthroughBetas) && d.passthroughBetas.length === 0);
   check('stealth false',          d.stealth === false);
   check('model null',             d.model === null);
@@ -166,7 +167,7 @@ withSandbox((dir) => {
     apiKey: 'persisted-key',
     preserveTools: true,
     pool: { strategy: 'round-robin' },
-    sessionAffinity: { enabled: false, ttlMs: -1 },
+    sessionAffinity: { enabled: false, ttlMs: -1, claudeSessionSource: 'body' },
     queue: { maxConcurrent: 3, maxQueued: 'invalid', timeoutMs: null },
     modelAliases: { ' FAST ': ' openai:model-a ', empty: ' ' },
     passthroughBetas: ['one', 2, 'two'],
@@ -176,11 +177,22 @@ withSandbox((dir) => {
   check('boolean field accepted', config.preserveTools === true);
   check('nested enum accepted', config.pool.strategy === 'round-robin');
   check('invalid non-negative value falls back', config.sessionAffinity.ttlMs === 3_600_000);
+  check('nested session source enum accepted', config.sessionAffinity.claudeSessionSource === 'body');
   check('nested number accepted', config.queue.maxConcurrent === 3);
   check('invalid nested value falls back', config.queue.maxQueued === null);
   check('explicit nested null accepted', config.queue.timeoutMs === null);
   check('model aliases normalized', config.modelAliases.fast === 'openai:model-a' && config.modelAliases.empty === undefined);
   check('string array filtered', JSON.stringify(config.passthroughBetas) === '["one","two"]');
+});
+
+withSandbox((dir) => {
+  const path = join(dir, 'config.json');
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    sessionAffinity: { claudeSessionSource: 'random' },
+  }));
+  check('invalid Claude session source falls back to header',
+    loadConfig(path).config.sessionAffinity.claudeSessionSource === 'header');
 });
 
 // ─────────────────────────────────────────────────────────────

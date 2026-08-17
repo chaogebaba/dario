@@ -16,11 +16,20 @@ function header(label) {
 header('explicit header priority and normalization');
 {
   const body = { session_id: 'body-session', messages: [{ role: 'user', content: 'hello' }] };
-  check('Claude Code header wins over every lower-priority signal',
+  check('Claude Code header wins by default',
     extractSessionAffinityKey({
       'X-Claude-Code-Session-ID': '  claude-session  ',
       'session-id': 'codex-session',
       'x-session-id': 'generic-session',
+    }, { ...body, metadata: { user_id: JSON.stringify({ session_id: 'claude-body' }) } }) === 'claude:claude-session');
+  check('body mode handles CPA reusing a Claude header across terminals',
+    extractSessionAffinityKey({
+      'X-Claude-Code-Session-ID': 'claude-session',
+    }, { ...body, metadata: { user_id: JSON.stringify({ session_id: 'claude-body' }) } }, 'body') === 'claude:claude-body');
+  check('Claude Code header wins when body metadata is absent',
+    extractSessionAffinityKey({
+      'X-Claude-Code-Session-ID': '  claude-session  ',
+      'session-id': 'codex-session',
     }, body) === 'claude:claude-session');
   check('Codex Session-Id precedes generic session headers',
     extractSessionAffinityKey({
@@ -99,9 +108,15 @@ header('body identifiers');
     prompt_cache_key: 'cache-session',
     messages: [{ role: 'user', content: 'hello' }],
   });
-  check('provenance lists header before body candidates',
+  check('default provenance lists Claude header before conflicting body metadata',
     signals[0]?.source === 'header:x-claude-code-session-id' && signals[0]?.key === 'claude:header-session'
       && signals.some((signal) => signal.source === 'body:metadata.user_id.session_id' && signal.key === 'claude:body-session'));
+  const bodyFirstSignals = extractSessionAffinitySignals({ 'x-claude-code-session-id': 'header-session' }, {
+    metadata: { user_id: JSON.stringify({ session_id: 'body-session' }) },
+  }, 'body');
+  check('body mode reports exact selected provenance first',
+    bodyFirstSignals[0]?.source === 'body:metadata.user_id.session_id'
+      && bodyFirstSignals[0]?.key === 'claude:body-session');
   check('provenance marks prompt-cache and bounded message signals diagnostic-only',
     signals.some((signal) => signal.source === 'body:prompt_cache_key' && !signal.bindingEligible)
       && signals.some((signal) => signal.source === 'fallback:first-user-message' && !signal.bindingEligible));
@@ -158,9 +173,9 @@ header('identity continuity and source transitions');
   check('a disappearing matching header preserves body identity',
     extractSessionAffinityKey({ 'x-claude-code-session-id': 'session-a' }, body) === 'claude:session-a'
       && extractSessionAffinityKey({}, body) === 'claude:session-a');
-  check('conflicting Claude header and body remain distinguishable',
+  check('conflicting Claude header and body follow the configured source',
     extractSessionAffinityKey({ 'x-claude-code-session-id': 'header-session' }, body) === 'claude:header-session'
-      && extractSessionAffinityKey({}, body) === 'claude:session-a');
+      && extractSessionAffinityKey({ 'x-claude-code-session-id': 'header-session' }, body, 'body') === 'claude:session-a');
   check('later prompt-cache metadata does not replace a conversation binding',
     extractSessionAffinityKey({}, { conversation_id: 'conversation-a' })
       === extractSessionAffinityKey({}, { conversation_id: 'conversation-a', prompt_cache_key: 'shared-prefix' }));
