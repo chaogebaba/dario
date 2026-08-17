@@ -91,6 +91,8 @@ header('per-model routing — opus vs fable land on different accounts');
   const pool = new AccountPool();
   addAccount(pool, 'A');
   addAccount(pool, 'B');
+  pool.updatePlan('A', 'Max');
+  pool.updatePlan('B', 'Max');
   // Identical unified 7d (0.5) so ONLY the per-model bucket can differentiate.
   applyResponse(pool, 'A', 200, { util7d: 0.5, perModel: { opus: 0.95, fable: 0.10 } });
   applyResponse(pool, 'B', 200, { util7d: 0.5, perModel: { opus: 0.10, fable: 0.95 } });
@@ -192,6 +194,8 @@ header('interleaved workload — each family routed by its own bucket');
   const pool = new AccountPool();
   addAccount(pool, 'X');
   addAccount(pool, 'Y');
+  pool.updatePlan('X', 'Max');
+  pool.updatePlan('Y', 'Max');
   applyResponse(pool, 'X', 200, { util7d: 0.5, perModel: { opus: 0.05, fable: 0.98 } });
   applyResponse(pool, 'Y', 200, { util7d: 0.5, perModel: { opus: 0.98, fable: 0.05 } });
 

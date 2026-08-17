@@ -8,7 +8,7 @@ import { arch, platform } from 'node:process';
 import { getAccessToken, getStatus, ignoreCcCredentials } from './oauth.js';
 import { buildHealthResponse, derivePoolStatus, probeRequested, shouldDiscloseHealthInternals, shouldRunServingProbe, type EgressLike } from './health-response.js';
 import { egressIsNotChangingIp, getEgressSnapshot, refreshEgressIpIfStale } from './egress-ip.js';
-import { fetchQuota, type QuotaSnapshot } from './quota.js';
+import { fetchPlan } from './quota.js';
 import { getServingProbe } from './serving-probe.js';
 import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
@@ -18,7 +18,9 @@ import { AccountPool, computeStickyKey, parseRateLimits, modelFamily, isInAuthCo
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
 import { notify as osNotify } from './notify.js';
-import { loadAllAccounts, loadAccount, saveAccount, refreshAccountToken, resyncLoginFromCredentialsIfStale, ensureLoginCredentialsInPool, mirrorLoginToCredentials, removeAccount as removeAccountFromDisk, renameAccount as renameAccountOnDisk } from './accounts.js';
+import { loadAllAccounts, loadAccount, saveAccount, refreshAccountToken, resyncLoginFromCredentialsIfStale, ensureLoginCredentialsInPool, mirrorLoginToCredentials } from './accounts.js';
+import { handleAccountRoute, type QuotaCacheEntry } from './account-routes.js';
+export { parseAccountMutationPath } from './account-routes.js';
 import { handleAdminRequest, type AdminAccountLive, type AdminAuditEvent } from './admin-api.js';
 import { createTokenBucket } from './rate-limit.js';
 import { getOpenAIBackend, isOpenAIModel, forwardToOpenAI, type BackendCredentials } from './openai-backend.js';
@@ -1571,7 +1573,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   // Per-alias quota cache for GET /quota. Short enough that a deliberate
   // refresh is never stale, long enough that a TUI tick storm can't turn one
   // keypress into a burst of control-plane calls.
-  const quotaCache = new Map<string, { at: number; snapshot: QuotaSnapshot }>();
+  const quotaCache = new Map<string, QuotaCacheEntry>();
   const QUOTA_CACHE_MS = 60_000;
   // v4 promotion: analytics is always-on so the TUI's Analytics + Hits
   // tabs work for every install. Pre-v4 this was `pool ? new Analytics()
@@ -1661,19 +1663,29 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     }
   }
 
-  // Startup plan probe — discover each account's subscription tier so
-  // model-aware routing (e.g. fable → Max only) works from the first request.
-  // Best-effort: failures log and leave plan as null (unknown accounts pass
-  // through plan filters rather than being blocked).
-  if (!opts.noClaudeAuth && pool.size > 0) {
+  const probePoolPlans = async (): Promise<void> => {
+    if (opts.noClaudeAuth) return;
     await Promise.all(pool.all().map(async (acc) => {
       try {
-        const snapshot = await fetchQuota(acc.accessToken);
-        if (snapshot.plan) pool.updatePlan(acc.alias, snapshot.plan);
+        const plan = await fetchPlan(acc.accessToken);
+        // Reconciliation can replace an alias while this upstream request is
+        // in flight. Never attach the old credential's plan to its successor.
+        if (pool.get(acc.alias) === acc) pool.updatePlan(acc.alias, plan);
       } catch {
-        // Non-fatal — plan stays null, account still routes for non-gated models.
+        // Fail closed only for plan-restricted families. Ordinary models still
+        // route while a degraded profile endpoint recovers. Preserve a plan
+        // learned by an earlier successful probe; new accounts already start
+        // at null and therefore remain fail-closed for restricted families.
       }
     }));
+  };
+
+  // Startup plan probe — discover each account's subscription tier so
+  // model-aware routing (e.g. fable → Max only) works from the first request.
+  // Best-effort: failures leave plan null, which blocks only families with an
+  // explicit plan requirement while ordinary model routing stays available.
+  if (!opts.noClaudeAuth && pool.size > 0) {
+    await probePoolPlans();
   }
 
   // Background refresh — keep every account's token fresh without blocking requests
@@ -2205,10 +2217,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         onAccountsChanged: async () => {
           // Hot-reload the live pool from disk so accounts added / removed via
           // the admin API take effect immediately — no proxy restart (#599).
-          // Awaited by handleAdminRequest before it responds, so the account is
-          // already routable by the time the client sees the 200.
+          // Reconciliation is awaited so ordinary models are routable before
+          // the response. Plan discovery continues in the background because
+          // its 10s upstream timeout exceeds management-client deadlines;
+          // restricted families remain fail-closed until it completes.
           try {
             const size = reconcilePoolAccounts(pool, await loadAllAccounts());
+            quotaCache.clear();
+            void probePoolPlans();
             if (verbose) console.log(`[dario] admin: pool hot-reloaded — ${size} account${size === 1 ? '' : 's'}`);
             // The startup prewarm was skipped (or failed) while the pool was
             // empty; now that a bearer exists, refetch past the failed-fetch
@@ -2296,159 +2312,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
-    // Pool status endpoint — shows loaded accounts, headroom, and the
-    // account that would be selected next. Read-only; mutation flows through
-    // the `dario accounts` CLI, not HTTP.
-    //
-    // POST /pool/reconcile — hot-reload accounts from disk without restart.
-    // The TUI calls this after `dario accounts add/remove` in another terminal
-    // so the running proxy picks up account changes immediately. Same trust
-    // model as /health: loopback-only, no admin token required — it reads
-    // disk state, never writes credentials. POST to avoid accidental triggers
-    // from browser pre-fetches or monitoring probes.
-    if (urlPath === '/pool/reconcile' && req.method === 'POST') {
-      try {
-        const size = reconcilePoolAccounts(pool, await loadAllAccounts());
-        if (verbose) console.log(`[dario] pool reconciled from TUI — ${size} account${size === 1 ? '' : 's'}`);
-        if (size > 0) retryModelCatalogNow(catalogDeps);
-        res.writeHead(200, JSON_HEADERS);
-        res.end(JSON.stringify({ ok: true, accounts: size }));
-      } catch (err) {
-        res.writeHead(500, JSON_HEADERS);
-        res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
-      }
-      return;
-    }
-
-    // DELETE /accounts/<alias> — remove an account from disk + reconcile the
-    // pool. Loopback-only (same trust model as /pool/reconcile).
-    if (urlPath.startsWith('/accounts/') && req.method === 'DELETE') {
-      const alias = decodeURIComponent(urlPath.slice('/accounts/'.length).split('/')[0]!);
-      if (!alias) {
-        res.writeHead(400, JSON_HEADERS);
-        res.end(JSON.stringify({ ok: false, error: 'missing alias' }));
-        return;
-      }
-      const removed = await removeAccountFromDisk(alias);
-      if (removed) {
-        reconcilePoolAccounts(pool, await loadAllAccounts());
-        if (verbose) console.log(`[dario] account "${alias}" removed via TUI`);
-      }
-      res.writeHead(removed ? 200 : 404, JSON_HEADERS);
-      res.end(JSON.stringify({ ok: removed, alias }));
-      return;
-    }
-
-    // POST /accounts/<alias>/rename  { newAlias }
-    if (urlPath.match(/^\/accounts\/[^/]+\/rename$/) && req.method === 'POST') {
-      const alias = decodeURIComponent(urlPath.split('/')[2]!);
-      const chunks: Buffer[] = [];
-      for await (const c of req) chunks.push(c as Buffer);
-      let newAlias = '';
-      try {
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
-        newAlias = typeof body.newAlias === 'string' ? body.newAlias.trim() : '';
-      } catch { /* empty */ }
-      if (!newAlias || !/^[a-zA-Z0-9._-]+$/.test(newAlias)) {
-        res.writeHead(400, JSON_HEADERS);
-        res.end(JSON.stringify({ ok: false, error: 'invalid or missing newAlias' }));
-        return;
-      }
-      const renamed = await renameAccountOnDisk(alias, newAlias);
-      if (renamed) {
-        reconcilePoolAccounts(pool, await loadAllAccounts());
-        if (verbose) console.log(`[dario] account "${alias}" renamed to "${newAlias}" via TUI`);
-      }
-      res.writeHead(renamed ? 200 : 404, JSON_HEADERS);
-      res.end(JSON.stringify({ ok: renamed, oldAlias: alias, newAlias }));
-      return;
-    }
-
-    if (urlPath === '/accounts' && req.method === 'GET') {
-      const now = Date.now();
-      const accounts = pool.all().map(a => {
-        const inCooldown = isInAuthCooldown(a, now);
-        const cooldownMs = inCooldown && a.lastAuthFailureAt
-          ? Math.max(0, authCooldownMs(a.consecutiveAuthFailures) - (now - a.lastAuthFailureAt))
-          : 0;
-        return {
-          alias: a.alias,
-          util5h: a.rateLimit.util5h,
-          util7d: a.rateLimit.util7d,
-          claim: a.rateLimit.claim,
-          status: inCooldown ? 'auth-cooldown' : a.rateLimit.status,
-          requestCount: a.requestCount,
-          expiresInMs: Math.max(0, a.expiresAt - now),
-          // Absolute expiry alongside the clamped remainder: `expiresInMs`
-          // floors at 0, so a consumer reading only that field cannot tell
-          // "expires this instant" from "expired three months ago" and
-          // renders both as `0m`.
-          expiresAt: a.expiresAt,
-          // When the utilization above was last actually measured, 0 when
-          // never. Without it every consumer reads a fresh account's
-          // placeholder zeros as "0% of quota used" — see RateLimitSnapshot.measured.
-          measuredAt: a.rateLimit.updatedAt,
-          ...(inCooldown
-            ? {
-                lastAuthFailureAt: a.lastAuthFailureAt,
-                consecutiveAuthFailures: a.consecutiveAuthFailures,
-                cooldownMs,
-              }
-            : {}),
-        };
-      });
-      res.writeHead(200, JSON_HEADERS);
-      res.end(JSON.stringify({
-        mode: 'pool',
-        ...pool.status(),
-        stickyBindings: pool.stickyCount(),
-        accounts,
-      }));
-      return;
-    }
-
-    // Quota endpoint — the control-plane view of each account's usage
-    // windows (5-hour, 7-day, per-model), fetched on demand from
-    // /api/oauth/usage rather than inferred from proxied-response headers.
-    // Lives here rather than in the TUI because this process holds the
-    // access tokens AND has the egress proxy installed on its global fetch;
-    // a TUI-side probe would both need a credential and leak the operator's
-    // real IP past a configured SOCKS5 egress.
-    //
-    // Cached briefly per alias: the TUI refetches on mount and on `r`, and a
-    // pool of several accounts means one keypress fans out to two upstream
-    // calls each. `?refresh=1` bypasses.
-    if (urlPath === '/quota' && req.method === 'GET') {
-      // Match on req.url, not urlPath — the latter is split on '?' at the top
-      // of this handler, so a query-string test against it never fires.
-      const force = /[?&]refresh=1(&|$)/.test(req.url ?? '');
-      const accounts = await Promise.all(pool.all().map(async (a) => {
-        const cached = quotaCache.get(a.alias);
-        if (!force && cached && Date.now() - cached.at < QUOTA_CACHE_MS) {
-          return { alias: a.alias, ...cached.snapshot, cached: true };
-        }
-        try {
-          const snapshot = await fetchQuota(a.accessToken);
-          quotaCache.set(a.alias, { at: Date.now(), snapshot });
-          if (snapshot.plan) pool.updatePlan(a.alias, snapshot.plan);
-          return { alias: a.alias, ...snapshot, cached: false };
-        } catch (err) {
-          return {
-            alias: a.alias,
-            windows: [],
-            plan: null,
-            email: null,
-            extraUsage: null,
-            fetchedAt: Date.now(),
-            cached: false,
-            error: err instanceof Error ? err.message : String(err),
-          };
-        }
-      }));
-      res.writeHead(200, JSON_HEADERS);
-      res.end(JSON.stringify({ accounts }));
-      return;
-    }
+    if (await handleAccountRoute(req, res, urlPath, {
+      pool,
+      quotaCache,
+      quotaCacheMs: QUOTA_CACHE_MS,
+      jsonHeaders: JSON_HEADERS,
+      isLoopbackAddress: isLoopbackAddr,
+      reconcile: async () => reconcilePoolAccounts(pool, await loadAllAccounts()),
+      retryModelCatalog: () => retryModelCatalogNow(catalogDeps),
+      probePlans: () => { void probePoolPlans(); },
+      verbose,
+      log: console.log,
+    })) return;
 
     // Analytics endpoint — rolling-window summary + burn-rate snapshot.
     // Always-on as of v4 (pre-v4 this was gated to pool mode).
@@ -2670,24 +2545,27 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // the first version of this forwarded nothing (dario#885).
     let genuineCCRequest = false;
     try {
-      // Select an account by headroom (v5.0: the pool is the one credential
+      // Check account availability (v5.0: the pool is the one credential
       // model, so every OAuth request selects from it — a plain `dario login`
       // is a pool of one). Upstream-api-key mode is the sole path with no pool
       // account. Inside-request 429/auth failover retries the next-best account
       // before surfacing an error to the client (see the dispatch loop below).
       let poolAccount: PoolAccount | null = null;
+      let poolSelectionCommitted = false;
       let accessToken: string;
       if (upstreamApiKey) {
         // Per-token API-key mode: no OAuth, no pool selection. `poolAccount`
         // stays null, so every pool-failover retry below is skipped; the
         // x-api-key is set on the outbound headers instead of a Bearer.
         accessToken = '';
+        poolSelectionCommitted = true;
       } else {
-        // Pool is the one credential model (v5.0): a plain `dario login` is a
-        // pool of one, so every OAuth request selects from the pool.
-        poolAccount = pool.select();
+        // The model family is not known until the body is parsed. Peek here so
+        // empty/exhausted pools can still fail early without consuming a
+        // round-robin turn for OpenAI-routed, malformed, or rejected requests.
+        poolAccount = pool.peek();
         if (verbose && poolAccount) {
-          console.log(`[dario] #${requestCount} pool.select → ${poolAccount.alias} (strategy=${pool.strategy})`);
+          console.log(`[dario] #${requestCount} pool.peek → ${poolAccount.alias} (strategy=${pool.strategy})`);
         }
         if (!poolAccount) {
           // Pool-exhausted fallback: when armed, the pool HAS accounts (all
@@ -2990,25 +2868,25 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const CACHE_EPHEMERAL = effectiveCacheControl(
               r, req.headers['anthropic-beta'] as string | undefined);
 
-            // Session stickiness: rebind the pre-selected pool account to
-            // whatever the sticky-key resolver picks. If this is a new
-            // conversation the key binds to the current best account
-            // (no-op swap in most cases). If this is a follow-up turn of
-            // an existing conversation the key resolves to the account
+            // Commit the pool selection now that the request's model family
+            // and sticky key are known. The early availability check was a
+            // non-consuming peek, so a new conversation advances round-robin
+            // exactly once while an existing binding consumes no turn.
+            // If this is a follow-up turn, the key resolves to the account
             // that already has the Anthropic prompt cache warmed for it.
             // Rotating off mid-session costs cache-create on every turn.
             stickyKey = computeStickyKey(userMsg);
-            if (stickyKey) {
-              const preferred = pool.selectSticky(stickyKey, modelFamily(requestModel), undefined, poolAccount);
-              if (preferred && preferred.alias !== poolAccount?.alias) {
-                if (verbose) {
-                  console.log(`[dario] #${requestCount} sticky: rebind ${stickyKey} → ${preferred.alias} (was ${poolAccount?.alias ?? 'none'}, model=${requestModel}, family=${modelFamily(requestModel) ?? 'null'})`);
-                }
-                poolAccount = preferred;
-                accessToken = preferred.accessToken;
-              } else if (preferred && verbose) {
-                console.log(`[dario] #${requestCount} sticky: reuse ${preferred.alias} for key=${stickyKey}`);
-              }
+            const family = modelFamily(requestModel);
+            const previousAlias = poolAccount?.alias ?? 'none';
+            const preferred = stickyKey
+              ? pool.selectSticky(stickyKey, family)
+              : pool.select(family);
+            poolSelectionCommitted = true;
+            poolAccount = preferred;
+            accessToken = preferred?.accessToken ?? '';
+            if (preferred && verbose) {
+              const action = stickyKey ? 'sticky' : 'pool.select';
+              console.log(`[dario] #${requestCount} ${action}: ${previousAlias} → ${preferred.alias} (model=${requestModel}, family=${family ?? 'null'})`);
             }
 
             // Resolve the outbound session id before the body build so the
@@ -3193,6 +3071,35 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           }
           finalBody = Buffer.from(outboundText);
         } catch { /* not JSON, send as-is */ }
+      }
+
+      // Passthrough, count_tokens, and non-JSON bodies do not enter the
+      // template-replay block above. They still need one real, family-aware
+      // selection; otherwise a peeked round-robin account would be reused
+      // forever and plan gates would be skipped for requests without text.
+      if (!poolSelectionCommitted) {
+        const family = modelFamily(requestModel);
+        poolAccount = pool.select(family);
+        poolSelectionCommitted = true;
+        accessToken = poolAccount?.accessToken ?? '';
+        if (verbose && poolAccount) {
+          console.log(`[dario] #${requestCount} pool.select → ${poolAccount.alias} (strategy=${pool.strategy}, family=${family ?? 'null'})`);
+        }
+      }
+
+      // A family-specific hard gate can reject the family-less account that
+      // passed the early peek (for example, a Fable request in an all-Pro
+      // pool). Never continue with the peeked token after the real selection
+      // says no account can serve the model.
+      if (!upstreamApiKey && !poolAccount) {
+        res.writeHead(503, JSON_HEADERS);
+        res.end(JSON.stringify({
+          error: 'No eligible account for model',
+          message: requestModel
+            ? `no pool account can serve ${requestModel}; check account plans and rate limits`
+            : 'no pool account can serve this request; retry shortly',
+        }));
+        return;
       }
 
       if (verbose) {

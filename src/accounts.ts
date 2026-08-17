@@ -17,8 +17,8 @@
  * dario's cc-oauth-detect scanner — the same source the single-account
  * path already uses. No hardcoded client IDs here.
  */
-import { readFile, mkdir, readdir, unlink } from 'node:fs/promises';
-import { join, basename } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -26,115 +26,38 @@ import { detectCCOAuthConfig } from './cc-oauth-detect.js';
 import { loadCredentials, saveCredentialsTokens, buildManualAuthorizeUrl, parseManualPaste, readLineFromStdin, enumerateKeychainCredentials, type KeychainEntry } from './oauth.js';
 import { openBrowser } from './open-browser.js';
 import { redactSecrets } from './redact.js';
-import { durableWriteFile } from './durable-write.js';
 import { homeDir } from './home-dir.js';
+import { withAccountLocks } from './account-operation-lock.js';
+import {
+  assertAccountAliasAvailable,
+  createAccount,
+  isValidAccountAlias,
+  listAccountAliases,
+  loadAccount,
+  loadAllAccounts,
+  removeAccount,
+  replaceAccount,
+  saveAccount,
+  saveAccountWhileLocked,
+  type AccountCredentials,
+} from './account-store.js';
+
+export {
+  AccountStoreError,
+  getAccountsDir,
+  isAccountCredentials,
+  isValidAccountAlias,
+  listAccountAliases,
+  loadAccount,
+  loadAllAccounts,
+  removeAccount,
+  renameAccount,
+  renameAccountWithResult,
+  saveAccount,
+} from './account-store.js';
+export type { AccountCredentials, RenameAccountResult } from './account-store.js';
 
 const MANUAL_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
-
-const DARIO_DIR = join(homeDir(), '.dario');
-const ACCOUNTS_DIR = join(DARIO_DIR, 'accounts');
-
-/**
- * Normalize a caller-supplied alias into a filesystem-safe leaf name.
- * Strips any directory component (traversal, absolute paths) and rejects
- * aliases that don't match the allowed charset. CLI input is already
- * constrained, but the accounts API is importable — defense in depth.
- */
-function safeAliasPath(alias: string): string | null {
-  if (typeof alias !== 'string' || alias.length === 0) return null;
-  const leaf = basename(alias);
-  if (leaf !== alias) return null;
-  if (leaf === '.' || leaf === '..') return null;
-  if (!/^[A-Za-z0-9][A-Za-z0-9_\-.]{0,63}$/.test(leaf)) return null;
-  return join(ACCOUNTS_DIR, `${leaf}.json`);
-}
-
-export interface AccountCredentials {
-  alias: string;
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;
-  scopes: string[];
-  deviceId: string;
-  accountUuid: string;
-}
-
-async function ensureDir(): Promise<void> {
-  await mkdir(ACCOUNTS_DIR, { recursive: true, mode: 0o700 });
-}
-
-export async function listAccountAliases(): Promise<string[]> {
-  try {
-    await ensureDir();
-    const entries = await readdir(ACCOUNTS_DIR);
-    return entries.filter(f => f.endsWith('.json')).map(f => f.replace('.json', ''));
-  } catch {
-    return [];
-  }
-}
-
-export async function loadAccount(alias: string): Promise<AccountCredentials | null> {
-  const path = safeAliasPath(alias);
-  if (!path) return null;
-  try {
-    const raw = await readFile(path, 'utf-8');
-    return JSON.parse(raw) as AccountCredentials;
-  } catch {
-    return null;
-  }
-}
-
-export async function loadAllAccounts(): Promise<AccountCredentials[]> {
-  const aliases = await listAccountAliases();
-  const loaded = await Promise.all(aliases.map(a => loadAccount(a)));
-  return loaded.filter((a): a is AccountCredentials => a !== null);
-}
-
-export async function saveAccount(creds: AccountCredentials): Promise<void> {
-  const path = safeAliasPath(creds.alias);
-  if (!path) throw new Error(`invalid account alias: ${creds.alias}`);
-  await ensureDir();
-  // Durable write (dario#790): fsync the temp file + parent dir so a rotated
-  // refresh token survives an abrupt container recreate. A plain rename left
-  // the data in the page cache; `docker rm -f` (SIGKILL) discarded it and the
-  // bind-mounted file reverted to the mint content, stranding every recreate
-  // after >8h on a rotated-away refresh token.
-  await durableWriteFile(path, JSON.stringify(creds, null, 2), 0o600);
-}
-
-export async function removeAccount(alias: string): Promise<boolean> {
-  const path = safeAliasPath(alias);
-  if (!path) return false;
-  try {
-    await unlink(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Rename an account alias: reads the old account, writes it under the new
- * alias, then removes the old file. Fails if the old alias doesn't exist or
- * the new alias is invalid / already taken.
- */
-export async function renameAccount(oldAlias: string, newAlias: string): Promise<boolean> {
-  const oldPath = safeAliasPath(oldAlias);
-  const newPath = safeAliasPath(newAlias);
-  if (!oldPath || !newPath) return false;
-  if (oldPath === newPath) return true; // no-op
-  try {
-    const raw = await readFile(oldPath, 'utf-8');
-    const creds = JSON.parse(raw) as AccountCredentials;
-    creds.alias = newAlias;
-    await ensureDir();
-    await durableWriteFile(newPath, JSON.stringify(creds, null, 2), 0o600);
-    await unlink(oldPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** Detect deviceId + accountUuid from an installed Claude Code. */
 export async function detectClaudeIdentity(): Promise<{ deviceId: string; accountUuid: string } | null> {
@@ -170,7 +93,13 @@ const accountRefreshesInFlight = new Map<string, Promise<AccountCredentials>>();
 export async function refreshAccountToken(creds: AccountCredentials): Promise<AccountCredentials> {
   const inFlight = accountRefreshesInFlight.get(creds.alias);
   if (inFlight) return inFlight;
-  const promise = doRefreshAccountToken(creds).finally(() => {
+  const promise = withAccountLocks([creds.alias], async () => {
+    // A queued refresh may have been overtaken by a rename. Never recreate
+    // the removed alias with a second copy of the same refresh-token family.
+    const current = await loadAccount(creds.alias);
+    if (!current) throw new Error(`Account ${creds.alias} was removed or renamed before refresh`);
+    return doRefreshAccountToken(current);
+  }).finally(() => {
     // Clear only if nobody else has replaced it in the meantime (belt-and-
     // suspenders; current code paths never overlap).
     if (accountRefreshesInFlight.get(creds.alias) === promise) {
@@ -214,7 +143,7 @@ async function doRefreshAccountToken(creds: AccountCredentials): Promise<Account
     refreshToken: data.refresh_token,
     expiresAt: Date.now() + data.expires_in * 1000,
   };
-  await saveAccount(updated);
+  await saveAccountWhileLocked(updated);
   return updated;
 }
 
@@ -245,7 +174,17 @@ function generatePKCE(): { codeVerifier: string; codeChallenge: string } {
  * auto-detected CC OAuth config (same scanner the single-account path uses).
  * Saves to `~/.dario/accounts/<alias>.json` on success.
  */
-export async function addAccountViaOAuth(alias: string): Promise<AccountCredentials> {
+export interface AddAccountOAuthOptions {
+  signal?: AbortSignal;
+  onAuthorizeUrl?: (url: string) => void;
+}
+
+export async function addAccountViaOAuth(
+  alias: string,
+  opts: AddAccountOAuthOptions = {},
+): Promise<AccountCredentials> {
+  await assertAccountAliasAvailable(alias);
+  if (opts.signal?.aborted) throw opts.signal.reason ?? new Error('OAuth flow cancelled');
   const cfg = await detectCCOAuthConfig();
   const { codeVerifier, codeChallenge } = generatePKCE();
   // 32 random bytes → 43-char base64url state. Matches what CC v2.1.116+
@@ -257,8 +196,31 @@ export async function addAccountViaOAuth(alias: string): Promise<AccountCredenti
   // than spec here. Keep in lockstep with CC's bytes-per-random.
   const state = base64url(randomBytes(32));
 
+  if (opts.signal?.aborted) throw opts.signal.reason ?? new Error('OAuth flow cancelled');
   return new Promise<AccountCredentials>((resolve, reject) => {
     let port = 0;
+    let settled = false;
+    let timeout: NodeJS.Timeout;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      opts.signal?.removeEventListener('abort', onAbort);
+    };
+    const succeed = (creds: AccountCredentials) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(creds);
+    };
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const onAbort = () => {
+      server.close();
+      fail(opts.signal?.reason ?? new Error('OAuth flow cancelled'));
+    };
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
@@ -275,7 +237,7 @@ export async function addAccountViaOAuth(alias: string): Promise<AccountCredenti
           res.writeHead(400);
           res.end('No authorization code received');
           server.close();
-          reject(new Error('No authorization code received'));
+          fail(new Error('No authorization code received'));
           return;
         }
 
@@ -283,7 +245,7 @@ export async function addAccountViaOAuth(alias: string): Promise<AccountCredenti
           res.writeHead(400);
           res.end('Invalid state parameter');
           server.close();
-          reject(new Error('OAuth state mismatch — possible CSRF'));
+          fail(new Error('OAuth state mismatch — possible CSRF'));
           return;
         }
 
@@ -305,7 +267,9 @@ export async function addAccountViaOAuth(alias: string): Promise<AccountCredenti
             code_verifier: codeVerifier,
             state,
           }),
-          signal: AbortSignal.timeout(30_000),
+          signal: opts.signal
+            ? AbortSignal.any([opts.signal, AbortSignal.timeout(30_000)])
+            : AbortSignal.timeout(30_000),
         });
 
         if (!tokenRes.ok) {
@@ -336,11 +300,11 @@ export async function addAccountViaOAuth(alias: string): Promise<AccountCredenti
           accountUuid: identity.accountUuid,
         };
 
-        await saveAccount(creds);
-        resolve(creds);
+        await createAccount(creds, opts.signal);
+        succeed(creds);
       } catch (err) {
         server.close();
-        reject(err instanceof Error ? err : new Error(String(err)));
+        fail(err);
       }
     });
 
@@ -361,23 +325,31 @@ export async function addAccountViaOAuth(alias: string): Promise<AccountCredenti
 
       const authUrl = `${cfg.authorizeUrl}?${params.toString()}`;
 
-      console.log(`  Opening browser to add account "${alias}"...`);
-      console.log(`  If the browser didn't open, visit:`);
-      console.log(`  ${authUrl}`);
-      console.log();
+      if (opts.onAuthorizeUrl) {
+        opts.onAuthorizeUrl(authUrl);
+      } else {
+        console.log(`  Opening browser to add account "${alias}"...`);
+        console.log(`  If the browser didn't open, visit:`);
+        console.log(`  ${authUrl}`);
+        console.log();
+      }
 
       try { openBrowser(authUrl); } catch { /* non-fatal: user has the URL printed above */ }
     });
 
     server.on('error', (err: Error) => {
-      reject(new Error(`Failed to start OAuth callback server: ${err.message}`));
+      fail(new Error(`Failed to start OAuth callback server: ${err.message}`));
     });
 
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
       server.close();
-      reject(new Error('OAuth flow timed out after 5 minutes. Try `dario accounts add` again.'));
+      fail(new Error('OAuth flow timed out after 5 minutes. Try `dario accounts add` again.'));
     }, 300_000);
     timeout.unref();
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    // An AbortSignal does not replay an abort to listeners registered after
+    // the event, so close the race between config discovery and server setup.
+    if (opts.signal?.aborted) onAbort();
   });
 }
 
@@ -429,10 +401,12 @@ export async function addAccountViaManualOAuth(alias: string): Promise<AccountCr
  */
 export async function startAddAccount(
   alias: string,
+  opts: { replaceExisting?: boolean } = {},
 ): Promise<{ authorizeUrl: string; codeVerifier: string; state: string }> {
-  if (!safeAliasPath(alias)) {
+  if (!isValidAccountAlias(alias)) {
     throw new Error(`invalid account alias "${alias}" (allowed: letters, digits, _-. — up to 64 chars, no path separators)`);
   }
+  if (!opts.replaceExisting) await assertAccountAliasAvailable(alias);
   const cfg = await detectCCOAuthConfig();
   const { codeVerifier, codeChallenge } = generatePKCE();
   // 32-byte state — same constraint as the auto flow. See dario#71.
@@ -453,8 +427,9 @@ export async function completeAddAccount(
   code: string,
   codeVerifier: string,
   state: string,
+  opts: { replaceExisting?: boolean } = {},
 ): Promise<AccountCredentials> {
-  if (!safeAliasPath(alias)) {
+  if (!isValidAccountAlias(alias)) {
     throw new Error(`invalid account alias "${alias}"`);
   }
   const cfg = await detectCCOAuthConfig();
@@ -499,12 +474,9 @@ export async function completeAddAccount(
     accountUuid: identity.accountUuid,
   };
 
-  await saveAccount(creds);
+  if (opts.replaceExisting) await replaceAccount(creds);
+  else await createAccount(creds);
   return creds;
-}
-
-export function getAccountsDir(): string {
-  return ACCOUNTS_DIR;
 }
 
 /**
@@ -536,6 +508,7 @@ export class KeychainImportError extends Error {
  * all matching entries.
  */
 export async function addAccountFromKeychain(alias: string, target?: string): Promise<AccountCredentials> {
+  await assertAccountAliasAvailable(alias);
   const entries = await enumerateKeychainCredentials();
   if (entries.length === 0) {
     throw new KeychainImportError(
@@ -588,7 +561,7 @@ export async function addAccountFromKeychain(alias: string, target?: string): Pr
     accountUuid: identity.accountUuid,
   };
 
-  await saveAccount(creds);
+  await createAccount(creds);
   return creds;
 }
 
@@ -629,7 +602,7 @@ export const MIGRATED_LOGIN_ALIAS = 'login';
 export async function ensureLoginCredentialsInPool(
   alias: string = MIGRATED_LOGIN_ALIAS,
 ): Promise<string | null> {
-  if (!safeAliasPath(alias)) return null;
+  if (!isValidAccountAlias(alias)) return null;
 
   const existing = await listAccountAliases();
   if (existing.length > 0) return null;
@@ -643,15 +616,20 @@ export async function ensureLoginCredentialsInPool(
     accountUuid: randomUUID(),
   };
 
-  await saveAccount({
-    alias,
-    accessToken: tok.accessToken,
-    refreshToken: tok.refreshToken,
-    expiresAt: tok.expiresAt,
-    scopes: tok.scopes ?? [],
-    deviceId: identity.deviceId,
-    accountUuid: identity.accountUuid,
-  });
+  try {
+    await createAccount({
+      alias,
+      accessToken: tok.accessToken,
+      refreshToken: tok.refreshToken,
+      expiresAt: tok.expiresAt,
+      scopes: tok.scopes ?? [],
+      deviceId: identity.deviceId,
+      accountUuid: identity.accountUuid,
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
+    throw err;
+  }
 
   return alias;
 }

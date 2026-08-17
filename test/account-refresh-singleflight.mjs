@@ -13,6 +13,8 @@ import {
   _accountRefreshesInFlightSizeForTest as inFlightSize,
   saveAccount,
   removeAccount,
+  loadAccount,
+  renameAccountWithResult,
 } from '../dist/accounts.js';
 
 let pass = 0, fail = 0;
@@ -95,6 +97,7 @@ const fixtureB = { ...fixtureA, alias: 'test-singleflight-b', refreshToken: 'ref
 header('refreshAccountToken — two concurrent calls for same alias share one fetch');
 {
   installStub();
+  await saveAccount(fixtureA);
   const p1 = refreshAccountToken(fixtureA);
   const p2 = refreshAccountToken(fixtureA);
   // Silence unhandled rejections — the test later rejects both via the
@@ -120,6 +123,7 @@ header('refreshAccountToken — two concurrent calls for same alias share one fe
 header('refreshAccountToken — different aliases do not share in-flight slot');
 {
   installStub();
+  await Promise.all([saveAccount(fixtureA), saveAccount(fixtureB)]);
   const pA = refreshAccountToken(fixtureA);
   const pB = refreshAccountToken(fixtureB);
   pA.catch(() => {});
@@ -143,6 +147,7 @@ header('refreshAccountToken — different aliases do not share in-flight slot');
 header('refreshAccountToken — sequential calls each get their own fetch');
 {
   installStub();
+  await saveAccount(fixtureA);
   const p1 = refreshAccountToken(fixtureA);
   p1.catch(() => {});
   await waitForFetches(1);
@@ -156,6 +161,60 @@ header('refreshAccountToken — sequential calls each get their own fetch');
   check('second sequential call issued a fresh fetch (total 2)', fetchCallCount === 2);
   resolveAllPendingWithRefresh('a');
   await p2;
+  await removeAccount(fixtureA.alias);
+}
+
+// ======================================================================
+//  Rename/remove serialize behind an in-flight token rotation
+// ======================================================================
+header('account mutations wait for an in-flight refresh');
+{
+  const renamedAlias = 'test-singleflight-renamed';
+  installStub();
+  await saveAccount(fixtureA);
+  const refreshing = refreshAccountToken(fixtureA);
+  await waitForFetches(1);
+  const renaming = renameAccountWithResult(fixtureA.alias, renamedAlias);
+  await Promise.resolve();
+  check('rename does not publish while refresh owns the alias', await loadAccount(renamedAlias) === null);
+  resolveAllPendingWithRefresh('race');
+  await refreshing;
+  check('rename succeeds after refresh completes', await renaming === 'renamed');
+  check('old alias is not recreated', await loadAccount(fixtureA.alias) === null);
+  check('new alias keeps the rotated refresh token',
+    (await loadAccount(renamedAlias))?.refreshToken === 'new-refresh-race');
+
+  installStub();
+  const renamed = await loadAccount(renamedAlias);
+  const refreshingBeforeDelete = refreshAccountToken(renamed);
+  await waitForFetches(1);
+  const removing = removeAccount(renamedAlias);
+  resolveAllPendingWithRefresh('delete-race');
+  await refreshingBeforeDelete;
+  check('delete succeeds after refresh completes', await removing === true);
+  check('deleted alias stays deleted', await loadAccount(renamedAlias) === null);
+}
+
+// ======================================================================
+//  Public saves share the same alias lock as refresh/mutation operations
+// ======================================================================
+header('saveAccount waits for an in-flight refresh');
+{
+  installStub();
+  await saveAccount(fixtureA);
+  const refreshing = refreshAccountToken(fixtureA);
+  await waitForFetches(1);
+  const replacement = { ...fixtureA, accessToken: 'manual-replacement', expiresAt: Date.now() + 120_000 };
+  const saving = saveAccount(replacement);
+  await Promise.resolve();
+  check('queued save cannot overwrite while refresh owns the alias',
+    (await loadAccount(fixtureA.alias))?.accessToken === fixtureA.accessToken);
+
+  resolveAllPendingWithRefresh('save-race');
+  await refreshing;
+  await saving;
+  check('queued save runs after refresh releases the alias',
+    (await loadAccount(fixtureA.alias))?.accessToken === 'manual-replacement');
   await removeAccount(fixtureA.alias);
 }
 

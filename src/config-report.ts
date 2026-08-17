@@ -18,7 +18,7 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config-file.js';
+import { loadConfig, resolveApiKey, type DarioConfig } from './config-file.js';
 import { parseOutboundProxy } from './outbound-proxy.js';
 import { egressIpUrl } from './egress-ip.js';
 
@@ -27,15 +27,88 @@ import { homeDir } from './home-dir.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+export interface ConfigRow {
+  label: string;
+  value: string;
+}
+
 export interface ConfigSection {
   title: string;
-  rows: Array<{ label: string; value: string }>;
+  rows: ConfigRow[];
 }
 
 export interface ConfigReport {
   generatedAt: string;
   version: string;
   sections: ConfigSection[];
+}
+
+const PROXY_ROW_SPECS = [
+  ['port', 'DARIO_PORT', '3456'],
+  ['host', 'DARIO_HOST', '127.0.0.1'],
+  ['model', 'DARIO_MODEL', '(passthrough — client picks)'],
+  ['effort', 'DARIO_EFFORT', '(CC default)'],
+] as const;
+
+/** Build the config-derived sections without touching disk. */
+export function buildRuntimeConfigSections(
+  config: DarioConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): ConfigSection[] {
+  const apiKey = resolveApiKey(config, env);
+  const rawEgress = env['DARIO_EGRESS_PROXY']
+    ?? env['DARIO_UPSTREAM_PROXY']
+    ?? config.egressProxy
+    ?? '';
+
+  let egressValue: string;
+  if (!rawEgress.trim()) {
+    egressValue = 'unset — upstream fetches go direct';
+  } else {
+    try {
+      egressValue = parseOutboundProxy(rawEgress)?.display ?? 'unset';
+    } catch (err) {
+      egressValue = `INVALID — ${(err as Error).message}`;
+    }
+  }
+
+  return [
+    {
+      title: 'Proxy (on `dario proxy`)',
+      rows: PROXY_ROW_SPECS.map(([label, envName, fallback]) => ({
+        label,
+        value: envOrDefault(env, envName, fallback),
+      })),
+    },
+    {
+      title: 'Egress',
+      rows: [
+        { label: 'egress proxy', value: egressValue },
+        { label: 'ip check', value: egressIpUrl(env, config.egressIpUrl) },
+        {
+          label: 'on check failure',
+          value: env['DARIO_SKIP_EGRESS_CHECK']
+            ? 'start anyway (DARIO_SKIP_EGRESS_CHECK)'
+            : 'refuse to start',
+        },
+      ],
+    },
+    {
+      title: 'Auth gate',
+      rows: [
+        {
+          label: 'DARIO_API_KEY',
+          value: apiKey
+            ? `set (length ${apiKey.length}) — x-api-key / Authorization Bearer required`
+            : 'unset — auth not enforced on loopback',
+        },
+        {
+          label: 'DARIO_STRICT_TLS',
+          value: env['DARIO_STRICT_TLS'] === '1' ? 'on' : 'off',
+        },
+      ],
+    },
+  ];
 }
 
 /**
@@ -47,6 +120,7 @@ export interface ConfigReport {
 export async function collectEffectiveConfig(): Promise<ConfigReport> {
   const sections: ConfigSection[] = [];
   const home = join(homeDir(), '.dario');
+  const config = loadConfig().config;
 
   // ── Identity
   let version = 'unknown';
@@ -62,69 +136,8 @@ export async function collectEffectiveConfig(): Promise<ConfigReport> {
     ],
   });
 
-  // ── Proxy bind
-  sections.push({
-    title: 'Proxy (on `dario proxy`)',
-    rows: [
-      { label: 'port', value: envOrDefault('DARIO_PORT', '3456') },
-      { label: 'host', value: envOrDefault('DARIO_HOST', '127.0.0.1') },
-      { label: 'model', value: envOrDefault('DARIO_MODEL', '(passthrough — client picks)') },
-      { label: 'effort', value: envOrDefault('DARIO_EFFORT', '(CC default)') },
-    ],
-  });
-
-  // ── Egress route
-  // `dario config` answers "what IS it?", and since the egress route is
-  // now a fail-closed startup gate, an operator debugging a proxy that
-  // refuses to start should find it here rather than only in doctor.
-  // parseOutboundProxy's `display` is the redacted form; never print the
-  // raw value, which routinely carries residential-proxy credentials.
-  {
-    const rawEgress = process.env['DARIO_EGRESS_PROXY']
-      ?? process.env['DARIO_UPSTREAM_PROXY']
-      ?? loadConfig().config.egressProxy
-      ?? '';
-    let egressValue: string;
-    if (!rawEgress.trim()) {
-      egressValue = 'unset — upstream fetches go direct';
-    } else {
-      try {
-        egressValue = parseOutboundProxy(rawEgress)?.display ?? 'unset';
-      } catch (e) {
-        egressValue = `INVALID — ${(e as Error).message}`;
-      }
-    }
-    sections.push({
-      title: 'Egress',
-      rows: [
-        { label: 'egress proxy', value: egressValue },
-        { label: 'ip check', value: egressIpUrl(process.env, loadConfig().config.egressIpUrl) },
-        {
-          label: 'on check failure',
-          value: process.env['DARIO_SKIP_EGRESS_CHECK']
-            ? 'start anyway (DARIO_SKIP_EGRESS_CHECK)'
-            : 'refuse to start',
-        },
-      ],
-    });
-  }
-
-  // ── Auth gate
-  sections.push({
-    title: 'Auth gate',
-    rows: [
-      {
-        label: 'DARIO_API_KEY',
-        value: process.env.DARIO_API_KEY
-          ? `set (length ${process.env.DARIO_API_KEY.length}) — x-api-key / Authorization Bearer required`
-          : 'unset — auth not enforced on loopback',
-      },
-      {
-        label: 'DARIO_STRICT_TLS',
-        value: process.env.DARIO_STRICT_TLS === '1' ? 'on' : 'off',
-      },
-    ],
-  });
+  // ── Effective settings (proxy bind, egress route, auth gate)
+  sections.push(...buildRuntimeConfigSections(config));
 
   // ── OAuth (Claude subscription credentials)
   const credsPath = join(home, 'credentials.json');
@@ -196,16 +209,17 @@ export async function collectEffectiveConfig(): Promise<ConfigReport> {
   }
 
   // ── Paths (everything dario reads/writes on disk)
+  const pathRows: Array<readonly [label: string, path: string]> = [
+    ['home', home],
+    ['credentials', credsPath],
+    ['accounts', join(home, 'accounts')],
+    ['oauth cache', join(home, 'cc-oauth-cache-v6.json')],
+    ['oauth override', join(home, 'oauth-config.override.json')],
+    ['template cache', join(home, 'template-cache.json')],
+  ];
   sections.push({
     title: 'Paths',
-    rows: [
-      { label: 'home', value: home },
-      { label: 'credentials', value: credsPath },
-      { label: 'accounts', value: join(home, 'accounts') },
-      { label: 'oauth cache', value: join(home, 'cc-oauth-cache-v6.json') },
-      { label: 'oauth override', value: join(home, 'oauth-config.override.json') },
-      { label: 'template cache', value: join(home, 'template-cache.json') },
-    ],
+    rows: pathRows.map(([label, value]) => ({ label, value })),
   });
 
   return {
@@ -215,8 +229,8 @@ export async function collectEffectiveConfig(): Promise<ConfigReport> {
   };
 }
 
-function envOrDefault(name: string, dflt: string): string {
-  return process.env[name] ? `${process.env[name]}  (from ${name})` : dflt;
+function envOrDefault(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
+  return env[name] ? `${env[name]}  (from ${name})` : fallback;
 }
 
 function describeCreds(path: string): string {

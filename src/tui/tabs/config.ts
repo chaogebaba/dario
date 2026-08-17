@@ -87,6 +87,8 @@ export const ConfigTab: Tab<ConfigState> = {
   label: 'Config',
   hotkey: 'c',
 
+  capturesGlobalKeys: (state) => state.editBuffer !== null,
+
   initialState(): ConfigState {
     const loaded = loadConfig();
     return {

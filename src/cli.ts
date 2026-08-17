@@ -25,11 +25,12 @@ import { pathToFileURL } from 'node:url';
 import { startAutoOAuthFlow, startManualOAuthFlow, detectHeadlessEnvironment, getStatus, refreshTokens, loadCredentials } from './oauth.js';
 import { startProxy, sanitizeError, parseModelAliasSpecs } from './proxy.js';
 import { VALID_EFFORT_VALUES, type EffortValue } from './cc-template.js';
-import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, addAccountViaManualOAuth, addAccountFromKeychain, KeychainImportError, removeAccount, ensureLoginCredentialsInPool, resyncLoginFromCredentialsIfStale, MIGRATED_LOGIN_ALIAS } from './accounts.js';
+import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, addAccountViaManualOAuth, addAccountFromKeychain, KeychainImportError, removeAccount, ensureLoginCredentialsInPool, resyncLoginFromCredentialsIfStale, MIGRATED_LOGIN_ALIAS, isValidAccountAlias } from './accounts.js';
 import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
 import { parseOutboundProxy, installOutboundProxyWrapper, installEgressProxy, isLocalhostUrl, type OutboundProxyConfig } from './outbound-proxy.js';
 import { checkEgressIp, egressIpUrl, recordDirectIp, recordEgressCheck, setEgressRoute } from './egress-ip.js';
 import { homeDir } from './home-dir.js';
+import { effectiveApiKey } from './config-file.js';
 
 // `args` / `command` at module scope — command handlers below close over
 // `args` to read their own flags. Reading argv is harmless on import; only
@@ -246,7 +247,7 @@ async function resume() {
   const url = `http://127.0.0.1:${port}/admin/resume`;
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const apiKey = process.env['DARIO_API_KEY'];
+  const apiKey = effectiveApiKey();
   if (apiKey) {
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
@@ -1141,12 +1142,12 @@ async function accounts() {
       }
       console.log(`  No alias provided — using Claude account email: "${alias}"`);
     }
-    if (!/^[a-zA-Z0-9._-]+$/.test(alias)) {
-      console.error('[dario] Invalid alias. Use letters, numbers, dot, underscore, dash only.');
+    if (!isValidAccountAlias(alias)) {
+      console.error('[dario] Invalid alias. Start with a letter or number; use up to 64 letters, numbers, dots, underscores, or dashes.');
       process.exit(1);
     }
     const existing = await listAccountAliases();
-    if (existing.includes(alias)) {
+    if (existing.some((candidate) => candidate.toLowerCase() === alias.toLowerCase())) {
       console.error(`[dario] Account "${alias}" already exists. Remove it first with \`dario accounts remove ${alias}\`.`);
       process.exit(1);
     }
@@ -2069,6 +2070,7 @@ async function doctor() {
     const timeoutArg = args.find((a) => a.startsWith('--timeout-ms='));
     const timeoutMs = timeoutArg ? Math.max(1000, parseInt(timeoutArg.split('=')[1]!, 10)) : 30_000;
     const result = await runAuthCheck({
+      expectedKey: effectiveApiKey(),
       timeoutMs,
       onListening: (port) => {
         console.log(`  Listening on http://127.0.0.1:${port}/`);
@@ -2316,7 +2318,11 @@ async function usage() {
   let payload: Record<string, unknown> | null = null;
   let connectError: string | null = null;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    const apiKey = effectiveApiKey();
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(3000),
+      ...(apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : {}),
+    });
     if (!res.ok) {
       connectError = `proxy responded ${res.status}`;
     } else {
@@ -2464,17 +2470,14 @@ async function tui() {
   };
 
   if (!(await isProxyReachable())) {
-    // Build argv for the child proxy. Pass --port only if the user overrode it
-    // (otherwise the child reads the same config file we just read).
-    const childArgs = ['proxy'];
-    if (portArg) childArgs.push(portArg);
-    // Forward the API key so the child proxy starts with the same credential gate.
-    if (apiKey) childArgs.push(`--api-key=${apiKey}`);
+    // Build the child handoff. The proxy reads DARIO_API_KEY, not the TUI-only
+    // --api-key flag; putting the key in argv also exposes it in process lists.
+    const { childArgs, childEnv } = buildTuiProxySpawn(portArg, apiKey, process.env);
 
     const child = spawn(process.argv[0]!, [process.argv[1]!, ...childArgs], {
       stdio: 'ignore',
       detached: true,
-      env: { ...process.env, DARIO_TUI_SPAWNED: '1' },
+      env: childEnv,
     });
     child.unref();
     spawnedProxy = true;
@@ -2495,6 +2498,24 @@ async function tui() {
     apiKey,
     spawnedProxy,
   });
+}
+
+/** Construct the detached proxy handoff used by `dario tui`. */
+export function buildTuiProxySpawn(
+  portArg: string | undefined,
+  apiKey: string | undefined,
+  env: NodeJS.ProcessEnv,
+): { childArgs: string[]; childEnv: NodeJS.ProcessEnv } {
+  const childArgs = ['proxy'];
+  if (portArg) childArgs.push(portArg);
+  return {
+    childArgs,
+    childEnv: {
+      ...env,
+      DARIO_TUI_SPAWNED: '1',
+      ...(apiKey ? { DARIO_API_KEY: apiKey } : {}),
+    },
+  };
 }
 
 function pkgVersion(): string {

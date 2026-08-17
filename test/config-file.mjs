@@ -21,6 +21,8 @@ import {
   saveConfig,
   mergeOver,
   resolveConfig,
+  effectiveApiKey,
+  resolveApiKey,
 } from '../dist/config-file.js';
 
 let pass = 0, fail = 0;
@@ -54,6 +56,19 @@ header('defaultConfig() — shape + values');
   check('stealth false',          d.stealth === false);
   check('model null',             d.model === null);
   check('maxTokens null',         d.maxTokens === null);
+  check('apiKey null',            d.apiKey === null);
+}
+
+header('defaultConfig() — callers receive independent nested values');
+{
+  const first = defaultConfig();
+  const second = defaultConfig();
+  first.pacing.minMs = 123;
+  first.modelAliases.example = 'model-a';
+  first.passthroughBetas.push('beta-a');
+  check('nested object is independent', second.pacing.minMs === 500);
+  check('record is independent', second.modelAliases.example === undefined);
+  check('array is independent', second.passthroughBetas.length === 0);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -64,6 +79,24 @@ withSandbox((dir) => {
   check('error undefined',        result.error === undefined);
   check('config = defaults',      result.config.port === 3456 && result.config.host === '127.0.0.1');
 });
+
+header('effectiveApiKey — environment then persisted config');
+withSandbox((dir) => {
+  const path = join(dir, 'config.json');
+  writeFileSync(path, JSON.stringify({ version: 1, apiKey: 'file-key' }));
+  check('persisted key is used without env', effectiveApiKey({}, path) === 'file-key');
+  check('environment key wins', effectiveApiKey({ DARIO_API_KEY: 'env-key' }, path) === 'env-key');
+  check('empty environment falls through to file', effectiveApiKey({ DARIO_API_KEY: '' }, path) === 'file-key');
+});
+
+header('resolveApiKey — already-loaded config uses the same precedence');
+{
+  const config = { apiKey: 'file-key' };
+  check('persisted key is used', resolveApiKey(config, {}) === 'file-key');
+  check('environment key wins', resolveApiKey(config, { DARIO_API_KEY: 'env-key' }) === 'env-key');
+  check('empty environment falls through', resolveApiKey(config, { DARIO_API_KEY: '' }) === 'file-key');
+  check('null config remains unset', resolveApiKey({ apiKey: null }, {}) === undefined);
+}
 
 // ─────────────────────────────────────────────────────────────
 header('loadConfig — invalid JSON returns defaults + error');
@@ -125,6 +158,31 @@ withSandbox((dir) => {
   check('sessionStart default kept',   r.config.sessionStart?.minMs === 0);
 });
 
+header('loadConfig — schema sanitizes representative field shapes');
+withSandbox((dir) => {
+  const path = join(dir, 'config.json');
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    apiKey: 'persisted-key',
+    preserveTools: true,
+    pool: { strategy: 'round-robin' },
+    sessionAffinity: { enabled: false, ttlMs: -1 },
+    queue: { maxConcurrent: 3, maxQueued: 'invalid', timeoutMs: null },
+    modelAliases: { ' FAST ': ' openai:model-a ', empty: ' ' },
+    passthroughBetas: ['one', 2, 'two'],
+  }));
+  const config = loadConfig(path).config;
+  check('string-or-null field accepted', config.apiKey === 'persisted-key');
+  check('boolean field accepted', config.preserveTools === true);
+  check('nested enum accepted', config.pool.strategy === 'round-robin');
+  check('invalid non-negative value falls back', config.sessionAffinity.ttlMs === 3_600_000);
+  check('nested number accepted', config.queue.maxConcurrent === 3);
+  check('invalid nested value falls back', config.queue.maxQueued === null);
+  check('explicit nested null accepted', config.queue.timeoutMs === null);
+  check('model aliases normalized', config.modelAliases.fast === 'openai:model-a' && config.modelAliases.empty === undefined);
+  check('string array filtered', JSON.stringify(config.passthroughBetas) === '["one","two"]');
+});
+
 // ─────────────────────────────────────────────────────────────
 header('loadConfig — maxTokens special cases (number | "client" | null)');
 for (const [in_, exp, name] of [
@@ -150,6 +208,7 @@ withSandbox((dir) => {
   const cfg = defaultConfig();
   cfg.port = 8765;
   cfg.stealth = true;
+  cfg.apiKey = 'round-trip-secret';
   cfg.pacing = { minMs: 250, jitterMs: 500 };
   saveConfig(path, cfg);
   check('file created',           existsSync(path));
@@ -162,6 +221,7 @@ withSandbox((dir) => {
   check('round-trip source file', reloaded.source === 'file');
   check('round-trip port',        reloaded.config.port === 8765);
   check('round-trip stealth',     reloaded.config.stealth === true);
+  check('round-trip apiKey',      reloaded.config.apiKey === 'round-trip-secret');
   check('round-trip nested',      reloaded.config.pacing?.jitterMs === 500);
 });
 
@@ -228,7 +288,7 @@ withSandbox((dir) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-header('Unknown future fields pass through (forward-compat)');
+header('Unknown future fields are ignored');
 withSandbox((dir) => {
   const path = join(dir, 'c.json');
   // Schema v2-style future shape with new top-level field.
@@ -238,22 +298,11 @@ withSandbox((dir) => {
     futureSetting: { newThing: true },   // unknown to current sanitize()
   }));
   const r = loadConfig(path);
-  // Today: sanitize drops unknown keys (it's strict-ish on what it
-  // KNOWS, permissive on what it doesn't). The future-field-passthrough
-  // is documented behavior we want to enforce: a TUI that doesn't know
-  // about futureSetting shouldn't wipe it on save.
-  //
-  // The current implementation DOES drop unknowns; this test pins the
-  // pragmatic alternative: defaults merge gives us a known shape, but
-  // saveConfig should NOT erase fields the loader didn't recognize.
-  // Verify by saving and re-reading the raw JSON.
+  // The sanitizer owns the accepted schema. Saving the loaded config must
+  // not reintroduce opaque keys that current code cannot validate.
   saveConfig(path, r.config);
   const reread = JSON.parse(readFileSync(path, 'utf-8'));
-  // futureSetting will be missing — sanitize() doesn't preserve unknown
-  // keys today, by design (loose-typed not opaque-passthrough). If
-  // the convention shifts to opaque-passthrough in v5, this test
-  // becomes the documented contract switch.
-  check('today: unknown field dropped on save (known limitation)', reread.futureSetting === undefined);
+  check('unknown field dropped on save', reread.futureSetting === undefined);
   check('known fields survived',  reread.port === 3456);
 });
 

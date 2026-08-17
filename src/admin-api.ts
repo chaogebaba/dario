@@ -162,6 +162,7 @@ interface PendingLogin {
   codeVerifier: string;
   state: string;
   expiresAt: number;
+  replaceExisting: boolean;
 }
 
 const PENDING_TTL_MS = 10 * 60_000;
@@ -193,7 +194,7 @@ function prunePending(now: number): void {
 function nextDefaultAlias(taken: Set<string>): string {
   for (let n = 1; ; n++) {
     const candidate = `account-${n}`;
-    if (!taken.has(candidate)) return candidate; // taken is finite → always terminates
+    if (!taken.has(candidate.toLowerCase())) return candidate; // taken is finite → always terminates
   }
 }
 
@@ -210,19 +211,24 @@ type StartResult =
  * the rest.
  */
 async function doStartLogin(
-  alias: string,
+  requestedAlias: string,
   now: number,
   deps: AdminDeps,
   remote: string | undefined,
 ): Promise<StartResult> {
+  let alias = requestedAlias;
   // Only a brand-new alias grows the map; a repeat start replaces in place.
   if (!pendingLogins.has(alias) && pendingLogins.size >= MAX_PENDING) {
     return { ok: false, status: 429, error: 'too many pending logins; complete or wait for one to expire' };
   }
   try {
-    const { authorizeUrl, codeVerifier, state } = await startAddAccount(alias);
+    const records = await (deps.listAccounts ?? defaultListAccounts)();
+    const existing = records.find((record) => record.alias.toLowerCase() === alias.toLowerCase());
+    if (existing) alias = existing.alias;
+    const replaceExisting = existing !== undefined;
+    const { authorizeUrl, codeVerifier, state } = await startAddAccount(alias, { replaceExisting });
     const expiresAt = now + PENDING_TTL_MS;
-    pendingLogins.set(alias, { codeVerifier, state, expiresAt });
+    pendingLogins.set(alias, { codeVerifier, state, expiresAt, replaceExisting });
     deps.audit?.({ action: 'login_start', ok: true, status: 200, alias, remote });
     return { ok: true, alias, authorizeUrl, expiresAt };
   } catch (err) {
@@ -263,7 +269,7 @@ async function doCompleteLogin(
   }
   pendingLogins.delete(alias); // single-use, regardless of exchange outcome
   try {
-    const creds = await completeAddAccount(alias, code, p.codeVerifier, p.state);
+    const creds = await completeAddAccount(alias, code, p.codeVerifier, p.state, { replaceExisting: p.replaceExisting });
     await deps.onAccountsChanged?.();
     deps.audit?.({ action: 'login_complete', ok: true, status: 200, alias: creds.alias, remote });
     return { ok: true, alias: creds.alias, expiresAt: creds.expiresAt };
@@ -407,7 +413,10 @@ export async function handleAdminRequest(
       // thread into /complete. Explicit aliases still win for named setups.
       if (!alias) {
         const records = await (deps.listAccounts ?? defaultListAccounts)();
-        const taken = new Set<string>([...records.map((r) => r.alias), ...pendingLogins.keys()]);
+        const taken = new Set<string>([
+          ...records.map((r) => r.alias.toLowerCase()),
+          ...Array.from(pendingLogins.keys(), (key) => key.toLowerCase()),
+        ]);
         alias = nextDefaultAlias(taken);
       }
       const result = await doStartLogin(alias, now, deps, remote);

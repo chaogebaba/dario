@@ -23,6 +23,7 @@ import {
   formatResetRelative,
   quotaBand,
   fetchQuota,
+  fetchPlan,
 } from '../dist/quota.js';
 
 let pass = 0;
@@ -281,6 +282,20 @@ header('fetchQuota — profile is best-effort, usage is not');
     return json(LIVE);
   });
   check('bearer token is sent', seenAuth === 'Bearer secret-token');
+}
+
+header('fetchPlan — routing plan is independent of usage availability');
+{
+  let calls = 0;
+  const plan = await fetchPlan('tok', async (url) => {
+    calls++;
+    return new Response(JSON.stringify({ account: { has_claude_max: true } }), {
+      status: String(url).includes('/profile') ? 200 : 503,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+  check('Max plan resolves without a usage request', plan === 'Max');
+  check('plan probe calls only profile', calls === 1);
 }
 
 // ======================================================================

@@ -283,6 +283,23 @@ header('socks5h — an IP destination skips DNS entirely');
 }
 
 // ======================================================================
+header('socks5h — IPv4-embedded IPv6 keeps its dotted tail');
+{
+  const echo = await startEcho();
+  const proxy = await startFakeSocks5({ forwardPort: echo.port });
+  const bridge = useBridge(await startSocks5Bridge({ host: '127.0.0.1', port: proxy.port, remoteDns: true }));
+
+  const { status, sock } = await connectThroughBridge(bridge.port, '[::ffff:192.0.2.1]:443');
+  check('IPv4-mapped CONNECT returns 200', status.includes('200'));
+  check('IPv4-mapped destination sent as atyp 4', proxy.state.lastTarget?.atyp === 0x04);
+  check('dotted tail occupies the final two IPv6 groups',
+    proxy.state.lastTarget?.host === '0:0:0:0:0:ffff:c000:201', proxy.state.lastTarget?.host);
+
+  sock.destroy();
+  await bridge.close(); await proxy.close(); await echo.close();
+}
+
+// ======================================================================
 header('RFC 1929 username/password authentication');
 {
   const echo = await startEcho();

@@ -82,6 +82,8 @@ export interface QuotaSnapshot {
   windows: QuotaWindow[];
   /** 'Max' | 'Pro' | 'Team' | 'Free', null when the profile call failed. */
   plan: string | null;
+  /** Account email from profile, null when unavailable. */
+  email: string | null;
   extraUsage: ExtraUsage | null;
   fetchedAt: number;
 }
@@ -310,9 +312,32 @@ export async function fetchQuota(
   const windows = buildQuotaWindows(usage);
 
   let plan: string | null = null;
+  let email: string | null = null;
   if (profileRes.status === 'fulfilled' && profileRes.value.ok) {
-    plan = resolvePlan(await profileRes.value.json().catch(() => null));
+    const profileData = await profileRes.value.json().catch(() => null);
+    plan = resolvePlan(profileData);
+    if (profileData && typeof profileData === 'object') {
+      const acct = (profileData as { account?: { email_address?: unknown } }).account;
+      if (acct && typeof acct.email_address === 'string') {
+        email = acct.email_address;
+      }
+    }
   }
 
-  return { windows, plan, extraUsage: parseExtraUsage(usage), fetchedAt: Date.now() };
+  return { windows, plan, email, extraUsage: parseExtraUsage(usage), fetchedAt: Date.now() };
+}
+
+/** Fetch only the profile-derived plan used by model-family routing. */
+export async function fetchPlan(
+  accessToken: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+  timeoutMs = 10_000,
+): Promise<string | null> {
+  const res = await fetchImpl(CLAUDE_PROFILE_URL, {
+    method: 'GET',
+    headers: { ...QUOTA_REQUEST_HEADERS, authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`profile request failed: HTTP ${res.status}`);
+  return resolvePlan(await res.json().catch(() => null));
 }

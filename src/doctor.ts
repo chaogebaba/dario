@@ -39,6 +39,7 @@ import { MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { homeDir } from './home-dir.js';
 import { bunVersionMeetsJa3Floor, JA3_VERIFIED_BUN_FLOOR } from './runtime-fingerprint.js';
 import { redactProxyUrl } from './outbound-proxy.js';
+import { effectiveApiKey } from './config-file.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -710,7 +711,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
       // work. Without reading the env here, `dario doctor --usage` 401s on
       // every deploy that sets a real auth secret — which is every prod
       // deploy that follows the README's "non-loopback bind" guidance.
-      const dario_auth = process.env.DARIO_API_KEY || 'dario';
+      const dario_auth = effectiveApiKey() || 'dario';
       let probeEndpoint = `${dario_base}/v1/messages`;
       let probeHeaders: Record<string, string> = {
         'content-type': 'application/json',
@@ -857,7 +858,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
     // Same auth fallback as the --usage probe: the proxy validates
     // Authorization against DARIO_API_KEY when set; literal 'dario' is the
     // documented loopback-only default for no-auth local proxies.
-    const dario_auth = process.env.DARIO_API_KEY || 'dario';
+    const dario_auth = effectiveApiKey() || 'dario';
     let proxyUp = false;
     try {
       const healthRes = await fetch(`${dario_base}/health`, { signal: AbortSignal.timeout(800) });
@@ -1335,7 +1336,7 @@ function suggestAuthFix(result: Pick<AuthCheckResult, 'xApiKey' | 'authorization
  */
 export async function runAuthCheck(opts: AuthCheckOptions = {}): Promise<AuthCheckResult> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
-  const expected = opts.expectedKey ?? process.env.DARIO_API_KEY ?? '';
+  const expected = opts.expectedKey ?? effectiveApiKey() ?? '';
 
   if (!expected) {
     return {

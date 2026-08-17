@@ -27,7 +27,7 @@ const { StatusTab } = await import('../dist/tui/tabs/status.js');
 const { ConfigTab } = await import('../dist/tui/tabs/config.js');
 const { AnalyticsTab } = await import('../dist/tui/tabs/analytics.js');
 const { HitsTab } = await import('../dist/tui/tabs/hits.js');
-const { AccountsTab } = await import('../dist/tui/tabs/accounts.js');
+const { AccountsTab, createAccountsTab, mergeQuotaEntries } = await import('../dist/tui/tabs/accounts.js');
 const { BackendsTab } = await import('../dist/tui/tabs/backends.js');
 const { visibleWidth, truncate, dim, inverse, pad } = await import('../dist/tui/render.js');
 const { renderFooter } = await import('../dist/tui/layout.js');
@@ -51,6 +51,58 @@ for (const [name, tab] of [
   check(`${name}: label is non-empty`, typeof tab.label === 'string' && tab.label.length > 0);
   check(`${name}: initialState fn`,    typeof tab.initialState === 'function');
   check(`${name}: render fn`,          typeof tab.render === 'function');
+}
+
+header('Accounts quota cache keeps per-alias successes');
+{
+  const win = { id: 'five-hour', label: '5-hour', remainingPercent: 80, resetsAt: null };
+  const cached = new Map([
+    ['alpha', { windows: [win], plan: 'Max' }],
+    ['beta', { windows: [{ ...win, remainingPercent: 60 }], plan: 'Pro' }],
+  ]);
+  const fresh = new Map([
+    ['alpha', { windows: [{ ...win, remainingPercent: 70 }], plan: 'Max' }],
+    ['beta', { windows: [], error: 'HTTP 429' }],
+  ]);
+  const merged = mergeQuotaEntries(cached, fresh);
+  check('successful alias updates its cache', merged.cache.get('alpha')?.windows[0]?.remainingPercent === 70);
+  check('failed alias retains its prior cache', merged.cache.get('beta')?.windows[0]?.remainingPercent === 60);
+  check('display substitutes cached data for the failed alias', merged.display.get('beta')?.windows[0]?.remainingPercent === 60);
+  check('partial fallback is marked stale', merged.usedStale === true);
+  const afterDelete = mergeQuotaEntries(merged.cache, new Map([
+    ['alpha', { windows: [], error: 'HTTP 429' }],
+  ]));
+  check('aliases absent from the fresh response are pruned', !afterDelete.cache.has('beta'));
+}
+
+header('Accounts actions are state-owned and mount refreshes once');
+{
+  const key = (ch) => ({ name: 'printable', ch, ctrl: false, shift: false, meta: false });
+  let state = AccountsTab.initialState();
+  state = AccountsTab.onKey(state, key('n'));
+  state = AccountsTab.onKey(state, key('q'));
+  state = AccountsTab.onKey(state, key('1'));
+  check('alias input retains literal global-shortcut characters', state.editBuffer === 'q1');
+  state = AccountsTab.onKey(state, { ...key(''), name: 'enter' });
+  check('add intent lives in state', state.pendingAction?.type === 'add' && state.pendingAction.alias === 'q1');
+
+  const tab = createAccountsTab();
+  const calls = [];
+  const client = {
+    getJson: async (path) => {
+      calls.push(path);
+      if (path === '/accounts') return { mode: 'pool', accounts: [] };
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { accounts: [] };
+    },
+  };
+  const ctx = { client, setState: () => {}, registerCleanup: () => {} };
+  const initial = tab.initialState();
+  const mounted = tab.onMount(initial, ctx);
+  tab.onTick(initial, ctx);
+  await mounted;
+  check('mount + idle tick fetch /accounts once', calls.filter((path) => path === '/accounts').length === 1);
+  check('mount + idle tick fetch /quota once', calls.filter((path) => path === '/quota').length === 1);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -577,6 +629,20 @@ header('Accounts tab — control-plane quota card');
   const noQuota = { ...card, accounts: [{ ...card.accounts[0], quota: undefined }] };
   const rn = strip(AccountsTab.render(noQuota, DIM));
   check('no quota: util table renders',    rn.includes('util5h') && rn.includes('82%'));
+
+  const mixedQuota = {
+    ...card,
+    accounts: [
+      card.accounts[0],
+      {
+        alias: 'fallback', expiresAt: NOW + 3600_000,
+        util5h: 0.4, util7d: 0.2, measuredAt: NOW,
+      },
+    ],
+  };
+  const rm = strip(AccountsTab.render(mixedQuota, DIM));
+  check('mixed quota: a seat without quota keeps utilization fallback',
+    rm.includes('fallback') && rm.includes('util5h'));
 }
 
 // ─────────────────────────────────────────────────────────────

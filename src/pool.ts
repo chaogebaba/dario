@@ -390,9 +390,9 @@ function pickFillFirst(accounts: PoolAccount[], family?: string | null): PoolAcc
 /**
  * Model families that require a specific subscription plan. Accounts whose
  * `plan` field doesn't match are excluded from selection for that family.
- * Accounts with `plan === null` (unknown, not yet probed) are NOT excluded —
- * we can't prove they lack the required plan, and excluding them would block
- * routing until the first quota probe completes.
+ * Unknown plans are excluded for restricted families. Sending a Max-only
+ * model to an unprobed Pro seat produces a preventable upstream rejection;
+ * non-restricted families remain available while profile probing recovers.
  */
 const MODEL_PLAN_REQUIREMENTS: Record<string, string> = {
   fable: 'Max',
@@ -400,14 +400,12 @@ const MODEL_PLAN_REQUIREMENTS: Record<string, string> = {
 
 /**
  * Returns true if the account is eligible for the given model family
- * based on plan requirements. Accounts with unknown plan (null) pass.
+ * based on plan requirements.
  */
 function planEligible(account: PoolAccount, family: string | null | undefined): boolean {
   if (!family) return true;
   const required = MODEL_PLAN_REQUIREMENTS[family];
   if (!required) return true;
-  // Unknown plan (not yet probed) → allow (don't block before first probe).
-  if (!account.plan) return true;
   return account.plan === required;
 }
 
@@ -420,8 +418,10 @@ export class AccountPool {
   private sticky: Map<string, StickyBinding> = new Map();
   // Amortize the O(n) sticky TTL/orphan sweep — timestamp of the last run.
   private lastStickyCleanup = 0;
-  // Round-robin index — advances on each select() call under `round-robin` strategy.
-  private roundRobinIdx = 0;
+  // Alias most recently returned by round-robin. An alias cursor remains
+  // correct when failover/exhaustion changes the candidate set; an array index
+  // can point at a different account after filtering.
+  private roundRobinCursor: string | null = null;
   // Session affinity (sticky bindings) toggle + TTL.
   private readonly stickyEnabled: boolean;
   private readonly stickyIdleTtlMs: number;
@@ -445,20 +445,30 @@ export class AccountPool {
     accountUuid: string;
   }): void {
     const existing = this.accounts.get(alias);
+    const identityChanged = existing !== undefined && (
+      (existing.identity.accountUuid !== '' && opts.accountUuid !== '' && existing.identity.accountUuid !== opts.accountUuid)
+      || (existing.identity.deviceId !== '' && opts.deviceId !== '' && existing.identity.deviceId !== opts.deviceId)
+    );
+    const preserved = identityChanged ? undefined : existing;
     this.accounts.set(alias, {
       alias,
       accessToken: opts.accessToken,
       refreshToken: opts.refreshToken,
       expiresAt: opts.expiresAt,
-      identity: existing?.identity ?? {
+      identity: preserved ? {
+        deviceId: opts.deviceId || preserved.identity.deviceId,
+        accountUuid: opts.accountUuid || preserved.identity.accountUuid,
+        sessionId: preserved.identity.sessionId,
+      } : {
         deviceId: opts.deviceId,
         accountUuid: opts.accountUuid,
         sessionId: randomUUID(),
       },
-      rateLimit: existing?.rateLimit ?? { ...EMPTY_SNAPSHOT },
-      requestCount: existing?.requestCount ?? 0,
-      lastAuthFailureAt: existing?.lastAuthFailureAt,
-      consecutiveAuthFailures: existing?.consecutiveAuthFailures ?? 0,
+      rateLimit: preserved?.rateLimit ?? { ...EMPTY_SNAPSHOT },
+      plan: preserved?.plan ?? null,
+      requestCount: preserved?.requestCount ?? 0,
+      lastAuthFailureAt: preserved?.lastAuthFailureAt,
+      consecutiveAuthFailures: preserved?.consecutiveAuthFailures ?? 0,
     });
   }
 
@@ -519,6 +529,15 @@ export class AccountPool {
    * unified-buckets-only headroom — same behavior as before this PR.
    */
   select(family?: string | null): PoolAccount | null {
+    return this.selectInternal(family, true);
+  }
+
+  /** Select without consuming a round-robin turn. */
+  peek(family?: string | null): PoolAccount | null {
+    return this.selectInternal(family, false);
+  }
+
+  private selectInternal(family: string | null | undefined, advanceRoundRobin: boolean): PoolAccount | null {
     if (this.accounts.size === 0) return null;
 
     const now = Date.now();
@@ -547,7 +566,7 @@ export class AccountPool {
         // still gets the least-drained account instead of null.
       }
       if (this._strategy === 'round-robin') {
-        return this.pickRoundRobin(eligible, family);
+        return this.pickRoundRobin(eligible, family, advanceRoundRobin);
       }
       return pickMaxHeadroom(eligible, family);
     }
@@ -585,13 +604,20 @@ export class AccountPool {
    * Also performs lazy cleanup of expired bindings (TTL or size cap).
    */
   selectSticky(stickyKey: string | null, family?: string | null, now: number = Date.now(), hint?: PoolAccount | null): PoolAccount | null {
-    if (!stickyKey || !this.stickyEnabled) return this.select(family);
+    if (!stickyKey) return this.select(family);
+    // A caller may have selected before it obtained the body-derived sticky
+    // key. With affinity disabled, keep that valid hint instead of selecting a
+    // second time and skipping every other round-robin seat.
+    if (!this.stickyEnabled) {
+      return this.validHint(hint, family, now) ?? this.select(family);
+    }
     this.cleanupSticky(now);
 
     const binding = this.sticky.get(stickyKey);
     if (binding) {
       const bound = this.accounts.get(binding.alias);
       if (bound
+        && now - binding.lastUsedAt <= this.stickyIdleTtlMs
         && bound.rateLimit.status !== 'rejected'
         && bound.expiresAt > now + 30_000
         && !isInAuthCooldown(bound, now)
@@ -606,20 +632,13 @@ export class AccountPool {
       }
     }
 
-    // For new bindings: prefer the already-selected `hint` (from the initial
-    // pool.select() that the proxy ran before the body parse). This avoids
-    // a double-advance of the round-robin counter that would permanently
-    // skew all new conversations to the same account. Only use the hint if
-    // it passes the same health + plan checks the binding validator uses.
+    // For new bindings, an already-selected `hint` avoids double-advancing
+    // round-robin. Only use it if it passes the same health + plan checks the
+    // binding validator uses.
     let picked: PoolAccount | null = null;
-    if (hint
-      && hint.rateLimit.status !== 'rejected'
-      && hint.expiresAt > now + 30_000
-      && !isInAuthCooldown(hint, now)
-      && computeHeadroom(hint.rateLimit, family) > POOL_HEADROOM_FLOOR
-      && planEligible(hint, family)
-    ) {
-      picked = hint;
+    const validHint = this.validHint(hint, family, now);
+    if (validHint) {
+      picked = validHint;
     } else {
       picked = this.select(family);
     }
@@ -627,6 +646,17 @@ export class AccountPool {
       this.sticky.set(stickyKey, { alias: picked.alias, boundAt: now, lastUsedAt: now });
     }
     return picked;
+  }
+
+  private validHint(
+    hint: PoolAccount | null | undefined,
+    family: string | null | undefined,
+    now: number,
+  ): PoolAccount | null {
+    if (!hint || this.accounts.get(hint.alias) !== hint) return null;
+    if (ineligibleReason(hint, now) !== null) return null;
+    if (computeHeadroom(hint.rateLimit, family) <= POOL_HEADROOM_FLOOR) return null;
+    return planEligible(hint, family) ? hint : null;
   }
 
   /**
@@ -694,7 +724,11 @@ export class AccountPool {
    * Accounts below the headroom floor are skipped — once exhausted they drop out
    * of the rotation until their window resets.
    */
-  private pickRoundRobin(eligible: PoolAccount[], family?: string | null): PoolAccount {
+  private pickRoundRobin(
+    eligible: PoolAccount[],
+    family?: string | null,
+    advance = true,
+  ): PoolAccount {
     // Filter to accounts above the headroom floor — exhausted accounts
     // drop out of rotation until their window resets. Uses per-model bucket
     // when family is known, so a sonnet-saturated account drops out of
@@ -703,10 +737,12 @@ export class AccountPool {
     const candidates = aboveFloor.length > 0 ? aboveFloor : eligible;
     // Sort by alias for stable ordering regardless of Map insertion order.
     const sorted = candidates.slice().sort((a, b) => a.alias.localeCompare(b.alias));
-    // Wrap the index into the current eligible set size.
-    this.roundRobinIdx = this.roundRobinIdx % sorted.length;
-    const picked = sorted[this.roundRobinIdx];
-    this.roundRobinIdx = (this.roundRobinIdx + 1) % sorted.length;
+    // Continue after the last alias and wrap. Unlike an index, this preserves
+    // the sequence when an exclusion or exhausted seat shrinks the list.
+    const picked = this.roundRobinCursor === null
+      ? sorted[0]
+      : (sorted.find((a) => a.alias.localeCompare(this.roundRobinCursor!) > 0) ?? sorted[0]);
+    if (advance) this.roundRobinCursor = picked.alias;
     return picked;
   }
 
@@ -821,7 +857,9 @@ export class AccountPool {
     // select() time.
     const headrooms = all.map(a => computeHeadroom(a.rateLimit));
     const avgHeadroom = headrooms.length > 0 ? headrooms.reduce((a, b) => a + b, 0) / headrooms.length : 0;
-    const best = this.select();
+    // Status is observational. Consuming a round-robin turn here made every
+    // Accounts-tab refresh change which seat served the next real request.
+    const best = this.peek();
 
     return {
       accounts: all.length,

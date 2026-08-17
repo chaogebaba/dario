@@ -243,13 +243,14 @@ header('plan-based routing: fable restricted to Max');
   check('sticky rebinds from Pro to Max for fable', rebound?.alias === 'max-account');
 }
 
-header('plan-based routing: unknown plan passes through');
+header('plan-based routing: unknown plan fails closed for restricted family');
 {
   const pool = new AccountPool('round-robin', { sessionAffinity: false });
   addAccount(pool, 'unknown-plan', { util5h: 0.1 });
-  // plan not set (null) — should still be eligible for fable
+  // plan not set (null) — a Max-only request must not be guessed onto it
   const pick = pool.select('fable');
-  check('unknown plan account is eligible for fable', pick?.alias === 'unknown-plan');
+  check('unknown plan account is ineligible for fable', pick === null);
+  check('unknown plan still serves unrestricted families', pool.select('sonnet')?.alias === 'unknown-plan');
 }
 
 header('selectSticky with null hint and exhausted pool returns null');
@@ -348,6 +349,59 @@ header('pickRoundRobin respects per-model family in floor check');
   const opusPicks = new Set();
   for (let i = 0; i < 4; i++) opusPicks.add(pool.select('opus')?.alias);
   check('both accounts in rotation for opus', opusPicks.has('alpha') && opusPicks.has('beta'));
+}
+
+header('round-robin observation and failover preserve the cursor');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'alpha', { util5h: 0.2 });
+  addAccount(pool, 'beta', { util5h: 0.2 });
+  addAccount(pool, 'gamma', { util5h: 0.2 });
+
+  check('peek reports alpha', pool.peek()?.alias === 'alpha');
+  check('status reports alpha', pool.status().bestAccount === 'alpha');
+  check('read-only calls do not consume alpha', pool.select()?.alias === 'alpha');
+
+  const failover = pool.selectExcluding(new Set(['alpha']));
+  check('failover continues to beta instead of skipping to gamma', failover?.alias === 'beta');
+  check('next normal turn continues to gamma', pool.select()?.alias === 'gamma');
+}
+
+header('proxy peek is replaced by one family-aware committed selection');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: true });
+  addAccount(pool, 'alpha', { util5h: 0.1, perModel7d: { sonnet: 0.99 } });
+  addAccount(pool, 'beta', { util5h: 0.2 });
+
+  check('family-less availability peek sees alpha', pool.peek()?.alias === 'alpha');
+  const key = computeStickyKey('family-aware conversation');
+  check('committed Sonnet selection skips saturated alpha', pool.selectSticky(key, 'sonnet')?.alias === 'beta');
+  check('the peek consumed no hidden round-robin turn', pool.select('opus')?.alias === 'alpha');
+}
+
+header('affinity disabled reuses the proxy hint without double-selecting');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'alpha', { util5h: 0.2 });
+  addAccount(pool, 'beta', { util5h: 0.2 });
+
+  const hint = pool.select();
+  const picked = pool.selectSticky(computeStickyKey('new request'), null, Date.now(), hint);
+  check('disabled affinity keeps the pre-selected alpha hint', picked?.alias === 'alpha');
+  check('the next request gets beta', pool.select()?.alias === 'beta');
+}
+
+header('affinity TTL is enforced on lookup, not only periodic cleanup');
+{
+  const pool = new AccountPool('headroom', { sessionAffinity: true, sessionAffinityTtlMs: 10 });
+  addAccount(pool, 'alpha', { util5h: 0.1 });
+  addAccount(pool, 'beta', { util5h: 0.2 });
+  const key = computeStickyKey('ttl-bound conversation');
+  const bound = pool.get('beta');
+  pool.rebindSticky(key, 'beta');
+  const bindingTime = Date.now();
+  check('binding is initially reused', pool.selectSticky(key, null, bindingTime, bound)?.alias === 'beta');
+  check('expired binding is reselected before cleanup interval', pool.selectSticky(key, null, bindingTime + 11)?.alias === 'alpha');
 }
 
 console.log(`\n${'='.repeat(70)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(70)}`);

@@ -15,10 +15,10 @@
  * shape `atomicWriteJson` in src/live-fingerprint.ts uses for the
  * captured CC template.
  *
- * Unknown keys in the loaded file are preserved (forward-compat for
- * future schema versions); validation is best-effort, not strict — a
- * corrupt or partial file falls back to defaults rather than aborting
- * the process.
+ * Unknown keys in the loaded file are ignored. Validation is best-effort,
+ * not strict: a corrupt or partial file falls back to defaults rather than
+ * aborting the process. New settings must be added to both the config type
+ * and the sanitizer schema below so ownership stays explicit.
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -217,52 +217,55 @@ export interface DarioConfig {
  * specified in config.json resolves to its corresponding default here.
  * Updates to a flag default MUST land here too so they stay in sync.
  */
+const CONFIG_DEFAULTS: DarioConfig = {
+  version: CONFIG_SCHEMA_VERSION,
+  port: 3456,
+  host: '127.0.0.1',
+  model: null,
+  passthrough: false,
+  preserveTools: false,
+  hybridTools: false,
+  mergeTools: false,
+  noAutoDetect: false,
+  strictTls: false,
+  strictTemplate: false,
+  noLiveCapture: false,
+  drainOnClose: false,
+  stealth: false,
+  pacing: { minMs: 500, jitterMs: 0 },
+  thinkTime: { baseMs: 0, perTokenMs: 0, jitterMs: 0, maxMs: 30_000 },
+  sessionStart: { minMs: 0, jitterMs: 0 },
+  session: {
+    idleRotateMs: 900_000,
+    rotateJitterMs: 0,
+    maxAgeMs: null,
+    perClient: false,
+  },
+  queue: { maxConcurrent: null, maxQueued: null, timeoutMs: null },
+  pool: { strategy: 'headroom' },
+  sessionAffinity: { enabled: true, ttlMs: 3_600_000 },
+  effort: null,
+  maxTokens: null,
+  poolFallback: { model: null },
+  modelAliases: {},
+  passthroughBetas: [],
+  systemPrompt: null,
+  preserveOrchestrationTags: false,
+  logFile: null,
+  egressProxy: null,
+  apiKey: null,
+  egressIpUrl: null,
+  overageGuard: {
+    enabled: true,
+    behavior: 'halt',
+    cooldownMs: 30 * 60 * 1000,
+    notifyOs: true,
+  },
+};
+
+/** Return an independent copy so callers can safely edit nested groups. */
 export function defaultConfig(): DarioConfig {
-  return {
-    version: CONFIG_SCHEMA_VERSION,
-    port: 3456,
-    host: '127.0.0.1',
-    model: null,
-    passthrough: false,
-    preserveTools: false,
-    hybridTools: false,
-    mergeTools: false,
-    noAutoDetect: false,
-    strictTls: false,
-    strictTemplate: false,
-    noLiveCapture: false,
-    drainOnClose: false,
-    stealth: false,
-    pacing: { minMs: 500, jitterMs: 0 },
-    thinkTime: { baseMs: 0, perTokenMs: 0, jitterMs: 0, maxMs: 30_000 },
-    sessionStart: { minMs: 0, jitterMs: 0 },
-    session: {
-      idleRotateMs: 900_000,
-      rotateJitterMs: 0,
-      maxAgeMs: null,
-      perClient: false,
-    },
-    queue: { maxConcurrent: null, maxQueued: null, timeoutMs: null },
-    pool: { strategy: 'headroom' },
-    sessionAffinity: { enabled: true, ttlMs: 3_600_000 },
-    effort: null,
-    maxTokens: null,
-    poolFallback: { model: null },
-    modelAliases: {},
-    passthroughBetas: [],
-    systemPrompt: null,
-    preserveOrchestrationTags: false,
-    logFile: null,
-    egressProxy: null,
-    apiKey: null,
-    egressIpUrl: null,
-    overageGuard: {
-      enabled: true,
-      behavior: 'halt',
-      cooldownMs: 30 * 60 * 1000,
-      notifyOs: true,
-    },
-  };
+  return structuredClone(CONFIG_DEFAULTS);
 }
 
 /**
@@ -277,8 +280,8 @@ export function defaultConfig(): DarioConfig {
  *                 returned. The TUI surfaces this so the user knows
  *                 their saved settings were ignored.
  *
- * The loaded shape is type-checked field-by-field: unknown keys pass
- * through (forward-compat), known keys with wrong types are dropped.
+ * The loaded shape is type-checked field-by-field: unknown keys and known
+ * keys with wrong types are dropped.
  * Strict validation would force a config migration on every shape
  * tweak; loose-but-typed lets the file evolve without breaking older
  * dario installs that haven't been restarted.
@@ -410,174 +413,139 @@ export function resolveConfig(opts: {
   return { ...fromFile, config: withCli };
 }
 
-// ── internals ────────────────────────────────────────────────────────
+/** Effective proxy/client key: non-empty environment value, then config file. */
+export function effectiveApiKey(
+  env: NodeJS.ProcessEnv = process.env,
+  path?: string,
+): string | undefined {
+  return resolveApiKey(loadConfig(path).config, env);
+}
+
+/** Resolve API-key precedence when the persisted config is already loaded. */
+export function resolveApiKey(
+  config: Pick<DarioConfig, 'apiKey'>,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return env['DARIO_API_KEY'] || config.apiKey || undefined;
+}
+
+// ── schema + sanitization ────────────────────────────────────────────
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/**
- * Field-by-field type-check. Drops keys whose values don't match the
- * expected type — better to silently fall back to a default than to
- * abort startup on a stray manually-edited typo. Unknown top-level
- * keys pass through unchanged (forward-compat for future fields).
- */
+type ValueSanitizer = (value: unknown) => unknown | undefined;
+
+const numberValue: ValueSanitizer = (value) =>
+  typeof value === 'number' ? value : undefined;
+const finiteNumber: ValueSanitizer = (value) =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+const nonNegativeNumber: ValueSanitizer = (value) =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+const booleanValue: ValueSanitizer = (value) =>
+  typeof value === 'boolean' ? value : undefined;
+const stringValue: ValueSanitizer = (value) =>
+  typeof value === 'string' ? value : undefined;
+const stringOrNull: ValueSanitizer = (value) =>
+  value === null || typeof value === 'string' ? value : undefined;
+const numberOrNull: ValueSanitizer = (value) =>
+  value === null || (typeof value === 'number' && Number.isFinite(value)) ? value : undefined;
+const anyNumberOrNull: ValueSanitizer = (value) =>
+  value === null || typeof value === 'number' ? value : undefined;
+
+function enumValue<const T extends string>(...allowed: T[]): ValueSanitizer {
+  const values = new Set<unknown>(allowed);
+  return (value) => values.has(value) ? value : undefined;
+}
+
+function objectValue(fields: Record<string, ValueSanitizer>): ValueSanitizer {
+  return (value) => {
+    if (!isPlainObject(value)) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const [key, sanitizer] of Object.entries(fields)) {
+      const sanitized = sanitizer(value[key]);
+      if (sanitized !== undefined) out[key] = sanitized;
+    }
+    return out;
+  };
+}
+
+const modelAliasesValue: ValueSanitizer = (value) => {
+  if (!isPlainObject(value)) return undefined;
+  const aliases: Record<string, string> = {};
+  for (const [key, targetValue] of Object.entries(value)) {
+    if (typeof targetValue !== 'string') continue;
+    const name = key.trim().toLowerCase();
+    const target = targetValue.trim();
+    if (name && target) aliases[name] = target;
+  }
+  return aliases;
+};
+
+const CONFIG_FIELD_SANITIZERS = {
+  version: numberValue,
+  port: finiteNumber,
+  host: stringValue,
+  model: stringOrNull,
+  passthrough: booleanValue,
+  preserveTools: booleanValue,
+  hybridTools: booleanValue,
+  mergeTools: booleanValue,
+  noAutoDetect: booleanValue,
+  strictTls: booleanValue,
+  strictTemplate: booleanValue,
+  noLiveCapture: booleanValue,
+  drainOnClose: booleanValue,
+  stealth: booleanValue,
+  pacing: objectValue({ minMs: numberValue, jitterMs: numberValue }),
+  thinkTime: objectValue({
+    baseMs: numberValue,
+    perTokenMs: numberValue,
+    jitterMs: numberValue,
+    maxMs: numberValue,
+  }),
+  sessionStart: objectValue({ minMs: numberValue, jitterMs: numberValue }),
+  session: objectValue({
+    idleRotateMs: numberValue,
+    rotateJitterMs: numberValue,
+    maxAgeMs: anyNumberOrNull,
+    perClient: booleanValue,
+  }),
+  queue: objectValue({
+    maxConcurrent: numberOrNull,
+    maxQueued: numberOrNull,
+    timeoutMs: numberOrNull,
+  }),
+  pool: objectValue({ strategy: enumValue('headroom', 'fill-first', 'round-robin') }),
+  sessionAffinity: objectValue({ enabled: booleanValue, ttlMs: nonNegativeNumber }),
+  effort: stringOrNull,
+  maxTokens: (value) =>
+    value === null || value === 'client' ? value : finiteNumber(value),
+  poolFallback: objectValue({ model: stringOrNull }),
+  modelAliases: modelAliasesValue,
+  passthroughBetas: (value) =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : undefined,
+  systemPrompt: stringOrNull,
+  preserveOrchestrationTags: booleanValue,
+  logFile: stringOrNull,
+  egressProxy: stringOrNull,
+  apiKey: stringOrNull,
+  egressIpUrl: stringOrNull,
+  overageGuard: objectValue({
+    enabled: booleanValue,
+    behavior: enumValue('halt', 'warn'),
+    cooldownMs: nonNegativeNumber,
+    notifyOs: booleanValue,
+  }),
+} satisfies Record<keyof DarioConfig, ValueSanitizer>;
+
+/** Drop unknown or ill-typed fields, leaving defaults to fill the gaps. */
 function sanitize(parsed: Record<string, unknown>): DarioConfig {
-  const out: DarioConfig = { version: CONFIG_SCHEMA_VERSION };
-  const pickNumber = (k: string) => typeof parsed[k] === 'number' && Number.isFinite(parsed[k]) ? (parsed[k] as number) : undefined;
-  const pickBool = (k: string) => typeof parsed[k] === 'boolean' ? (parsed[k] as boolean) : undefined;
-  const pickString = (k: string) => typeof parsed[k] === 'string' ? (parsed[k] as string) : undefined;
-  const pickStringOrNull = (k: string) => {
-    if (parsed[k] === null) return null;
-    if (typeof parsed[k] === 'string') return parsed[k] as string;
-    return undefined;
-  };
-  const pickNumberOrNull = (k: string) => {
-    if (parsed[k] === null) return null;
-    if (typeof parsed[k] === 'number' && Number.isFinite(parsed[k])) return parsed[k] as number;
-    return undefined;
-  };
-
-  if (typeof parsed.version === 'number') out.version = parsed.version;
-  if (pickNumber('port') !== undefined) out.port = pickNumber('port');
-  if (pickString('host') !== undefined) out.host = pickString('host');
-
-  const model = pickStringOrNull('model');
-  if (model !== undefined) out.model = model;
-
-  for (const k of ['passthrough', 'preserveTools', 'hybridTools', 'mergeTools',
-                   'noAutoDetect', 'strictTls', 'strictTemplate', 'noLiveCapture',
-                   'drainOnClose', 'stealth', 'preserveOrchestrationTags'] as const) {
-    const v = pickBool(k);
-    // Each `k` is a literal boolean-typed field on DarioConfig (verified
-    // by the `as const` tuple type above), so the assignment is sound
-    // — we route through `unknown` because TS can't narrow the union
-    // of literal keys to a single typed assignment at compile time.
-    if (v !== undefined) (out as unknown as Record<string, boolean>)[k] = v;
+  const out: Record<string, unknown> = { version: CONFIG_SCHEMA_VERSION };
+  for (const [key, sanitizer] of Object.entries(CONFIG_FIELD_SANITIZERS)) {
+    const value = sanitizer(parsed[key]);
+    if (value !== undefined) out[key] = value;
   }
-
-  // Nested groups — sanitize each, drop if not an object
-  if (isPlainObject(parsed.pacing)) {
-    out.pacing = {};
-    if (typeof parsed.pacing.minMs === 'number') out.pacing.minMs = parsed.pacing.minMs;
-    if (typeof parsed.pacing.jitterMs === 'number') out.pacing.jitterMs = parsed.pacing.jitterMs;
-  }
-  if (isPlainObject(parsed.thinkTime)) {
-    out.thinkTime = {};
-    for (const k of ['baseMs', 'perTokenMs', 'jitterMs', 'maxMs'] as const) {
-      if (typeof parsed.thinkTime[k] === 'number') {
-        out.thinkTime[k] = parsed.thinkTime[k] as number;
-      }
-    }
-  }
-  if (isPlainObject(parsed.sessionStart)) {
-    out.sessionStart = {};
-    if (typeof parsed.sessionStart.minMs === 'number') out.sessionStart.minMs = parsed.sessionStart.minMs;
-    if (typeof parsed.sessionStart.jitterMs === 'number') out.sessionStart.jitterMs = parsed.sessionStart.jitterMs;
-  }
-  if (isPlainObject(parsed.session)) {
-    out.session = {};
-    if (typeof parsed.session.idleRotateMs === 'number') out.session.idleRotateMs = parsed.session.idleRotateMs;
-    if (typeof parsed.session.rotateJitterMs === 'number') out.session.rotateJitterMs = parsed.session.rotateJitterMs;
-    if (parsed.session.maxAgeMs === null || typeof parsed.session.maxAgeMs === 'number') {
-      out.session.maxAgeMs = parsed.session.maxAgeMs as number | null;
-    }
-    if (typeof parsed.session.perClient === 'boolean') out.session.perClient = parsed.session.perClient;
-  }
-  if (isPlainObject(parsed.queue)) {
-    out.queue = {};
-    for (const k of ['maxConcurrent', 'maxQueued', 'timeoutMs'] as const) {
-      const v = parsed.queue[k];
-      if (v === null || (typeof v === 'number' && Number.isFinite(v))) {
-        out.queue[k] = v as number | null;
-      }
-    }
-  }
-
-  if (isPlainObject(parsed.pool)) {
-    out.pool = {};
-    if (parsed.pool.strategy === 'headroom' || parsed.pool.strategy === 'fill-first' || parsed.pool.strategy === 'round-robin') {
-      out.pool.strategy = parsed.pool.strategy;
-    }
-  }
-
-  if (isPlainObject(parsed.sessionAffinity)) {
-    out.sessionAffinity = {};
-    if (typeof parsed.sessionAffinity.enabled === 'boolean') {
-      out.sessionAffinity.enabled = parsed.sessionAffinity.enabled;
-    }
-    if (typeof parsed.sessionAffinity.ttlMs === 'number' && Number.isFinite(parsed.sessionAffinity.ttlMs) && parsed.sessionAffinity.ttlMs >= 0) {
-      out.sessionAffinity.ttlMs = parsed.sessionAffinity.ttlMs;
-    }
-  }
-
-  if (isPlainObject(parsed.poolFallback)) {
-    out.poolFallback = {};
-    if (parsed.poolFallback.model === null || typeof parsed.poolFallback.model === 'string') {
-      out.poolFallback.model = parsed.poolFallback.model as string | null;
-    }
-  }
-
-  const effort = pickStringOrNull('effort');
-  if (effort !== undefined) out.effort = effort;
-
-  // maxTokens is special — it's a number, the string 'client', or null
-  if (parsed.maxTokens === null) out.maxTokens = null;
-  else if (parsed.maxTokens === 'client') out.maxTokens = 'client';
-  else {
-    const n = pickNumber('maxTokens');
-    if (n !== undefined) out.maxTokens = n;
-  }
-
-  if (isPlainObject(parsed.modelAliases)) {
-    const aliases: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed.modelAliases)) {
-      if (typeof v !== 'string') continue;
-      const name = k.trim().toLowerCase();
-      const target = v.trim();
-      if (!name || !target) continue;
-      aliases[name] = target;
-    }
-    out.modelAliases = aliases;
-  }
-
-  if (Array.isArray(parsed.passthroughBetas)) {
-    out.passthroughBetas = (parsed.passthroughBetas as unknown[])
-      .filter((x): x is string => typeof x === 'string');
-  }
-
-  const sysPrompt = pickStringOrNull('systemPrompt');
-  if (sysPrompt !== undefined) out.systemPrompt = sysPrompt;
-
-  const logFile = pickStringOrNull('logFile');
-  if (logFile !== undefined) out.logFile = logFile;
-
-  const egressProxy = pickStringOrNull('egressProxy');
-  if (egressProxy !== undefined) out.egressProxy = egressProxy;
-
-  const egressIpUrl = pickStringOrNull('egressIpUrl');
-  if (egressIpUrl !== undefined) out.egressIpUrl = egressIpUrl;
-
-  if (isPlainObject(parsed.overageGuard)) {
-    out.overageGuard = {};
-    if (typeof parsed.overageGuard.enabled === 'boolean') {
-      out.overageGuard.enabled = parsed.overageGuard.enabled;
-    }
-    if (parsed.overageGuard.behavior === 'halt' || parsed.overageGuard.behavior === 'warn') {
-      out.overageGuard.behavior = parsed.overageGuard.behavior;
-    }
-    if (typeof parsed.overageGuard.cooldownMs === 'number'
-        && Number.isFinite(parsed.overageGuard.cooldownMs)
-        && parsed.overageGuard.cooldownMs >= 0) {
-      out.overageGuard.cooldownMs = parsed.overageGuard.cooldownMs;
-    }
-    if (typeof parsed.overageGuard.notifyOs === 'boolean') {
-      out.overageGuard.notifyOs = parsed.overageGuard.notifyOs;
-    }
-  }
-
-  // Silence unused-warning helper.
-  void pickNumberOrNull;
-
-  return out;
+  return out as unknown as DarioConfig;
 }

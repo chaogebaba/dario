@@ -135,12 +135,13 @@ function onKey(
   cleanupsByTab: Map<number, Array<() => void>>,
 ): TuiState | undefined {
   // ── Global keys ────────────────────────────────────────────
-  // q quits — but only when NOT inside an edit field (the Config
-  // tab's editor uses 'q' as a literal character).
+  // Editors and modal states receive literal q/digits/Tab before global
+  // shortcuts. The state shape belongs to each tab, so the tab declares when
+  // it captures rather than the parent special-casing private fields.
   const tab = TABS[state.activeTab];
-  const inEdit = state.activeTab === 1 /* config */ && state.config.editBuffer !== null;
+  const capturesGlobals = tabCapturesGlobalKeys(tab, stateOf(state, state.activeTab));
 
-  if (!inEdit) {
+  if (!capturesGlobals) {
     if (key.name === 'printable' && key.ch === 'q' && !key.ctrl) {
       app.stop();
       return { ...state, exiting: true };
@@ -167,6 +168,10 @@ function onKey(
     return withTabState(state, state.activeTab, nextSlice);
   }
   return undefined;
+}
+
+export function tabCapturesGlobalKeys(tab: Tab<unknown>, state: unknown): boolean {
+  return tab.capturesGlobalKeys?.(state) ?? false;
 }
 
 function switchTab(

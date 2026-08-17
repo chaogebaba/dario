@@ -10,7 +10,9 @@
 // state-dispatch between the parent and each tab — without needing
 // a real terminal.
 
-import { startTuiApp } from '../dist/tui/tui-app.js';
+import { startTuiApp, tabCapturesGlobalKeys } from '../dist/tui/tui-app.js';
+import { AccountsTab } from '../dist/tui/tabs/accounts.js';
+import { ConfigTab } from '../dist/tui/tabs/config.js';
 
 let pass = 0, fail = 0;
 function check(name, cond, detail) {
@@ -23,6 +25,19 @@ function header(n) { console.log(`\n=== ${n} ===`); }
 header('startTuiApp — function exists');
 {
   check('startTuiApp is a function', typeof startTuiApp === 'function');
+}
+
+header('modal/editor states capture global shortcuts');
+{
+  const config = ConfigTab.initialState();
+  check('Config normal mode leaves globals enabled', !tabCapturesGlobalKeys(ConfigTab, config));
+  check('Config edit mode captures q and digits', tabCapturesGlobalKeys(ConfigTab, { ...config, editBuffer: '1' }));
+
+  const accounts = AccountsTab.initialState();
+  check('Accounts normal mode leaves globals enabled', !tabCapturesGlobalKeys(AccountsTab, accounts));
+  for (const mode of ['edit-alias', 'input-alias', 'confirm-delete', 'adding']) {
+    check(`Accounts ${mode} captures global keys`, tabCapturesGlobalKeys(AccountsTab, { ...accounts, mode }));
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

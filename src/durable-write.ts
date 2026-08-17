@@ -17,7 +17,7 @@
  * directory after the rename so the rename itself is durable. This is the
  * standard write-temp → fsync(file) → rename → fsync(dir) sequence.
  */
-import { open, rename, unlink } from 'node:fs/promises';
+import { link, open, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 /**
@@ -76,6 +76,48 @@ export async function durableWriteFile(
   }
 
   // fsync the parent directory so the rename (the new dirent) is durable.
+  await syncDirectory(dir);
+}
+
+/**
+ * Durably create a file without replacing an existing destination.
+ *
+ * The data is completed and fsynced under a private name first, then hard
+ * linked into place. `link` is the portable atomic no-clobber primitive: if
+ * another file already owns `targetPath`, it fails with EEXIST and leaves
+ * that file untouched. The temporary link is removed after publication.
+ */
+export async function durableCreateFile(
+  targetPath: string,
+  data: string,
+  mode = 0o600,
+): Promise<void> {
+  const dir = dirname(targetPath);
+  const tmp = `${targetPath}.tmp.${process.pid}.${Date.now()}`;
+  const fh = await open(tmp, 'wx', mode);
+  try {
+    await fh.writeFile(data);
+    await fh.sync();
+  } catch (err) {
+    await fh.close().catch(() => {});
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
+  await fh.close();
+
+  try {
+    await link(tmp, targetPath);
+    // Publication already succeeded; a failed temp cleanup must not make the
+    // caller report failure and retry an operation whose destination exists.
+    await unlink(tmp).catch(() => {});
+    await syncDirectory(dir);
+  } catch (err) {
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
+}
+
+async function syncDirectory(dir: string): Promise<void> {
   try {
     const dh = await open(dir, 'r');
     try {
@@ -84,7 +126,7 @@ export async function durableWriteFile(
       await dh.close();
     }
   } catch {
-    // Directory fsync unsupported on this fs/platform — data fsync + atomic
-    // rename above is the meaningful guarantee for the Linux container case.
+    // Directory fsync unsupported on this fs/platform — the data fsync and
+    // atomic publication still provide the meaningful available guarantee.
   }
 }

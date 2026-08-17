@@ -175,7 +175,18 @@ async function encodeTarget(host: string, remoteDns: boolean): Promise<Buffer> {
 
 /** Expand an IPv6 literal (possibly `::`-compressed) to 16 raw bytes. */
 function expandIpv6(addr: string): Buffer {
-  const stripped = addr.replace(/^\[|\]$/g, '').split('%')[0];
+  let stripped = addr.replace(/^\[|\]$/g, '').split('%')[0];
+  // IPv4-embedded forms use a dotted-decimal tail that occupies two IPv6
+  // groups (`::ffff:192.0.2.1` == `::ffff:c000:0201`). Treating that tail
+  // as one hexadecimal group silently sends a different destination.
+  const dotted = stripped.match(/(?:^|:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (dotted) {
+    const octets = dotted.slice(1).map(Number);
+    const first = ((octets[0] << 8) | octets[1]).toString(16);
+    const second = ((octets[2] << 8) | octets[3]).toString(16);
+    stripped = stripped.slice(0, dotted.index! + (dotted[0].startsWith(':') ? 1 : 0))
+      + `${first}:${second}`;
+  }
   const [head, tail] = stripped.split('::');
   const headParts = head ? head.split(':').filter(Boolean) : [];
   const tailParts = tail ? tail.split(':').filter(Boolean) : [];

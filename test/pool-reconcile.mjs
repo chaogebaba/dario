@@ -85,6 +85,7 @@ header('Reconcile: existing account gets fresh tokens, keeps its state');
 
   // Put the account into auth cool-down (mirrors a 401 during use).
   pool.markAuthFailure('keep');
+  pool.updatePlan('keep', 'Max');
   const before = pool.all().find(a => a.alias === 'keep');
   check('account is in auth cool-down after a failure', isInAuthCooldown(before));
   check('cool-down makes it unselectable', pool.select() === null);
@@ -96,6 +97,26 @@ header('Reconcile: existing account gets fresh tokens, keeps its state');
   const after = pool.all().find(a => a.alias === 'keep');
   check('auth cool-down preserved across reconcile', isInAuthCooldown(after));
   check('failure counter preserved (not reset by re-add)', after.consecutiveAuthFailures >= 1);
+  check('learned subscription plan preserved across reconcile', after.plan === 'Max');
+}
+
+header('Reconcile: same alias with a different identity resets learned state');
+{
+  const pool = new AccountPool();
+  reconcilePoolAccounts(pool, [mkAcc('reused')]);
+  pool.updatePlan('reused', 'Max');
+  pool.markAuthFailure('reused');
+  const before = pool.get('reused');
+
+  reconcilePoolAccounts(pool, [{
+    ...mkAcc('reused', 'replacement-token'),
+    deviceId: 'replacement-device',
+    accountUuid: 'replacement-uuid',
+  }]);
+  const after = pool.get('reused');
+  check('replacement gets a new session identity', after.identity.sessionId !== before.identity.sessionId);
+  check('replacement does not inherit the old plan', after.plan === null);
+  check('replacement does not inherit auth cooldown', after.consecutiveAuthFailures === 0 && !isInAuthCooldown(after));
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

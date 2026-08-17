@@ -6,9 +6,11 @@
 
 import {
   formatAge,
+  buildRuntimeConfigSections,
   formatEffectiveConfig,
   formatEffectiveConfigJson,
 } from '../dist/config-report.js';
+import { defaultConfig } from '../dist/config-file.js';
 
 let pass = 0, fail = 0;
 function check(name, cond) {
@@ -27,6 +29,38 @@ header('formatAge');
   check('1h', formatAge(60 * 60_000) === '1h');
   check('1d', formatAge(24 * 60 * 60_000) === '1d');
   check('negative → 0s', formatAge(-5000) === '0s');
+}
+
+// ─────────────────────────────────────────────────────────────
+header('buildRuntimeConfigSections — precedence and redaction');
+{
+  const config = defaultConfig();
+  config.apiKey = 'file-key';
+  config.egressProxy = 'http://alice:secret@proxy.example:8080';
+  config.egressIpUrl = 'https://check.example/ip';
+
+  const sections = buildRuntimeConfigSections(config, {});
+  const section = (title) => sections.find((candidate) => candidate.title === title);
+  const row = (title, label) => section(title)?.rows.find((candidate) => candidate.label === label)?.value;
+
+  check('returns proxy, egress, and auth sections', sections.length === 3);
+  check('persisted API key is reported by length', row('Auth gate', 'DARIO_API_KEY')?.includes('length 8'));
+  check('API key value is never reported', !JSON.stringify(sections).includes('file-key'));
+  check('egress credentials are redacted', row('Egress', 'egress proxy') === 'http://***:***@proxy.example:8080/');
+  check('configured IP check is reported', row('Egress', 'ip check') === 'https://check.example/ip');
+
+  const envSections = buildRuntimeConfigSections(config, {
+    DARIO_API_KEY: 'environment-key',
+    DARIO_PORT: '4567',
+    DARIO_STRICT_TLS: '1',
+    DARIO_EGRESS_PROXY: '',
+  });
+  const envSection = (title) => envSections.find((candidate) => candidate.title === title);
+  const envRow = (title, label) => envSection(title)?.rows.find((candidate) => candidate.label === label)?.value;
+  check('environment API key wins', envRow('Auth gate', 'DARIO_API_KEY')?.includes('length 15'));
+  check('proxy environment source is retained', envRow('Proxy (on `dario proxy`)', 'port') === '4567  (from DARIO_PORT)');
+  check('strict TLS environment flag is retained', envRow('Auth gate', 'DARIO_STRICT_TLS') === 'on');
+  check('empty primary egress env disables persisted proxy', envRow('Egress', 'egress proxy') === 'unset — upstream fetches go direct');
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -57,6 +57,8 @@ export interface Tab<S> {
   hotkey?: string;
   /** Build the initial state. Called once on TuiApp construction. */
   initialState(): S;
+  /** True while a modal/editor must receive keys before global shortcuts. */
+  capturesGlobalKeys?(state: S): boolean;
   /**
    * Render the tab's body region into a single string. Caller passes
    * the dimensions of the body region (NOT the full screen — header,
