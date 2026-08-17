@@ -28,7 +28,7 @@ import {
   parseRateLimits,
   hasRateLimitHeaders,
 } from '../dist/pool.js';
-import { resolvePoolStartupStatus } from '../dist/proxy.js';
+import { formatPoolStartupLine, resolvePoolStartupStatus } from '../dist/proxy.js';
 
 let pass = 0;
 let fail = 0;
@@ -238,6 +238,14 @@ header('resolvePoolStartupStatus — the banner cannot claim healthy on dead tok
   const empty = resolvePoolStartupStatus([], NOW);
   check('an empty pool is not authenticated', empty.authenticated === false);
   check('and has no expiry to report', empty.expiresAt === 0);
+}
+
+header('formatPoolStartupLine — reports the effective routing policy');
+{
+  check('round-robin is not mislabeled as headroom routing',
+    formatPoolStartupLine(2, 'round-robin', true).includes('round-robin'));
+  check('session affinity state is explicit',
+    formatPoolStartupLine(2, 'fill-first', false).includes('session affinity disabled'));
 }
 
 console.log(`\n${'='.repeat(70)}\n  ${pass} pass, ${fail} fail\n${'='.repeat(70)}`);

@@ -14,7 +14,7 @@ import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
-import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount } from './pool.js';
+import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy } from './pool.js';
 import { extractSessionAffinityKey } from './session-affinity.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
@@ -1337,6 +1337,21 @@ export function resolvePoolStartupStatus(
     expiresAt: earliest,
     expiresIn: `${Math.floor(msLeft / 3600000)}h ${Math.floor((msLeft % 3600000) / 60000)}m`,
   };
+}
+
+export function formatPoolStartupLine(
+  accountCount: number,
+  strategy: PoolStrategy,
+  sessionAffinity: boolean,
+): string {
+  if (accountCount === 0) {
+    return 'Pool: empty (admin bootstrap / api-key mode) — no accounts loaded';
+  }
+  if (accountCount === 1) {
+    return 'Pool: 1 account (a pool of one) — add more with `dario accounts add <alias>` to load-balance';
+  }
+  const affinity = sessionAffinity ? 'session affinity enabled' : 'session affinity disabled';
+  return `Pool: ${accountCount} accounts — ${strategy}, ${affinity}`;
 }
 
 export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
@@ -4236,11 +4251,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // Pool line surfaces the account state on every startup. The pool is the
     // one credential model now (v5.0): a plain `dario login` shows as a pool of
     // one. An empty pool is only reachable in admin-bootstrap / api-key mode.
-    const poolLine = pool.size === 0
-      ? 'Pool: empty (admin bootstrap / api-key mode) — no accounts loaded'
-      : pool.size === 1
-        ? 'Pool: 1 account (a pool of one) — add more with `dario accounts add <alias>` to load-balance'
-        : `Pool: ${pool.size} accounts — headroom-routed, sticky for multi-turn`;
+    const poolLine = formatPoolStartupLine(pool.size, poolStrategy, opts.sessionAffinity ?? true);
     // Display URL uses `localhost` for loopback binds and the literal host
     // for exposed binds, so the printed URL is the one a client would
     // actually use to reach the proxy.
