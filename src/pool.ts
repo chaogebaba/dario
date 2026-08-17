@@ -91,6 +91,8 @@ export interface PoolAccount {
   identity: AccountIdentity;
   rateLimit: RateLimitSnapshot;
   requestCount: number;
+  /** Subscription plan: 'Max' | 'Pro' | 'Team' | 'Free' | null (unknown). */
+  plan?: string | null;
   /**
    * Auth-failure cool-down (dario#234). Set when an upstream returns
    * 401/403 or an `authentication_error` / `permission_error` /
@@ -183,7 +185,7 @@ export interface PoolStatus {
  * pick the fill order. Sticky bindings behave identically in both modes;
  * strategy only decides where UNBOUND (new) conversations land.
  */
-export type PoolStrategy = 'headroom' | 'fill-first';
+export type PoolStrategy = 'headroom' | 'fill-first' | 'round-robin';
 
 /**
  * Resolve the pool strategy from an explicit value (CLI flag / config file,
@@ -199,7 +201,7 @@ export function resolvePoolStrategy(
   for (const c of [explicit, env.DARIO_POOL_STRATEGY]) {
     if (typeof c !== 'string') continue;
     const s = c.trim().toLowerCase();
-    if (s === 'headroom' || s === 'fill-first') return s;
+    if (s === 'headroom' || s === 'fill-first' || s === 'round-robin') return s;
   }
   return 'headroom';
 }
@@ -345,7 +347,7 @@ interface StickyBinding {
   boundAt: number;    // creation time — retained for observability/debugging
   lastUsedAt: number; // last time this binding was returned; drives the idle TTL and LRU eviction
 }
-const STICKY_IDLE_TTL_MS = 6 * 60 * 60 * 1000; // reap a binding 6h after its LAST use, not its creation
+const STICKY_IDLE_TTL_MS_DEFAULT = 6 * 60 * 60 * 1000; // default 6h; overridden by sessionAffinity.ttlMs
 const STICKY_MAX_ENTRIES = 2_000;          // lazy cleanup cap
 const STICKY_CLEANUP_INTERVAL_MS = 30_000; // amortize the O(n) TTL/orphan sweep
 
@@ -385,6 +387,30 @@ function pickFillFirst(accounts: PoolAccount[], family?: string | null): PoolAcc
   return best;
 }
 
+/**
+ * Model families that require a specific subscription plan. Accounts whose
+ * `plan` field doesn't match are excluded from selection for that family.
+ * Accounts with `plan === null` (unknown, not yet probed) are NOT excluded —
+ * we can't prove they lack the required plan, and excluding them would block
+ * routing until the first quota probe completes.
+ */
+const MODEL_PLAN_REQUIREMENTS: Record<string, string> = {
+  fable: 'Max',
+};
+
+/**
+ * Returns true if the account is eligible for the given model family
+ * based on plan requirements. Accounts with unknown plan (null) pass.
+ */
+function planEligible(account: PoolAccount, family: string | null | undefined): boolean {
+  if (!family) return true;
+  const required = MODEL_PLAN_REQUIREMENTS[family];
+  if (!required) return true;
+  // Unknown plan (not yet probed) → allow (don't block before first probe).
+  if (!account.plan) return true;
+  return account.plan === required;
+}
+
 export class AccountPool {
   private accounts: Map<string, PoolAccount> = new Map();
   private queue: QueuedRequest[] = [];
@@ -394,8 +420,19 @@ export class AccountPool {
   private sticky: Map<string, StickyBinding> = new Map();
   // Amortize the O(n) sticky TTL/orphan sweep — timestamp of the last run.
   private lastStickyCleanup = 0;
+  // Round-robin index — advances on each select() call under `round-robin` strategy.
+  private roundRobinIdx = 0;
+  // Session affinity (sticky bindings) toggle + TTL.
+  private readonly stickyEnabled: boolean;
+  private readonly stickyIdleTtlMs: number;
 
-  constructor(private readonly strategy: PoolStrategy = 'headroom') {}
+  constructor(
+    private readonly strategy: PoolStrategy = 'headroom',
+    opts?: { sessionAffinity?: boolean; sessionAffinityTtlMs?: number },
+  ) {
+    this.stickyEnabled = opts?.sessionAffinity ?? true;
+    this.stickyIdleTtlMs = opts?.sessionAffinityTtlMs ?? STICKY_IDLE_TTL_MS_DEFAULT;
+  }
 
   add(alias: string, opts: {
     accessToken: string;
@@ -484,7 +521,13 @@ export class AccountPool {
     const now = Date.now();
     const all = [...this.accounts.values()];
 
-    const eligible = all.filter(a => ineligibleReason(a, now) === null);
+    let eligible = all.filter(a => ineligibleReason(a, now) === null);
+
+    // Plan-based filtering: e.g. fable → Max only.
+    if (family) {
+      const planFiltered = eligible.filter(a => planEligible(a, family));
+      if (planFiltered.length > 0) eligible = planFiltered;
+    }
 
     if (eligible.length > 0) {
       if (this.strategy === 'fill-first') {
@@ -493,6 +536,9 @@ export class AccountPool {
         // Every eligible account is at/below the floor — the terminal state
         // both strategies share. Fall through to max-headroom so the caller
         // still gets the least-drained account instead of null.
+      }
+      if (this.strategy === 'round-robin') {
+        return this.pickRoundRobin(eligible);
       }
       return pickMaxHeadroom(eligible, family);
     }
@@ -530,7 +576,7 @@ export class AccountPool {
    * Also performs lazy cleanup of expired bindings (TTL or size cap).
    */
   selectSticky(stickyKey: string | null, family?: string | null, now: number = Date.now()): PoolAccount | null {
-    if (!stickyKey) return this.select(family);
+    if (!stickyKey || !this.stickyEnabled) return this.select(family);
     this.cleanupSticky(now);
 
     const binding = this.sticky.get(stickyKey);
@@ -541,6 +587,7 @@ export class AccountPool {
         && bound.expiresAt > now + 30_000
         && !isInAuthCooldown(bound, now)
         && computeHeadroom(bound.rateLimit, family) > POOL_HEADROOM_FLOOR
+        && planEligible(bound, family)
       ) {
         // Refresh the idle timer. A session that keeps taking turns must never
         // be reaped or rebound while active — that would strand its warm prompt
@@ -564,7 +611,7 @@ export class AccountPool {
    * account via the stale binding, eat another 429, and failover again.
    */
   rebindSticky(stickyKey: string | null, alias: string): void {
-    if (!stickyKey) return;
+    if (!stickyKey || !this.stickyEnabled) return;
     if (!this.accounts.has(alias)) return;
     const now = Date.now();
     this.sticky.set(stickyKey, { alias, boundAt: now, lastUsedAt: now });
@@ -587,7 +634,7 @@ export class AccountPool {
         // Reap orphans (account gone) and bindings idle past the TTL. Idle is
         // measured from lastUsedAt, which selectSticky refreshes every turn, so
         // an actively-running conversation is never reaped here.
-        if (!this.accounts.has(b.alias) || now - b.lastUsedAt > STICKY_IDLE_TTL_MS) {
+        if (!this.accounts.has(b.alias) || now - b.lastUsedAt > this.stickyIdleTtlMs) {
           this.sticky.delete(key);
         }
       }
@@ -615,6 +662,27 @@ export class AccountPool {
     return this.sticky.get(stickyKey)?.alias ?? null;
   }
 
+  /**
+   * Round-robin picker: cycle through eligible accounts in stable alias order.
+   * Advances the internal index so each call picks the next account, distributing
+   * requests (and thus quota consumption) evenly across all healthy seats.
+   * Accounts below the headroom floor are skipped — once exhausted they drop out
+   * of the rotation until their window resets.
+   */
+  private pickRoundRobin(eligible: PoolAccount[]): PoolAccount {
+    // Filter to accounts above the headroom floor — exhausted accounts
+    // drop out of rotation until their window resets.
+    const aboveFloor = eligible.filter(a => computeHeadroom(a.rateLimit) > POOL_HEADROOM_FLOOR);
+    const candidates = aboveFloor.length > 0 ? aboveFloor : eligible;
+    // Sort by alias for stable ordering regardless of Map insertion order.
+    const sorted = candidates.slice().sort((a, b) => a.alias.localeCompare(b.alias));
+    // Wrap the index into the current eligible set size.
+    this.roundRobinIdx = this.roundRobinIdx % sorted.length;
+    const picked = sorted[this.roundRobinIdx];
+    this.roundRobinIdx = (this.roundRobinIdx + 1) % sorted.length;
+    return picked;
+  }
+
   /** Select the next-best account, excluding the given set of aliases. */
   selectExcluding(excluded: Set<string>, family?: string | null): PoolAccount | null {
     if (this.accounts.size <= 1) return null;
@@ -622,11 +690,17 @@ export class AccountPool {
     const now = Date.now();
     const candidates = [...this.accounts.values()].filter(a => !excluded.has(a.alias));
 
-    const eligible = candidates.filter(a =>
+    let eligible = candidates.filter(a =>
       a.rateLimit.status !== 'rejected' &&
       a.expiresAt > now + 30_000 &&
       !isInAuthCooldown(a, now),
     );
+
+    // Plan-based filtering: e.g. fable → Max only.
+    if (family) {
+      const planFiltered = eligible.filter(a => planEligible(a, family));
+      if (planFiltered.length > 0) eligible = planFiltered;
+    }
 
     if (eligible.length > 0) {
       // Fill-first failover keeps the fill order: the next account tried
@@ -636,6 +710,9 @@ export class AccountPool {
       if (this.strategy === 'fill-first') {
         const first = pickFillFirst(eligible, family);
         if (first) return first;
+      }
+      if (this.strategy === 'round-robin') {
+        return this.pickRoundRobin(eligible);
       }
       return pickMaxHeadroom(eligible, family);
     }
@@ -683,6 +760,13 @@ export class AccountPool {
     account.accessToken = accessToken;
     account.refreshToken = refreshToken;
     account.expiresAt = expiresAt;
+  }
+
+  /** Update the cached plan for an account (from quota probe / profile). */
+  updatePlan(alias: string, plan: string | null): void {
+    const account = this.accounts.get(alias);
+    if (!account) return;
+    account.plan = plan;
   }
 
   get(alias: string): PoolAccount | undefined {

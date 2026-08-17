@@ -59,13 +59,11 @@ export function renderFooter(width: number, hints: Array<{ key: string; label: s
 export function renderTabStrip(width: number, tabs: string[], activeTab: number): string {
   const sep = '   ';
   const rendered = tabs.map((label, idx) => {
+    const numbered = `${idx + 1} ${label}`;
     if (idx === activeTab) {
-      // Active: inverse-highlight with thin side-bars to evoke a
-      // selected pill. The ▎ left-eighth-block is visually subtle but
-      // unmistakable on every terminal that supports box-drawing.
-      return inverse(` ${label} `);
+      return inverse(` ${numbered} `);
     }
-    return ` ${label} `;
+    return ` ${numbered} `;
   });
   const inner = rendered.join(sep);
   const padded = pad(inner, width, 'left');

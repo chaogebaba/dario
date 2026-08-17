@@ -59,7 +59,9 @@ const FIELDS: FieldDef[] = [
   { path: 'thinkTime.maxMs',            label: 'Think-time cap (ms)',   type: 'number', hint: 'upper bound for the whole formula' },
   { path: 'sessionStart.minMs',         label: 'Session-start min',     type: 'number', hint: 'first-request delay floor' },
   { path: 'sessionStart.jitterMs',      label: 'Session-start jitter',  type: 'number' },
-  { path: 'pool.strategy',              label: 'Pool strategy',         type: 'string', hint: '"headroom" (default) or "fill-first"' },
+  { path: 'pool.strategy',              label: 'Pool strategy',         type: 'string', hint: '"headroom", "fill-first", or "round-robin"' },
+  { path: 'sessionAffinity.enabled',    label: 'Session affinity',      type: 'bool',   hint: 'pin conversations to one account for cache locality' },
+  { path: 'sessionAffinity.ttlMs',      label: 'Affinity TTL (ms)',     type: 'number', hint: 'idle timeout before binding expires; default 3600000 (1h)' },
   { path: 'egressProxy',                label: 'Egress proxy',          type: 'string', hint: 'socks5h://host:1080, http://host:port, or empty' },
   // ── Overage-guard (v4.1, dario#288) ─────────────────────────
   { path: 'overageGuard.enabled',       label: 'Overage-guard',         type: 'bool',   hint: 'halt proxy on any representative-claim=overage' },
@@ -262,6 +264,16 @@ function startEdit(state: ConfigState): ConfigState {
     const next = setByPath(state.config, f.path, !current);
     return { ...state, config: next, statusMessage: null, statusKind: null };
   }
+  // Multi-choice fields: cycle through allowed values on Enter (no input prompt).
+  const enumValues = STRING_ENUMS[f.path];
+  if (enumValues && enumValues.length > 0) {
+    const current = getByPath(state.config, f.path);
+    const currentStr = current === null || current === undefined ? '' : String(current);
+    const idx = enumValues.indexOf(currentStr);
+    const nextVal = enumValues[(idx + 1) % enumValues.length];
+    const next = setByPath(state.config, f.path, nextVal);
+    return { ...state, config: next, statusMessage: null, statusKind: null };
+  }
   // String / number: open the prompt with the current value
   const current = getByPath(state.config, f.path);
   return { ...state, editBuffer: current === null || current === undefined ? '' : String(current) };
@@ -285,6 +297,9 @@ function commitEdit(state: ConfigState): ConfigState {
       // the user save an invalid file. Surface immediately. (v4.1.1)
       if (f.path === 'overageGuard.cooldownMs' && n < 0) {
         return { ...state, editBuffer: null, statusMessage: `overageGuard.cooldownMs must be >= 0 (got ${n})`, statusKind: 'error' };
+      }
+      if (f.path === 'sessionAffinity.ttlMs' && n < 0) {
+        return { ...state, editBuffer: null, statusMessage: `sessionAffinity.ttlMs must be >= 0 (got ${n})`, statusKind: 'error' };
       }
       parsed = n;
     }
@@ -338,7 +353,7 @@ function commitEdit(state: ConfigState): ConfigState {
  */
 const STRING_ENUMS: Record<string, readonly string[]> = {
   'overageGuard.behavior': ['halt', 'warn'],
-  'pool.strategy': ['headroom', 'fill-first'],
+  'pool.strategy': ['headroom', 'fill-first', 'round-robin'],
 };
 
 function doSave(state: ConfigState): ConfigState {

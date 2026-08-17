@@ -928,6 +928,10 @@ interface ProxyOptions {
    * `--pool-strategy` / `DARIO_POOL_STRATEGY` / config `pool.strategy`.
    */
   poolStrategy?: string;
+  /** Session affinity (sticky bindings) enabled. Default true. */
+  sessionAffinity?: boolean;
+  /** Session affinity idle TTL in ms. Default 3600000 (1h). */
+  sessionAffinityTtlMs?: number;
   /** Max concurrent in-flight requests. Default 10. dario#80. */
   maxConcurrent?: number;
   /** Max requests buffered waiting for a concurrency slot. Default 128. dario#80. */
@@ -1546,9 +1550,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const adminEnabled = process.env.DARIO_ADMIN === '1';
   const accountsList = await loadAllAccounts();
   const poolStrategy = resolvePoolStrategy(opts.poolStrategy);
-  const pool = new AccountPool(poolStrategy);
+  const pool = new AccountPool(poolStrategy, {
+    sessionAffinity: opts.sessionAffinity ?? true,
+    sessionAffinityTtlMs: opts.sessionAffinityTtlMs,
+  });
   if (poolStrategy !== 'headroom') {
-    console.log(`  Pool strategy: ${poolStrategy} (new conversations fill the alphabetically-first seat, spill at the 2% floor)`);
+    const desc = poolStrategy === 'fill-first'
+      ? 'new conversations fill the alphabetically-first seat, spill at the 2% floor'
+      : 'new conversations rotate across seats in alias order';
+    console.log(`  Pool strategy: ${poolStrategy} (${desc})`);
+  }
+  if (opts.sessionAffinity === false) {
+    console.log('  Session affinity: off (sticky bindings disabled — cache locality sacrificed for pure rotation)');
   }
   // Per-model rate-limit bucket families seen during this proxy run. First-
   // sight is logged once when verbose so a new Anthropic bucket (e.g. an
@@ -1647,6 +1660,22 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       }));
     }
   }
+
+  // Startup plan probe — discover each account's subscription tier so
+  // model-aware routing (e.g. fable → Max only) works from the first request.
+  // Best-effort: failures log and leave plan as null (unknown accounts pass
+  // through plan filters rather than being blocked).
+  if (!opts.noClaudeAuth && pool.size > 0) {
+    await Promise.all(pool.all().map(async (acc) => {
+      try {
+        const snapshot = await fetchQuota(acc.accessToken);
+        if (snapshot.plan) pool.updatePlan(acc.alias, snapshot.plan);
+      } catch {
+        // Non-fatal — plan stays null, account still routes for non-gated models.
+      }
+    }));
+  }
+
   // Background refresh — keep every account's token fresh without blocking requests
   const refreshInterval = setInterval(async () => {
     if (opts.noClaudeAuth) return; // never touch the Claude token in OpenAI-only mode
@@ -2401,12 +2430,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         try {
           const snapshot = await fetchQuota(a.accessToken);
           quotaCache.set(a.alias, { at: Date.now(), snapshot });
+          if (snapshot.plan) pool.updatePlan(a.alias, snapshot.plan);
           return { alias: a.alias, ...snapshot, cached: false };
         } catch (err) {
           return {
             alias: a.alias,
             windows: [],
             plan: null,
+            email: null,
             extraUsage: null,
             fetchedAt: Date.now(),
             cached: false,

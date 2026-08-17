@@ -151,12 +151,11 @@ function onKey(
     if (key.name === 'tab') {
       return switchTab(state, (state.activeTab + 1) % TABS.length, app, client, cleanupsByTab);
     }
-    // Hotkey jump
+    // Number-key jump (1–9 maps to tab index 0–8)
     if (key.name === 'printable' && !key.ctrl) {
-      for (let i = 0; i < TABS.length; i++) {
-        if (TABS[i].hotkey === key.ch) {
-          return switchTab(state, i, app, client, cleanupsByTab);
-        }
+      const digit = Number(key.ch);
+      if (digit >= 1 && digit <= TABS.length) {
+        return switchTab(state, digit - 1, app, client, cleanupsByTab);
       }
     }
   }

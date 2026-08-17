@@ -116,7 +116,16 @@ export interface DarioConfig {
      * first eligible seat until it drains to the 2% floor, then spills to
      * the next — primary/backup semantics, alias order is the knob.
      */
-    strategy?: 'headroom' | 'fill-first';
+    strategy?: 'headroom' | 'fill-first' | 'round-robin';
+  };
+
+  // Session affinity — pin multi-turn conversations to one account for
+  // prompt-cache locality. Reuses the existing sticky-binding mechanism.
+  sessionAffinity?: {
+    /** Enable session affinity routing. Default true. */
+    enabled?: boolean;
+    /** Idle TTL in milliseconds before a binding is reaped. Default 3600000 (1h). */
+    ttlMs?: number;
   };
 
   // Per-request overrides
@@ -235,6 +244,7 @@ export function defaultConfig(): DarioConfig {
     },
     queue: { maxConcurrent: null, maxQueued: null, timeoutMs: null },
     pool: { strategy: 'headroom' },
+    sessionAffinity: { enabled: true, ttlMs: 3_600_000 },
     effort: null,
     maxTokens: null,
     poolFallback: { model: null },
@@ -486,8 +496,18 @@ function sanitize(parsed: Record<string, unknown>): DarioConfig {
 
   if (isPlainObject(parsed.pool)) {
     out.pool = {};
-    if (parsed.pool.strategy === 'headroom' || parsed.pool.strategy === 'fill-first') {
+    if (parsed.pool.strategy === 'headroom' || parsed.pool.strategy === 'fill-first' || parsed.pool.strategy === 'round-robin') {
       out.pool.strategy = parsed.pool.strategy;
+    }
+  }
+
+  if (isPlainObject(parsed.sessionAffinity)) {
+    out.sessionAffinity = {};
+    if (typeof parsed.sessionAffinity.enabled === 'boolean') {
+      out.sessionAffinity.enabled = parsed.sessionAffinity.enabled;
+    }
+    if (typeof parsed.sessionAffinity.ttlMs === 'number' && Number.isFinite(parsed.sessionAffinity.ttlMs) && parsed.sessionAffinity.ttlMs >= 0) {
+      out.sessionAffinity.ttlMs = parsed.sessionAffinity.ttlMs;
     }
   }
 

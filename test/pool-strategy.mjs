@@ -72,7 +72,8 @@ header('resolvePoolStrategy');
   check('explicit fill-first wins', resolvePoolStrategy('fill-first', {}) === 'fill-first');
   check('explicit headroom wins over env', resolvePoolStrategy('headroom', { DARIO_POOL_STRATEGY: 'fill-first' }) === 'headroom');
   check('env fallback applies', resolvePoolStrategy(undefined, { DARIO_POOL_STRATEGY: 'fill-first' }) === 'fill-first');
-  check('invalid explicit falls through to env', resolvePoolStrategy('round-robin', { DARIO_POOL_STRATEGY: 'fill-first' }) === 'fill-first');
+  check('invalid explicit falls through to env', resolvePoolStrategy('nope', { DARIO_POOL_STRATEGY: 'fill-first' }) === 'fill-first');
+  check('round-robin explicit wins over env', resolvePoolStrategy('round-robin', { DARIO_POOL_STRATEGY: 'fill-first' }) === 'round-robin');
   check('invalid everywhere falls back to headroom', resolvePoolStrategy('nope', { DARIO_POOL_STRATEGY: 'also-nope' }) === 'headroom');
   check('case and whitespace tolerated', resolvePoolStrategy('  Fill-First ', {}) === 'fill-first');
 }

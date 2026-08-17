@@ -470,13 +470,26 @@ async function proxy() {
   // bindings behave identically under both.
   const poolStrategyFromFlag = args.find((a) => a.startsWith('--pool-strategy='))?.split('=')[1];
   if (poolStrategyFromFlag !== undefined
-      && poolStrategyFromFlag !== 'headroom' && poolStrategyFromFlag !== 'fill-first') {
-    console.error(`[dario] Invalid --pool-strategy "${poolStrategyFromFlag}". Must be headroom or fill-first.`);
+      && poolStrategyFromFlag !== 'headroom' && poolStrategyFromFlag !== 'fill-first' && poolStrategyFromFlag !== 'round-robin') {
+    console.error(`[dario] Invalid --pool-strategy "${poolStrategyFromFlag}". Must be headroom, fill-first, or round-robin.`);
     process.exit(1);
   }
   const poolStrategy = poolStrategyFromFlag
     ?? process.env['DARIO_POOL_STRATEGY']
     ?? fileCfg.pool?.strategy;
+
+  // Session affinity — pin multi-turn conversations to one account for
+  // prompt-cache locality. Default on. Disable with --no-session-affinity
+  // or config sessionAffinity.enabled=false.
+  const sessionAffinityFlag = args.includes('--no-session-affinity') ? false
+    : args.includes('--session-affinity') ? true : undefined;
+  const sessionAffinity = sessionAffinityFlag
+    ?? (process.env['DARIO_SESSION_AFFINITY'] === '0' ? false
+      : process.env['DARIO_SESSION_AFFINITY'] === '1' ? true : undefined)
+    ?? fileCfg.sessionAffinity?.enabled;
+  const sessionAffinityTtlMs = parsePositiveIntFlag('--session-affinity-ttl=')
+    ?? parsePositiveIntEnv(process.env['DARIO_SESSION_AFFINITY_TTL_MS'])
+    ?? fileCfg.sessionAffinity?.ttlMs;
 
   // --effort=low|medium|high|xhigh|ultracode|max|client — pin the outbound
   // output_config.effort (dario#87). Default (unset) forwards the client's
@@ -755,7 +768,7 @@ async function proxy() {
     process.exit(1);
   }
 
-  await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat });
+  await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, sessionAffinity, sessionAffinityTtlMs, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat });
 }
 
 /**
@@ -1650,15 +1663,25 @@ async function help() {
                              dario returns 504 "queue-timeout"
                              (default: 60000).
                              Env: DARIO_QUEUE_TIMEOUT_MS. (dario#80)
-    --pool-strategy=<headroom|fill-first>
+    --pool-strategy=<headroom|fill-first|round-robin>
                              Where new conversations land in a multi-
                              account pool. headroom (default) spreads
                              them to the seat with the most slack;
                              fill-first concentrates them on the
                              alphabetically-first eligible seat until
-                             it drains to the 2% floor, then spills.
+                             it drains to the 2% floor, then spills;
+                             round-robin cycles through seats in alias
+                             order to distribute quota evenly.
                              Sticky bindings are unaffected.
                              Env: DARIO_POOL_STRATEGY.
+    --session-affinity / --no-session-affinity
+                             Pin multi-turn conversations to one account
+                             for prompt-cache locality. Default: on.
+                             Env: DARIO_SESSION_AFFINITY (1 or 0).
+    --session-affinity-ttl=MS
+                             Idle TTL before a session binding expires.
+                             Default: 3600000 (1h).
+                             Env: DARIO_SESSION_AFFINITY_TTL_MS.
     --pool-fallback=<model>  When every pool seat is drained or cooling,
                              forward OpenAI-shape requests to the
                              configured openai-compat backend as <model>
