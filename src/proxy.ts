@@ -15,7 +15,7 @@ import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResp
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
 import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
-import { extractSessionAffinityKey } from './session-affinity.js';
+import { extractSessionAffinitySignals, selectSessionAffinitySignal, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
@@ -2627,6 +2627,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     let preserveToolsEffective: boolean = Boolean(opts.preserveTools);
     let poolAccount: PoolAccount | null = null;
     let stickyKey: string | null = null;
+    let affinitySignals: SessionAffinitySignal[] = [];
     let stickyLease: StickyLease | null = null;
     let routingHandle: RoutingTraceHandle | null = null;
     let routingStartedAt = 0;
@@ -2667,6 +2668,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           model: requestModel || null,
           family,
           stickyKey,
+          affinitySignals,
           bindingBefore,
           before,
           after,
@@ -2908,11 +2910,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // requestModel / detectedClientForLog / preserveToolsEffective are
       // declared at the outer try-scope above so the catch block can
       // include them in the request log line.
-      // Session affinity identity. It prefers explicit client/session IDs and
-      // provider body identifiers, then hashes the first user turn as a
-      // stable fallback. Header-only requests work immediately; JSON bodies
-      // enrich the identity after translation below.
-      stickyKey = extractSessionAffinityKey(req.headers, undefined);
+      // Header-only requests expose diagnostics immediately; parsing the body
+      // below enriches the candidates before the pool selection is committed.
+      affinitySignals = extractSessionAffinitySignals(req.headers, undefined);
+      stickyKey = selectSessionAffinitySignal(affinitySignals)?.key ?? null;
       // Outbound session id resolved once — either inside the template build
       // (so body metadata matches) or below for passthrough (no body build).
       let preBodySessionId: string | undefined;
@@ -2937,7 +2938,8 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           // back to a fresh parse when the earlier block didn't run (e.g. the body
           // was not JSON, or an OpenAI-backend reroute skipped it).
           const parsed = parsedBody ?? (JSON.parse(body.toString()) as Record<string, unknown>);
-          stickyKey = extractSessionAffinityKey(req.headers, parsed);
+          affinitySignals = extractSessionAffinitySignals(req.headers, parsed);
+          stickyKey = selectSessionAffinitySignal(affinitySignals)?.key ?? null;
           // Strip orchestration tags from messages (Aider, Cursor, etc.)
           sanitizeMessages(parsed, opts.preserveOrchestrationTags);
           // Tier-aware routing: under a forced --model, a Haiku-tier sub-agent

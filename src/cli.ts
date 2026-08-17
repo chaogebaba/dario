@@ -2446,12 +2446,16 @@ export function formatRoutingReport(payload: RoutingTraceReport): string {
       const affinity = event.affinity.fingerprint
         ? `${event.affinity.result}:${event.affinity.source}/${event.affinity.fingerprint}`
         : event.affinity.result;
+      const affinitySignals = event.affinity.signals ?? [];
+      const signals = affinitySignals.length > 0
+        ? ` signals=${affinitySignals.map((signal) => `${signal.selected ? '*' : ''}${signal.source}/${signal.fingerprint}${signal.bindingEligible ? '' : ':diagnostic'}`).join(',')}`
+        : '';
       const failovers = event.failovers.length > 0
         ? ` failover=${event.failovers.map((item) => `${item.from}->${item.to}:${item.status}`).join(',')}`
         : '';
       lines.push(
         `    #${event.req} ${event.status ?? 'in-flight'} ${event.family ?? '-'} -> ${event.selected ?? 'none'} `
-        + `${event.selectionReason} affinity=${affinity} cursor=${event.cursor.before ?? '-'}->${event.cursor.after ?? '-'}${failovers}`,
+        + `${event.selectionReason} affinity=${affinity}${signals} cursor=${event.cursor.before ?? '-'}->${event.cursor.after ?? '-'}${failovers}`,
       );
     }
   }

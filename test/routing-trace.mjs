@@ -40,6 +40,7 @@ function selectAndTrace(pool, store, req, key, family = 'sonnet') {
     model: 'claude-sonnet-4-6',
     family,
     stickyKey: key,
+    affinitySignals: [{ source: 'header:x-session-id', key, bindingEligible: true }],
     bindingBefore,
     before,
     after,
@@ -70,7 +71,54 @@ console.log('\nrouting trace: round-robin and affinity diagnosis');
   check('raw affinity ID is never serialized', !serialized.includes('secret-conversation-id'));
   check('request content and credential fields are absent', !serialized.includes('accessToken') && !serialized.includes('refreshToken'));
   check('fingerprint is stable and short', describeAffinity(rawKey).fingerprint?.length === 12);
+  check('selected source uses exact provenance', report.events[0].affinity.source === 'header:x-session-id');
+  check('signal provenance is redacted and present', report.events[0].affinity.signals[0].source === 'header:x-session-id'
+    && report.events[0].affinity.signals[0].fingerprint?.length === 12
+    && report.events[0].affinity.signals[0].selected === true);
   check('human formatter includes diagnosis and decisions', formatRoutingReport(report).includes('Recent decisions:'));
+  const oldDaemonReport = structuredClone(report);
+  delete oldDaemonReport.events[0].affinity.signals;
+  check('human formatter accepts reports from older daemons', formatRoutingReport(oldDaemonReport).includes('Recent decisions:'));
+}
+
+console.log('\nrouting trace: signal validation and bounds');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: true });
+  add(pool, 'alpha');
+  const store = new RoutingTraceStore();
+  const snapshot = pool.routingDiagnostic('opus');
+  const selectedKey = 'claude:selected-secret';
+  const candidates = Array.from({ length: 20 }, (_, index) => ({
+    source: 'body:conversation', key: `conversation:secret-${index}`, bindingEligible: true,
+  }));
+  candidates.push({ source: 'body:metadata.user_id.session_id', key: selectedKey, bindingEligible: true });
+  candidates.push({ source: 'untrusted:source', key: 'raw-invalid-secret', bindingEligible: true });
+  candidates.push({ source: 'body:conversation', key: 'x'.repeat(1025), bindingEligible: true });
+  const handle = store.start({
+    req: 1, method: 'POST', path: '/v1/messages', model: 'claude-opus-4-1', family: 'opus',
+    stickyKey: selectedKey, affinitySignals: candidates, bindingBefore: null,
+    before: snapshot, after: snapshot, selected: 'alpha',
+  });
+  handle.finish(200, 1);
+  const event = store.report(snapshot).events[0];
+  const serialized = JSON.stringify(event);
+  check('signal list is capped and retains the selected signal',
+    event.affinity.signals.length === 16 && event.affinity.signals.some((signal) => signal.selected));
+  check('invalid sources and oversized keys are rejected',
+    !serialized.includes('untrusted:source') && !serialized.includes('raw-invalid-secret'));
+  check('no raw candidate identifier is serialized',
+    !serialized.includes('selected-secret') && !serialized.includes('secret-0'));
+}
+
+console.log('\nrouting trace: same-family Opus sessions rotate and remain pinned');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: true });
+  add(pool, 'alpha');
+  add(pool, 'beta');
+  const store = new RoutingTraceStore();
+  check('first fresh Opus session selects alpha', selectAndTrace(pool, store, 1, 'claude:opus-a', 'opus') === 'alpha');
+  check('second fresh Opus session selects beta', selectAndTrace(pool, store, 2, 'claude:opus-b', 'opus') === 'beta');
+  check('first Opus session remains pinned', selectAndTrace(pool, store, 3, 'claude:opus-a', 'opus') === 'alpha');
 }
 
 console.log('\nrouting trace: single-affinity diagnosis and bounds');

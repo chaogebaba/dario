@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import type { RoutingCandidateDiagnostic, RoutingPoolDiagnostic, PoolStrategy } from './pool.js';
+import { SESSION_AFFINITY_SOURCES, type SessionAffinitySignal } from './session-affinity.js';
 
 export type AffinityResult = 'hit' | 'new' | 'rebind' | 'none' | 'disabled';
 export type RoutingSelectionReason =
@@ -16,8 +17,16 @@ export interface RoutingAffinityDiagnostic {
   enabled: boolean;
   source: string | null;
   fingerprint: string | null;
+  signals?: RoutingAffinitySignalDiagnostic[];
   bindingBefore: string | null;
   result: AffinityResult;
+}
+
+export interface RoutingAffinitySignalDiagnostic {
+  source: string;
+  fingerprint: string;
+  bindingEligible: boolean;
+  selected: boolean;
 }
 
 export interface RoutingFailoverDiagnostic {
@@ -74,6 +83,7 @@ export interface RoutingTraceStart {
   model: string | null;
   family: string | null;
   stickyKey: string | null;
+  affinitySignals?: readonly SessionAffinitySignal[];
   bindingBefore: string | null;
   before: RoutingPoolDiagnostic;
   after: RoutingPoolDiagnostic;
@@ -96,6 +106,43 @@ export function describeAffinity(stickyKey: string | null, salt: string | Buffer
     // client identifiers.
     fingerprint: createHash('sha256').update(salt).update(stickyKey).digest('hex').slice(0, 12),
   };
+}
+
+const MAX_AFFINITY_SIGNALS = 16;
+const MAX_AFFINITY_SIGNAL_KEY_LENGTH = 1024;
+const VALID_AFFINITY_SOURCES = new Set<string>(SESSION_AFFINITY_SOURCES);
+
+function describeAffinitySignals(
+  signals: readonly SessionAffinitySignal[] | undefined,
+  stickyKey: string | null,
+  salt: string | Buffer,
+): RoutingAffinitySignalDiagnostic[] {
+  const valid: SessionAffinitySignal[] = [];
+  const seen = new Set<string>();
+  for (const signal of signals ?? []) {
+    if (
+      !VALID_AFFINITY_SOURCES.has(signal.source)
+      || typeof signal.key !== 'string'
+      || signal.key.length === 0
+      || signal.key.length > MAX_AFFINITY_SIGNAL_KEY_LENGTH
+      || typeof signal.bindingEligible !== 'boolean'
+    ) continue;
+    const identity = `${signal.source}\0${signal.key}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    valid.push(signal);
+  }
+
+  const selected = valid.find((signal) => signal.bindingEligible && signal.key === stickyKey);
+  const retained = valid.slice(0, MAX_AFFINITY_SIGNALS);
+  if (selected && !retained.includes(selected)) retained[retained.length - 1] = selected;
+
+  return retained.map((signal) => ({
+    source: signal.source,
+    fingerprint: createHash('sha256').update(salt).update(signal.key).digest('hex').slice(0, 12),
+    bindingEligible: signal.bindingEligible,
+    selected: signal === selected,
+  }));
 }
 
 export function affinityResult(
@@ -158,6 +205,8 @@ export class RoutingTraceStore {
 
   start(input: RoutingTraceStart): RoutingTraceHandle {
     const described = describeAffinity(input.stickyKey, this.salt);
+    const signals = describeAffinitySignals(input.affinitySignals, input.stickyKey, this.salt);
+    const selectedSignal = signals.find((signal) => signal.selected);
     const result = affinityResult(
       input.before.sessionAffinity.enabled,
       input.stickyKey,
@@ -175,6 +224,8 @@ export class RoutingTraceStore {
       affinity: {
         enabled: input.before.sessionAffinity.enabled,
         ...described,
+        source: selectedSignal?.source ?? described.source,
+        signals,
         bindingBefore: input.bindingBefore,
         result,
       },
