@@ -248,8 +248,7 @@ function accountRowCost(account: AccountRow, hasQuota: boolean, hasUtil: boolean
 function accountHeader(account: AccountRow, selected: boolean, plan?: string | null): string {
   const marker = selected ? fg('cyan', '>') : ' ';
   const safeEmail = terminalText(account.quota?.email ?? '');
-  const emailNorm = safeEmail.replace(/@/g, '.').replace(/[^a-zA-Z0-9._-]/g, '');
-  const email = safeEmail && emailNorm !== account.alias ? '  ' + dim(safeEmail) : '';
+  const email = safeEmail ? `  ${dim('email ')}${safeEmail}` : '';
   const status = account.status && account.status !== 'unknown'
     ? '   ' + (account.status.includes('cooldown') || account.status === 'rejected'
       ? fg('yellow', terminalText(account.status))

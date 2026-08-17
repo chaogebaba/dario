@@ -109,6 +109,8 @@ export interface PoolAccount {
    */
   lastAuthFailureAt?: number;
   consecutiveAuthFailures: number;
+  /** Monotonic auth-failure version used to ignore stale successes. */
+  authFailureEpoch: number;
   /** Per-model quota cooldowns established by 429 responses. */
   rateLimitCooldowns: Record<string, RateLimitCooldown>;
   /** Monotonic rejection version used to ignore stale concurrent successes. */
@@ -405,6 +407,36 @@ export interface StickySelection {
   account: PoolAccount | null;
   lease: StickyLease | null;
 }
+
+export type RoutingIneligibleReason = IneligibleReason | 'plan-restricted';
+
+export interface RoutingCandidateDiagnostic {
+  alias: string;
+  plan: string | null;
+  requestCount: number;
+  eligible: boolean;
+  /** Whether the strategy can select this account now (floor-aware). */
+  selectionEligible: boolean;
+  reason: RoutingIneligibleReason | null;
+  headroom: number;
+  aboveHeadroomFloor: boolean;
+  measured: boolean;
+  rateLimitStatus: string;
+  cooldowns: Array<{ scope: string; until: string }>;
+}
+
+export interface RoutingPoolDiagnostic {
+  strategy: PoolStrategy;
+  family: string | null;
+  cursor: string | null;
+  cursors: Record<string, string>;
+  sessionAffinity: {
+    enabled: boolean;
+    ttlMs: number;
+    bindings: number;
+  };
+  candidates: RoutingCandidateDiagnostic[];
+}
 const STICKY_IDLE_TTL_MS_DEFAULT = 60 * 60 * 1000; // default 1h; overridden by sessionAffinity.ttlMs
 const STICKY_MAX_ENTRIES = 2_000;          // lazy cleanup cap
 const STICKY_CLEANUP_INTERVAL_MS = 30_000; // amortize the O(n) TTL/orphan sweep
@@ -530,6 +562,7 @@ export class AccountPool {
       requestCount: preserved?.requestCount ?? 0,
       lastAuthFailureAt: preserved?.lastAuthFailureAt,
       consecutiveAuthFailures: preserved?.consecutiveAuthFailures ?? 0,
+      authFailureEpoch: preserved?.authFailureEpoch ?? 0,
       rateLimitCooldowns: preserved?.rateLimitCooldowns ?? {},
       rejectionEpoch: preserved?.rejectionEpoch ?? 0,
     });
@@ -558,6 +591,7 @@ export class AccountPool {
     const account = this.accounts.get(alias);
     if (!account) return;
     const now = Date.now();
+    account.authFailureEpoch++;
     // Escalate the exponential cool-down only for a genuinely fresh failure.
     // A burst of concurrent in-flight requests that all 401 on the same account
     // (before the first cool-down takes hold) would otherwise bump the counter
@@ -578,9 +612,10 @@ export class AccountPool {
    * Failures and successes are alias-scoped: a success on account A never
    * clears account B's cool-down.
    */
-  clearAuthFailure(alias: string): void {
+  clearAuthFailure(alias: string, observedEpoch?: number): void {
     const account = this.accounts.get(alias);
     if (!account) return;
+    if (observedEpoch !== undefined && observedEpoch !== account.authFailureEpoch) return;
     if (account.consecutiveAuthFailures === 0 && !account.lastAuthFailureAt) return;
     account.lastAuthFailureAt = undefined;
     account.consecutiveAuthFailures = 0;
@@ -814,6 +849,54 @@ export class AccountPool {
     return this.sticky.get(this.stickyBindingKey(stickyKey, family))?.alias ?? null;
   }
 
+  /** Read-only router state for the local routing trace endpoint. */
+  routingDiagnostic(family?: string | null, now: number = Date.now()): RoutingPoolDiagnostic {
+    this.expireRateLimitCooldowns(now);
+    const normalizedFamily = family?.trim().toLowerCase() || null;
+    const candidates = [...this.accounts.values()]
+      .sort((a, b) => a.alias.localeCompare(b.alias))
+      .map((account): RoutingCandidateDiagnostic => {
+        const baseReason = ineligibleReason(account, now, normalizedFamily);
+        const reason: RoutingIneligibleReason | null = baseReason
+          ?? (planEligible(account, normalizedFamily) ? null : 'plan-restricted');
+        const headroom = computeHeadroom(account.rateLimit, normalizedFamily);
+        const cooldowns = Object.entries(account.rateLimitCooldowns ?? {})
+          .filter(([, cooldown]) => cooldown.until > now)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([scope, cooldown]) => ({ scope, until: new Date(cooldown.until).toISOString() }));
+        return {
+          alias: account.alias,
+          plan: account.plan ?? null,
+          requestCount: account.requestCount,
+          eligible: reason === null,
+          selectionEligible: false,
+          reason,
+          headroom: Math.max(0, Math.min(1, headroom)),
+          aboveHeadroomFloor: headroom > POOL_HEADROOM_FLOOR,
+          measured: account.rateLimit.measured,
+          rateLimitStatus: account.rateLimit.status,
+          cooldowns,
+        };
+      });
+    const hasAboveFloor = candidates.some((candidate) => candidate.eligible && candidate.aboveHeadroomFloor);
+    for (const candidate of candidates) {
+      candidate.selectionEligible = candidate.eligible && (!hasAboveFloor || candidate.aboveHeadroomFloor);
+    }
+
+    return {
+      strategy: this._strategy,
+      family: normalizedFamily,
+      cursor: this.roundRobinCursors.get(rateLimitScope(normalizedFamily)) ?? null,
+      cursors: Object.fromEntries([...this.roundRobinCursors.entries()].sort(([a], [b]) => a.localeCompare(b))),
+      sessionAffinity: {
+        enabled: this.stickyEnabled,
+        ttlMs: this.stickyIdleTtlMs,
+        bindings: this.sticky.size,
+      },
+      candidates,
+    };
+  }
+
   /**
    * Round-robin picker: cycle through eligible accounts in stable alias order.
    * Advances the internal index so each call picks the next account, distributing
@@ -907,7 +990,12 @@ export class AccountPool {
         account.rateLimit.status = snapshot.measured ? snapshot.status : 'unknown';
       }
     }
-    if (snapshot.measured) account.rateLimit = snapshot;
+    // A response dispatched before a newer rejection may arrive afterwards.
+    // Its headers are stale and must not overwrite the rejected snapshot even
+    // when the rejection cooldown itself is correctly preserved.
+    if (snapshot.measured && (observedRejectionEpoch === undefined || observedRejectionEpoch === account.rejectionEpoch)) {
+      account.rateLimit = snapshot;
+    }
     account.requestCount++;
   }
 

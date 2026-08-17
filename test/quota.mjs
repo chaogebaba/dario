@@ -17,6 +17,7 @@ import {
   buildQuotaWindows,
   findFableLimit,
   resolvePlan,
+  resolveProfileEmail,
   parseExtraUsage,
   parseResetInstant,
   formatResetInstant,
@@ -195,6 +196,19 @@ header('plan resolution');
     }) === 'Max');
 }
 
+header('profile email resolution');
+{
+  check('current account.email shape is accepted',
+    resolveProfileEmail({ account: { email: 'max@example.com' } }) === 'max@example.com');
+  check('legacy account.email_address shape is accepted',
+    resolveProfileEmail({ account: { email_address: 'legacy@example.com' } }) === 'legacy@example.com');
+  check('current field takes precedence over legacy',
+    resolveProfileEmail({ account: { email: 'new@example.com', email_address: 'old@example.com' } }) === 'new@example.com');
+  check('control characters are rejected',
+    resolveProfileEmail({ account: { email: 'bad@example.com\nspoof' } }) === null);
+  check('missing email returns null', resolveProfileEmail({ account: {} }) === null);
+}
+
 // ======================================================================
 header('reset formatting');
 {
@@ -247,9 +261,10 @@ header('fetchQuota — profile is best-effort, usage is not');
 
   // Happy path.
   const both = await fetchQuota('tok', async (url) =>
-    String(url).includes('/usage') ? json(LIVE) : json({ account: { has_claude_max: true } }));
+    String(url).includes('/usage') ? json(LIVE) : json({ account: { has_claude_max: true, email: 'max@example.com' } }));
   check('windows built', both.windows.length === 3);
   check('plan resolved', both.plan === 'Max');
+  check('email resolved from live profile shape', both.email === 'max@example.com');
   check('stamped', both.fetchedAt > 0);
 
   // A profile failure costs one line; losing the windows over it would be

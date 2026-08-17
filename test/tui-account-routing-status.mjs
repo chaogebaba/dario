@@ -29,6 +29,19 @@ const plain = rendered.replace(/\x1b\[[0-9;]*m/g, '');
 const ok = plain.includes('Plan Pro') && plain.includes('quota-cooldown');
 console.log(`${ok ? 'PASS' : 'FAIL'} plan and routing status render together`);
 
+const emailRendered = renderAccounts({
+  loading: false,
+  accounts: [{
+    alias: 'claudeMax',
+    expiresAt: Date.now() + 3_600_000,
+    quota: { windows: [], plan: 'Max', email: 'owner@example.com' },
+  }],
+  source: 'pool', error: null, selectedIdx: 0, mode: 'normal', editBuffer: null,
+  message: null, messageKind: null, authorizeUrl: null, pendingAction: null,
+}, { cols: 140, rows: 30 }).replace(/\x1b\[[0-9;]*m/g, '');
+const emailOk = emailRendered.includes('claudeMax  email owner@example.com');
+console.log(`${emailOk ? 'PASS' : 'FAIL'} account email renders as a labeled column`);
+
 const hostile = renderAccounts({
   loading: false,
   accounts: [{
@@ -61,4 +74,4 @@ const windowed = renderAccounts({
 const selectedVisible = windowed.includes('> seat-7') && !windowed.includes('> seat-0');
 console.log(`${selectedVisible ? 'PASS' : 'FAIL'} account window keeps the selected row visible`);
 
-process.exit(ok && safe && selectedVisible ? 0 : 1);
+process.exit(ok && emailOk && safe && selectedVisible ? 0 : 1);

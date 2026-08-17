@@ -264,6 +264,29 @@ export function resolvePlan(profile: unknown): string | null {
   return null;
 }
 
+/** Resolve the account email across current and legacy profile shapes. */
+export function resolveProfileEmail(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const profile = payload as Record<string, unknown>;
+  const account = profile.account && typeof profile.account === 'object'
+    ? profile.account as Record<string, unknown>
+    : null;
+  const candidates = [
+    account?.email,
+    account?.email_address,
+    account?.emailAddress,
+    profile.email,
+    profile.email_address,
+    profile.emailAddress,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const email = candidate.trim();
+    if (email.length > 0 && email.length <= 320 && !/[\u0000-\u001f\u007f]/.test(email)) return email;
+  }
+  return null;
+}
+
 /** Normalize the `extra_usage` block, null when absent. */
 export function parseExtraUsage(payload: unknown): ExtraUsage | null {
   const raw = (payload as { extra_usage?: unknown })?.extra_usage;
@@ -316,12 +339,7 @@ export async function fetchQuota(
   if (profileRes.status === 'fulfilled' && profileRes.value.ok) {
     const profileData = await profileRes.value.json().catch(() => null);
     plan = resolvePlan(profileData);
-    if (profileData && typeof profileData === 'object') {
-      const acct = (profileData as { account?: { email_address?: unknown } }).account;
-      if (acct && typeof acct.email_address === 'string') {
-        email = acct.email_address;
-      }
-    }
+    email = resolveProfileEmail(profileData);
   }
 
   return { windows, plan, email, extraUsage: parseExtraUsage(usage), fetchedAt: Date.now() };

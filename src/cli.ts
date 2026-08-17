@@ -31,6 +31,7 @@ import { parseOutboundProxy, installOutboundProxyWrapper, installEgressProxy, is
 import { checkEgressIp, egressIpUrl, recordDirectIp, recordEgressCheck, setEgressRoute } from './egress-ip.js';
 import { homeDir } from './home-dir.js';
 import { effectiveApiKey } from './config-file.js';
+import type { RoutingTraceReport } from './routing-trace.js';
 
 // `args` / `command` at module scope — command handlers below close over
 // `args` to read their own flags. Reading argv is harmless on import; only
@@ -1506,6 +1507,10 @@ async function help() {
                              \`dario doctor --usage\`. --port=N to target
                              a non-default port; --json for the raw
                              /analytics payload.
+    dario routing            Diagnose live account selection, affinity,
+                             candidate eligibility, cursor movement, and
+                             failovers from an in-memory redacted trace.
+                             --limit=N (1-256); --json for agent consumption.
     dario upgrade            npm install -g @askalf/dario@latest with a
                              pre-flight current-vs-latest check.
 
@@ -2410,6 +2415,92 @@ async function usage() {
   console.log('');
 }
 
+export function formatRoutingReport(payload: RoutingTraceReport): string {
+  const lines = [
+    '',
+    '  dario - Routing trace',
+    '  ---------------------',
+    '',
+    `  Diagnosis: ${payload.diagnosis.dominantCause}`,
+    `  ${payload.diagnosis.summary}`,
+    '',
+    `  Strategy: ${payload.pool.strategy}`,
+    `  Affinity: ${payload.pool.sessionAffinity.enabled ? 'on' : 'off'} (bindings=${payload.pool.sessionAffinity.bindings}, ttl=${payload.pool.sessionAffinity.ttlMs}ms)`,
+    `  Retained: ${payload.retained}/${payload.capacity}`,
+    '',
+    '  Candidates:',
+  ];
+  for (const candidate of payload.pool.candidates) {
+    const eligibility = !candidate.eligible
+      ? candidate.reason ?? 'ineligible'
+      : candidate.selectionEligible ? 'eligible' : 'floor-skipped';
+    const headroom = candidate.measured ? `${Math.round(candidate.headroom * 100)}% headroom` : 'headroom unknown';
+    lines.push(`    ${candidate.alias}  ${eligibility}  ${headroom}  requests=${candidate.requestCount}`);
+  }
+
+  lines.push('', '  Recent decisions:');
+  if (payload.events.length === 0) {
+    lines.push('    (none)');
+  } else {
+    for (const event of payload.events) {
+      const affinity = event.affinity.fingerprint
+        ? `${event.affinity.result}:${event.affinity.source}/${event.affinity.fingerprint}`
+        : event.affinity.result;
+      const failovers = event.failovers.length > 0
+        ? ` failover=${event.failovers.map((item) => `${item.from}->${item.to}:${item.status}`).join(',')}`
+        : '';
+      lines.push(
+        `    #${event.req} ${event.status ?? 'in-flight'} ${event.family ?? '-'} -> ${event.selected ?? 'none'} `
+        + `${event.selectionReason} affinity=${affinity} cursor=${event.cursor.before ?? '-'}->${event.cursor.after ?? '-'}${failovers}`,
+      );
+    }
+  }
+  lines.push('', '  Machine-readable: dario routing --json', '');
+  return lines.join('\n');
+}
+
+/** Inspect the running proxy's bounded, redacted pool-routing trace. */
+async function routing() {
+  const { loadConfig } = await import('./config-file.js');
+  const fileCfg = loadConfig().config;
+  const portArg = args.find((arg) => arg.startsWith('--port='));
+  const portFromCli = portArg ? Number(portArg.split('=')[1]) : undefined;
+  const portFromEnv = process.env['DARIO_PORT'] ? Number(process.env['DARIO_PORT']) : undefined;
+  const port = portFromCli ?? portFromEnv ?? fileCfg.port ?? 3456;
+  const limitArg = args.find((arg) => arg.startsWith('--limit='));
+  const limit = limitArg ? Number(limitArg.split('=')[1]) : 50;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error('[dario] --port must be an integer from 1 to 65535.');
+    process.exit(1);
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 256) {
+    console.error('[dario] --limit must be an integer from 1 to 256.');
+    process.exit(1);
+  }
+
+  const apiKey = effectiveApiKey();
+  let response: Response;
+  try {
+    response = await fetch(`http://127.0.0.1:${port}/routing/trace?limit=${limit}`, {
+      signal: AbortSignal.timeout(3000),
+      ...(apiKey ? { headers: { Authorization: `Bearer ${apiKey}` } } : {}),
+    });
+  } catch (err) {
+    console.error(`[dario] Routing trace proxy request failed on port ${port}: ${sanitizeError(err)}`);
+    process.exit(1);
+  }
+  if (!response.ok) {
+    console.error(`[dario] Routing trace returned HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    process.exit(1);
+  }
+  const payload = await response.json() as RoutingTraceReport;
+  if (args.includes('--json')) {
+    process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+  } else {
+    process.stdout.write(formatRoutingReport(payload));
+  }
+}
+
 /**
  * `dario tui` (or `dario` with no args) — opens the interactive
  * terminal UI. v4 entry point.
@@ -2548,6 +2639,7 @@ const commands: Record<string, () => Promise<void>> = {
   config,
   upgrade,
   usage,
+  routing,
   tui,
   help,
   version,

@@ -16,6 +16,7 @@ import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
 import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinityKey } from './session-affinity.js';
+import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
 import { notify as osNotify } from './notify.js';
@@ -1606,6 +1607,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     sessionAffinity: opts.sessionAffinity ?? true,
     sessionAffinityTtlMs: opts.sessionAffinityTtlMs,
   });
+  const routingTrace = new RoutingTraceStore(256);
   if (poolStrategy !== 'headroom') {
     const desc = poolStrategy === 'fill-first'
       ? 'new conversations fill the alphabetically-first seat, spill at the 2% floor'
@@ -1879,6 +1881,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     overlayTemplateHeaderValues(staticHeaders, CC_TEMPLATE.header_values);
   }
   let requestCount = 0;
+  let routingRequestCount = 0;
   const queue = new RequestQueue({
     maxConcurrent: opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
     maxQueued: opts.maxQueued ?? DEFAULT_MAX_QUEUED,
@@ -2356,6 +2359,36 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
+    // Detailed routing diagnostics are deliberately loopback-only even when
+    // the proxy API key is present. They contain aliases and quota state, but
+    // never raw affinity keys, request content, headers, or credentials.
+    if (urlPath === '/routing/trace') {
+      if (req.method !== 'GET') {
+        res.writeHead(405, JSON_HEADERS);
+        res.end(ERR_METHOD);
+        return;
+      }
+      const discloseRouting = shouldDiscloseHealthInternals({
+        authenticated: checkAuth(req),
+        keyConfigured: apiKeyBuf !== null,
+        loopback: isLoopbackAddr(req.socket?.remoteAddress),
+        viaCfRay: req.headers['cf-ray'] !== undefined,
+      });
+      if (!discloseRouting) {
+        res.writeHead(403, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'Forbidden', message: 'Routing diagnostics are available only from loopback.' }));
+        return;
+      }
+      const parsedUrl = new URL(req.url ?? '/routing/trace', `http://localhost:${port}`);
+      const rawLimit = Number(parsedUrl.searchParams.get('limit') ?? 50);
+      const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(256, Math.floor(rawLimit))) : 50;
+      const familyParam = parsedUrl.searchParams.get('family');
+      const family = familyParam && /^[a-z0-9-]{1,32}$/i.test(familyParam) ? familyParam : null;
+      res.writeHead(200, JSON_HEADERS);
+      res.end(JSON.stringify(routingTrace.report(pool.routingDiagnostic(family), limit)));
+      return;
+    }
+
     // Status endpoint
     if (urlPath === '/status') {
       const s = await currentStatus();
@@ -2595,6 +2628,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     let poolAccount: PoolAccount | null = null;
     let stickyKey: string | null = null;
     let stickyLease: StickyLease | null = null;
+    let routingHandle: RoutingTraceHandle | null = null;
+    let routingStartedAt = 0;
+    const recordRelease = (reason: RoutingReleaseReason): void => {
+      routingHandle?.release(reason);
+    };
     // Per-request: did isGenuineCCClient recognise the caller as real Claude
     // Code? Hoisted because the header build below needs it and `genuineCC` is
     // block-scoped where buildCCRequest destructures it. NOT the same thing as
@@ -2609,6 +2647,39 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // before surfacing an error to the client (see the dispatch loop below).
       let poolSelectionCommitted = false;
       let accessToken: string;
+      const commitPoolSelection = (family: string | null): PoolAccount | null => {
+        const before = pool.routingDiagnostic(family);
+        const bindingBefore = stickyKey ? pool.stickyAliasFor(stickyKey, family) : null;
+        const selection = stickyKey
+          ? pool.selectStickyWithLease(stickyKey, family)
+          : { account: pool.select(family), lease: null };
+        poolAccount = selection.account;
+        stickyLease = selection.lease;
+        poolSelectionCommitted = true;
+        accessToken = poolAccount?.accessToken ?? '';
+
+        const after = pool.routingDiagnostic(family);
+        routingStartedAt = Date.now();
+        routingHandle = routingTrace.start({
+          req: ++routingRequestCount,
+          method: req.method ?? '',
+          path: urlPath,
+          model: requestModel || null,
+          family,
+          stickyKey,
+          bindingBefore,
+          before,
+          after,
+          selected: poolAccount?.alias ?? null,
+        });
+        const handle = routingHandle;
+        const startedAt = routingStartedAt;
+        res.once('finish', () => handle.finish(res.statusCode, Date.now() - startedAt));
+        return poolAccount;
+      };
+      const recordFailover = (next: PoolAccount, status: number, reason: 'rate-limit' | 'auth'): void => {
+        routingHandle?.failover(next.alias, status, reason);
+      };
       if (upstreamApiKey) {
         // Per-token API-key mode: no OAuth, no pool selection. `poolAccount`
         // stays null, so every pool-failover retry below is skipped; the
@@ -2929,14 +3000,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // Rotating off mid-session costs cache-create on every turn.
             const family = modelFamily(requestModel);
             const previousAlias = poolAccount?.alias ?? 'none';
-            const stickySelection = stickyKey
-              ? pool.selectStickyWithLease(stickyKey, family)
-              : { account: pool.select(family), lease: null };
-            const preferred = stickySelection.account;
-            stickyLease = stickySelection.lease;
-            poolSelectionCommitted = true;
-            poolAccount = preferred;
-            accessToken = preferred?.accessToken ?? '';
+            const preferred = commitPoolSelection(family);
             if (preferred && verbose) {
               const action = stickyKey ? 'sticky' : 'pool.select';
               console.log(`[dario] #${requestCount} ${action}: ${previousAlias} → ${preferred.alias} (model=${requestModel}, family=${family ?? 'null'})`);
@@ -3132,13 +3196,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // forever and plan gates would be skipped for requests without text.
       if (!poolSelectionCommitted) {
         const family = modelFamily(requestModel);
-        const stickySelection = stickyKey
-          ? pool.selectStickyWithLease(stickyKey, family)
-          : { account: pool.select(family), lease: null };
-        poolAccount = stickySelection.account;
-        stickyLease = stickySelection.lease;
-        poolSelectionCommitted = true;
-        accessToken = poolAccount?.accessToken ?? '';
+        commitPoolSelection(family);
         if (verbose && poolAccount) {
           console.log(`[dario] #${requestCount} pool.select → ${poolAccount.alias} (strategy=${pool.strategy}, family=${family ?? 'null'})`);
         }
@@ -3367,6 +3425,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
       let upstream!: Response;
       let peekedBody: string | null = null;
+      let observedAuthFailureEpoch: number | undefined;
 
       // Inside-request 429 failover loop (v3.8.0). On a 429, pool mode tries
       // the next-best account before surfacing the error to the client.
@@ -3385,6 +3444,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // request to look like CC," and reordering is a form of shaping.
         const outboundHeaders = passthrough ? headers : orderHeadersForOutbound(headers);
         const observedRejectionEpoch = poolAccount?.rejectionEpoch;
+        observedAuthFailureEpoch = poolAccount?.authFailureEpoch;
         upstream = await upstreamFetch(targetBase, {
           method: req.method ?? 'POST',
           headers: outboundHeaders,
@@ -3655,12 +3715,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
             if (nextAccount) {
               triedAliases.add(nextAccount.alias);
+              recordFailover(nextAccount, 429, 'rate-limit');
               activatePoolAccount(nextAccount);
               stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
               peekedBody = null;
               continue dispatchLoop;
             }
             pool.releaseStickyLease(stickyLease);
+            recordRelease('terminal-429');
             stickyLease = null;
           }
           const enriched = enrich429(peekedBody, upstream.headers);
@@ -3727,6 +3789,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
         if (nextAccount) {
           triedAliases.add(nextAccount.alias);
+          recordFailover(nextAccount, upstream.status, 'auth');
           activatePoolAccount(nextAccount);
           stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
           continue dispatchLoop;
@@ -3734,6 +3797,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // No peer available — fall through to normal forwarding so the
         // client sees the upstream's 401/403. Don't swallow the error.
         pool.releaseStickyLease(stickyLease);
+        recordRelease('terminal-auth');
         stickyLease = null;
       }
 
@@ -3744,11 +3808,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
           if (nextAccount) {
             triedAliases.add(nextAccount.alias);
+            recordFailover(nextAccount, 429, 'rate-limit');
             activatePoolAccount(nextAccount);
             stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
             continue dispatchLoop;
           }
           pool.releaseStickyLease(stickyLease);
+          recordRelease('terminal-429');
           stickyLease = null;
         }
         // Pool-exhausted fallback: no peer left to fail over to. For an
@@ -3806,17 +3872,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // SessionAffinitySelector's failure invalidation.
       if (poolAccount && upstream.status >= 500 && upstream.status <= 599) {
         pool.releaseStickyLease(stickyLease);
+        recordRelease('upstream-5xx');
         stickyLease = null;
       }
 
       // Non-429 — exit dispatch loop and forward the response to client.
-      // Clear the auth-failure cool-down on the responding account if
-      // the upstream returned a 2xx — this account is healthy again,
-      // so its consecutive-failure counter resets. dario#234.
-      if (poolAccount && upstream.status >= 200 && upstream.status < 300) {
-        pool.clearAuthFailure(poolAccount.alias);
-        pool.confirmSticky(stickyLease);
-      }
+      // Auth cooldowns and affinity leases are confirmed only after the body
+      // is consumed below. Headers alone do not prove a request completed.
       break;
       } // end dispatchLoop: while (true)
 
@@ -3929,6 +3991,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // parking this handler forever and leaking its queue slot — the
         // dario#905 wedge. See waitForClientDrain in src/stream-drain.ts.
         const waitForDrain = () => waitForClientDrain(res, upstreamAbort.signal);
+        let streamCompleted = false;
         try {
           let buffer = '';
           const MAX_LINE_LENGTH = 1_000_000; // 1MB max per SSE line
@@ -4022,14 +4085,23 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             const tail = streamMapper.end();
             if (tail.length > 0) writeToClient(tail);
           }
+          streamCompleted = upstreamAbortReason === null;
         } catch (err) {
           if (verbose) console.error('[dario] Stream error:', sanitizeError(err));
           // Tear down the upstream body reader deterministically on an abnormal
           // mid-stream error (e.g. a bare upstream socket reset) so the undici
           // socket is released now, not at GC (#642-audit). No-op if aborted.
           if (!upstreamAbort.signal.aborted) upstreamAbort.abort();
+          if (poolAccount && upstream.status >= 200 && upstream.status < 300) {
+            pool.releaseStickyLease(stickyLease);
+            recordRelease('network');
+          }
         }
         res.end();
+        if (streamCompleted && poolAccount && upstream.status >= 200 && upstream.status < 300) {
+          pool.clearAuthFailure(poolAccount.alias, observedAuthFailureEpoch);
+          pool.confirmSticky(stickyLease);
+        }
         // Stamp the response-completion timestamp + token count so the
         // next request's think-time delay can model human read time.
         // Only on 2xx — error responses don't represent content the user
@@ -4087,6 +4159,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           }
         } else {
           res.end(responseBody);
+        }
+
+        if (poolAccount && upstream.status >= 200 && upstream.status < 300) {
+          pool.clearAuthFailure(poolAccount.alias, observedAuthFailureEpoch);
+          pool.confirmSticky(stickyLease);
         }
 
         let bufferedUsage: ReturnType<typeof Analytics.parseUsage> | null = null;
@@ -4152,7 +4229,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         if (verbose) console.log(`[dario] #${requestCount} aborted (client disconnected)`);
         writeLogLine(logFileStream, { ...errLogBase, reject: 'client-closed' });
       } else if (upstreamAbortReason === 'timeout') {
-        if (poolAccount) pool.releaseStickyLease(stickyLease);
+        if (poolAccount) {
+          pool.releaseStickyLease(stickyLease);
+          recordRelease('timeout');
+        }
         console.error(`[dario] #${requestCount} upstream timeout after ${upstreamTimeoutMs / 1000}s`);
         if (!res.headersSent) {
           res.writeHead(504, JSON_HEADERS);
@@ -4162,7 +4242,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         }
         writeLogLine(logFileStream, { ...errLogBase, status: 504, error: 'upstream-timeout' });
       } else {
-        if (poolAccount) pool.releaseStickyLease(stickyLease);
+        if (poolAccount) {
+          pool.releaseStickyLease(stickyLease);
+          recordRelease('network');
+        }
         // Log full error server-side, return generic message to client
         console.error('[dario] Proxy error:', sanitizeError(err));
         if (!res.headersSent) {

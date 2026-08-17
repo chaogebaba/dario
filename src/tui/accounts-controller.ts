@@ -1,5 +1,5 @@
 import { isValidAccountAlias } from '../account-alias.js';
-import { CLAUDE_PROFILE_URL } from '../quota.js';
+import { CLAUDE_PROFILE_URL, resolveProfileEmail } from '../quota.js';
 import type { TabContext } from './tab.js';
 import { AccountsQuotaStore } from './accounts-quota.js';
 import { initialAccountsState, type AccountsAction, type AccountsState } from './accounts-state.js';
@@ -87,6 +87,7 @@ export class AccountsController {
   private async performAdd(ctx: TabContext<AccountsState>, inputAlias: string): Promise<void> {
     const abortController = new AbortController();
     this.addAbortController = abortController;
+    let credentialsPersisted = false;
     try {
       const { listAccountAliases, addAccountViaOAuth } = await import('../accounts.js');
       const existing = await listAccountAliases();
@@ -112,6 +113,7 @@ export class AccountsController {
           });
         },
       });
+      credentialsPersisted = true;
       abortController.signal.throwIfAborted();
       ctx.setState({
         mode: 'finishing',
@@ -128,8 +130,8 @@ export class AccountsController {
             signal: AbortSignal.any([abortController.signal, AbortSignal.timeout(5000)]),
           });
           if (profileResponse.ok) {
-            const profile = await profileResponse.json() as { account?: { email_address?: string } };
-            const email = profile.account?.email_address;
+            const profile = await profileResponse.json();
+            const email = resolveProfileEmail(profile);
             const emailAlias = email?.replace(/@/g, '.').replace(/[^a-zA-Z0-9._-]/g, '') ?? '';
             if (isValidAccountAlias(emailAlias) && !taken.has(emailAlias.toLowerCase())) {
               const renamed = await ctx.client.renameAccount(alias, emailAlias);
@@ -154,7 +156,13 @@ export class AccountsController {
         authorizeUrl: null,
       });
     } catch (error) {
-      if (abortController.signal.aborted) return;
+      if (abortController.signal.aborted) {
+        // OAuth commits credentials before the optional profile lookup. If the
+        // user cancels during that post-commit phase, reconcile anyway so the
+        // live proxy does not wait for a restart to see the new account.
+        if (credentialsPersisted) await ctx.client.reconcilePool().catch(() => {});
+        return;
+      }
       const message = (error as Error).message ?? String(error);
       const hint = /callback server|EADDRINUSE/i.test(message)
         ? ' Try from CLI: dario accounts add --manual'
