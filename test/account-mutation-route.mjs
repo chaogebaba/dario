@@ -18,7 +18,7 @@ process.env.DARIO_IGNORE_CC_CREDENTIALS = '1';
 
 const { handleAccountRoute, parseAccountMutationPath } = await import('../dist/account-routes.js');
 const { getAccountsDir, saveAccount } = await import('../dist/accounts.js');
-const { AccountPool, reconcilePoolAccounts } = await import('../dist/pool.js');
+const { AccountPool, EMPTY_SNAPSHOT, reconcilePoolAccounts } = await import('../dist/pool.js');
 
 check('delete accepts exactly one encoded alias segment',
   JSON.stringify(parseAccountMutationPath('/accounts/name%20one')) === JSON.stringify({ action: 'delete', alias: 'name one' }));
@@ -88,6 +88,12 @@ try {
   const accountsBody = await accountsRes.json();
   check('GET /accounts is handled by the extracted route',
     accountsRes.status === 200 && accountsBody.accounts?.[0]?.alias === 'alpha');
+
+  pool.markRejected('alpha', { ...EMPTY_SNAPSHOT }, 'sonnet', 60_000);
+  const cooldownBody = await (await fetch(`${base}/accounts`)).json();
+  check('GET /accounts exposes model-scoped quota cooldowns',
+    cooldownBody.accounts?.[0]?.status === 'quota-cooldown'
+      && cooldownBody.accounts?.[0]?.cooldownScopes?.includes('sonnet'));
 
   await fetch(`${base}/quota`);
   await fetch(`${base}/quota`);

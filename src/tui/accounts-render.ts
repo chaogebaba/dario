@@ -156,7 +156,7 @@ function renderUtilTable(state: AccountsState, push: (line: string) => void, wid
   for (let index = 0; index < state.accounts.length; index++) {
     const account = state.accounts[index]!;
     push('');
-    push('  ' + accountHeader(account, index === state.selectedIdx));
+    push('  ' + accountHeader(account, index === state.selectedIdx, account.quota?.plan));
     if (!hasUtil || !isMeasured(account)) {
       push(!hasUtil
         ? '    ' + dim('~/.dario/accounts/' + account.alias + '.json')
@@ -177,10 +177,12 @@ function accountHeader(account: AccountRow, selected: boolean, plan?: string | n
   const emailNorm = account.quota?.email?.replace(/@/g, '.').replace(/[^a-zA-Z0-9._-]/g, '') ?? '';
   const email = account.quota?.email && emailNorm !== account.alias ? '  ' + dim(account.quota.email) : '';
   const status = account.status && account.status !== 'unknown'
-    ? '   ' + (account.status === 'auth-cooldown' ? fg('yellow', account.status) : dim(account.status))
+    ? '   ' + (account.status.includes('cooldown') || account.status === 'rejected'
+      ? fg('yellow', account.status)
+      : dim(account.status))
     : '';
   const planText = plan ? '   ' + dim('Plan ') + bold(plan) : '';
-  return `${marker} ${selected ? bold(account.alias) : account.alias}${email}  ${dim('token ')}${formatExpiry(account.expiresAt)}${planText || status}`;
+  return `${marker} ${selected ? bold(account.alias) : account.alias}${email}  ${dim('token ')}${formatExpiry(account.expiresAt)}${planText}${status}`;
 }
 
 function renderUtilWindows(

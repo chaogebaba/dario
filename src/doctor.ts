@@ -1046,7 +1046,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
       const sx = health?.sessions;
       if (sx && typeof sx.mode === 'string') {
         const detail = sx.mode === 'pool'
-          ? `${sx.stickyBindings ?? 0} sticky binding${sx.stickyBindings === 1 ? '' : 's'} — conversation→account affinity, lazily reaped (6h idle TTL, cap 2000)`
+          ? `${sx.stickyBindings ?? 0} sticky binding${sx.stickyBindings === 1 ? '' : 's'} — conversation→account affinity, lazily reaped (1h idle TTL, cap 2000)`
           : `${sx.active ?? 0} active session id${sx.active === 1 ? '' : 's'} — lazily reaped (LRU cap 1024, no background sweeper)`;
         checks.push({ status: 'info', label: 'Sessions', detail });
       }

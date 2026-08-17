@@ -126,24 +126,32 @@ function accountStatus(pool: AccountPool): Record<string, unknown> {
   const now = Date.now();
   const accounts = pool.all().map((account) => {
     const inCooldown = isInAuthCooldown(account, now);
+    const quotaCooldowns = Object.entries(account.rateLimitCooldowns)
+      .filter(([, cooldown]) => cooldown.until > now);
     const cooldownMs = inCooldown && account.lastAuthFailureAt
       ? Math.max(0, authCooldownMs(account.consecutiveAuthFailures) - (now - account.lastAuthFailureAt))
-      : 0;
+      : quotaCooldowns.reduce((max, [, cooldown]) => Math.max(max, cooldown.until - now), 0);
     return {
       alias: account.alias,
       util5h: account.rateLimit.util5h,
       util7d: account.rateLimit.util7d,
       claim: account.rateLimit.claim,
-      status: inCooldown ? 'auth-cooldown' : account.rateLimit.status,
+      status: inCooldown
+        ? 'auth-cooldown'
+        : quotaCooldowns.length > 0 ? 'quota-cooldown' : account.rateLimit.status,
       requestCount: account.requestCount,
       expiresInMs: Math.max(0, account.expiresAt - now),
       expiresAt: account.expiresAt,
       measuredAt: account.rateLimit.updatedAt,
-      ...(inCooldown
+      ...(inCooldown || quotaCooldowns.length > 0
         ? {
-            lastAuthFailureAt: account.lastAuthFailureAt,
-            consecutiveAuthFailures: account.consecutiveAuthFailures,
             cooldownMs,
+            ...(inCooldown
+              ? {
+                  lastAuthFailureAt: account.lastAuthFailureAt,
+                  consecutiveAuthFailures: account.consecutiveAuthFailures,
+                }
+              : { cooldownScopes: quotaCooldowns.map(([scope]) => scope) }),
           }
         : {}),
     };

@@ -238,7 +238,7 @@ header('plan-based routing: fable restricted to Max');
   check('sticky rejects Pro hint for fable, picks Max', stickyFable?.alias === 'max-account');
 
   // selectSticky: existing binding to Pro for fable should rebind to Max
-  pool.rebindSticky(computeStickyKey('bound-to-pro'), 'pro-account');
+  pool.rebindSticky(computeStickyKey('bound-to-pro'), 'pro-account', 'fable');
   const rebound = pool.selectSticky(computeStickyKey('bound-to-pro'), 'fable', Date.now(), proHint);
   check('sticky rebinds from Pro to Max for fable', rebound?.alias === 'max-account');
 }

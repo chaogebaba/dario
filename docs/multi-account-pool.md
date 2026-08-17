@@ -18,11 +18,11 @@ Each request picks the account with the highest headroom:
 headroom = 1 - max(util_5h, util_7d)
 ```
 
-The response's `anthropic-ratelimit-unified-*` headers are parsed back into the pool so the next selection sees fresh utilization. An account that returns a 429 is marked `rejected` and routed around until its window resets. When every account is exhausted, requests queue for up to 60 seconds waiting for headroom to reappear. Plan tiers mix freely in the same pool — dario doesn't care about tier, only headroom.
+The response's `anthropic-ratelimit-unified-*` headers are parsed back into the pool so the next selection sees fresh utilization. An account that returns a 429 enters a bounded, model-scoped exponential cooldown (honoring `Retry-After`) and is automatically eligible again; a quota reset also discards stale utilization. When every account is exhausted, requests queue for up to 60 seconds waiting for headroom to reappear. Plan restrictions still apply: Fable 5 is Max-only, while unrestricted families can use every eligible tier.
 
 ## Routing strategy
 
-Headroom spreading is the default and stays the right call when every seat is equal. `--pool-strategy=fill-first` (env `DARIO_POOL_STRATEGY`, config `pool.strategy`) flips to concentration: new conversations land on the **alphabetically-first** eligible seat until its headroom drains to the 2% floor, then spill to the next alias in line. Failover follows the same order — after a 429 the retry goes to the next alias, not the max-headroom seat.
+Headroom spreading is the default and stays the right call when every seat is equal. `--pool-strategy=round-robin` (env `DARIO_POOL_STRATEGY`, config `pool.strategy`) cycles cold bindings through eligible aliases in stable order, with an independent cursor per model family. `--pool-strategy=fill-first` flips to concentration: new conversations land on the **alphabetically-first** eligible seat until its headroom drains to the 2% floor, then spill to the next alias in line. Failover follows the configured selector and skips accounts in cooldown.
 
 Two situations where that beats spreading:
 
@@ -37,7 +37,7 @@ Multi-turn agent sessions pin to one account for the life of the conversation, s
 
 **The problem.** Claude prompt cache is scoped to `{account × cache_control key}`. When the pool rotates a long agent conversation across accounts on headroom alone, turn 1 builds a cache entry on account A, turn 2 lands on account B and reads nothing from A's cache — paying full cache-create cost again. For a long agent session that's a **5–10× token-cost multiplier** on every turn after the first.
 
-**The fix.** Dario hashes a conversation's first user message into a 16-hex-char `stickyKey` (SHA-256 truncated, deterministic) and binds the key to whichever account `select()` would have picked on turn 1. Subsequent turns re-use that account as long as it's still healthy (not rejected, token not near expiry, headroom > 2%). On 429 failover, dario rebinds the key to the new account so the next turn doesn't re-select the exhausted one. 6h TTL, 2,000-entry cap, lazy cleanup. No client cooperation required.
+**The fix.** Dario mirrors the upstream selector's identity precedence: explicit Claude/Codex/session headers first, then body session IDs, Claude metadata, prompt-cache/conversation IDs, and finally a stable first-user-turn hash. Bindings are namespaced by model family, so a conversation switching Sonnet and Fable retains the right seat for each model. Subsequent turns re-use the bound account as long as it's still healthy (not cooling, token not near expiry, headroom > 2%). On 429 or transient 5xx failover, dario releases/rebinds the key so the next turn doesn't re-select the failed account. The default TTL is 1h in config (with a 2,000-entry cap and lazy cleanup). No client cooperation is required when no explicit identity exists.
 
 ## Pool-exhausted fallback
 
@@ -56,7 +56,7 @@ dario proxy --pool-fallback=openrouter/anthropic/claude-3.5-sonnet
 
 ## In-flight 429 failover
 
-When a Claude request hits a 429 mid-flight, dario retries the *same request* against a different account before the client sees an error. The client sees one successful response; the pool sees the rejected account go cold until its window resets. Combined with session stickiness, long agent runs survive pool-level exhaustion without dropping user-facing turns.
+When a Claude request hits a 429 mid-flight, dario retries the *same request* against a different account before the client sees an error. The client sees one successful response; the pool cools the rejected model/account pair for a bounded interval and later admits it again. Combined with session stickiness, long agent runs survive pool-level exhaustion without dropping user-facing turns.
 
 ## Inspection
 

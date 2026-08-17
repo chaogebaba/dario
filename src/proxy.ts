@@ -14,7 +14,8 @@ import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
-import { AccountPool, computeStickyKey, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount } from './pool.js';
+import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount } from './pool.js';
+import { extractSessionAffinityKey } from './session-affinity.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
 import { notify as osNotify } from './notify.js';
@@ -36,6 +37,17 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — generous for large prompts
 const UPSTREAM_TIMEOUT_MS = 300_000; // 5 min — matches Anthropic SDK default
 const BODY_READ_TIMEOUT_MS = 30_000; // 30s — prevents slow-loris on body reads
 const DEFAULT_HOST = '127.0.0.1';
+
+/** Parse an upstream Retry-After header into bounded milliseconds. */
+function retryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1000);
+  const date = Date.parse(value);
+  if (!Number.isFinite(date)) return null;
+  const delta = date - Date.now();
+  return delta > 0 ? delta : null;
+}
 
 // A host is "loopback" if it's one of the well-known localhost literals.
 // Used to decide whether to warn at startup about binding to a reachable
@@ -2781,16 +2793,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // requestModel / detectedClientForLog / preserveToolsEffective are
       // declared at the outer try-scope above so the catch block can
       // include them in the request log line.
-      // Session stickiness key — hash of the first user message in this
-      // conversation. Populated inside the template-replay block below
-      // after the first user message is extracted for the build tag, then
-      // used to rebind the sticky slot on in-request 429 failover and on
-      // the eventual request bookkeeping. Null when body isn't JSON, when
-      // there's no user message, or when we're in passthrough mode (the
-      // fingerprint work doesn't run, so there's no point biasing account
-      // selection toward one we already paid cache cost on — passthrough
-      // users aren't doing template replay anyway).
-      let stickyKey: string | null = null;
+      // Session affinity identity. It prefers explicit client/session IDs and
+      // provider body identifiers, then hashes the first user turn as a
+      // stable fallback. Header-only requests work immediately; JSON bodies
+      // enrich the identity after translation below.
+      let stickyKey: string | null = extractSessionAffinityKey(req.headers, undefined);
       // Outbound session id resolved once — either inside the template build
       // (so body metadata matches) or below for passthrough (no body build).
       let preBodySessionId: string | undefined;
@@ -2826,6 +2833,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           const result = isOpenAI ? openaiToAnthropic(parsed, effectiveOverride) : (effectiveOverride ? { ...parsed, model: effectiveOverride } : parsed);
           const r = result as Record<string, unknown>;
           requestModel = (r.model as string || '').toLowerCase();
+          stickyKey = extractSessionAffinityKey(req.headers, r);
           // Suspended-model guard. Empty by default (Fable 5 returned globally
           // 2026-07-01, so nothing is suspended out of the box). Operators can
           // still suspend a family via DARIO_SUSPENDED_MODELS — e.g. a model
@@ -2875,11 +2883,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             // If this is a follow-up turn, the key resolves to the account
             // that already has the Anthropic prompt cache warmed for it.
             // Rotating off mid-session costs cache-create on every turn.
-            stickyKey = computeStickyKey(userMsg);
             const family = modelFamily(requestModel);
             const previousAlias = poolAccount?.alias ?? 'none';
             const preferred = stickyKey
-              ? pool.selectSticky(stickyKey, family)
+              ? pool.selectSticky(stickyKey, family, Date.now(), poolAccount)
               : pool.select(family);
             poolSelectionCommitted = true;
             poolAccount = preferred;
@@ -3079,7 +3086,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // forever and plan gates would be skipped for requests without text.
       if (!poolSelectionCommitted) {
         const family = modelFamily(requestModel);
-        poolAccount = pool.select(family);
+        poolAccount = stickyKey
+          ? pool.selectSticky(stickyKey, family, Date.now(), poolAccount)
+          : pool.select(family);
         poolSelectionCommitted = true;
         accessToken = poolAccount?.accessToken ?? '';
         if (verbose && poolAccount) {
@@ -3328,10 +3337,21 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // RateLimitSnapshot.measured.
         if (poolAccount) {
           const snapshot = parseRateLimits(upstream.headers);
+          const requestFamily = modelFamily(requestModel);
           if (upstream.status === 429) {
-            pool.markRejected(poolAccount.alias, snapshot);
+            pool.markRejected(
+              poolAccount.alias,
+              snapshot,
+              requestFamily,
+              retryAfterMs(upstream.headers.get('retry-after')),
+            );
           } else {
-            pool.updateRateLimits(poolAccount.alias, snapshot);
+            pool.updateRateLimits(
+              poolAccount.alias,
+              snapshot,
+              requestFamily,
+              upstream.status >= 200 && upstream.status < 300,
+            );
           }
           // First-sight detector for per-model rate-limit buckets. Anthropic
           // ships these unannounced — e.g. `7d_sonnet-utilization` appeared
@@ -3571,10 +3591,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               accessToken = nextAccount.accessToken;
               headers['Authorization'] = `Bearer ${accessToken}`;
               headers['x-claude-code-session-id'] = resolveOutboundSession(nextAccount, clientSessionKey).sessionId;
-              pool.rebindSticky(stickyKey, nextAccount.alias);
+              pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
               peekedBody = null;
               continue dispatchLoop;
             }
+            pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
           }
           const enriched = enrich429(peekedBody, upstream.headers);
           const responseHeaders: Record<string, string> = {
@@ -3644,11 +3665,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           accessToken = nextAccount.accessToken;
           headers['Authorization'] = `Bearer ${accessToken}`;
           headers['x-claude-code-session-id'] = resolveOutboundSession(nextAccount, clientSessionKey).sessionId;
-          pool.rebindSticky(stickyKey, nextAccount.alias);
+          pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
           continue dispatchLoop;
         }
         // No peer available — fall through to normal forwarding so the
         // client sees the upstream's 401/403. Don't swallow the error.
+        pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
       }
 
       // Enrich 429 errors with rate limit details from headers (Anthropic only returns "Error")
@@ -3662,9 +3684,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             accessToken = nextAccount.accessToken;
             headers['Authorization'] = `Bearer ${accessToken}`;
             headers['x-claude-code-session-id'] = resolveOutboundSession(nextAccount, clientSessionKey).sessionId;
-            pool.rebindSticky(stickyKey, nextAccount.alias);
+            pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
             continue dispatchLoop;
           }
+          pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
         }
         // Pool-exhausted fallback: no peer left to fail over to. For an
         // OpenAI-shape request with the fallback armed, re-point the
@@ -3713,6 +3736,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         res.writeHead(429, responseHeaders);
         res.end(enriched);
         return;
+      }
+
+      // A transient upstream failure must not keep a conversation pinned to
+      // the account that just failed. The next turn will use the configured
+      // selector and can establish a fresh binding, matching the upstream
+      // SessionAffinitySelector's failure invalidation.
+      if (poolAccount && upstream.status >= 500 && upstream.status <= 599) {
+        pool.releaseSticky(stickyKey, modelFamily(requestModel), poolAccount.alias);
       }
 
       // Non-429 — exit dispatch loop and forward the response to client.

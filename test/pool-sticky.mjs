@@ -254,14 +254,14 @@ header('multi-conversation — distinct keys bind to distinct accounts');
 //  idle-based TTL — the binding timer measures time since LAST use, not
 //  creation, so a long-running active session is never rebound out from
 //  under its warm prompt cache. `now` is injected (same convention as the
-//  auth-cooldown tests tampering lastAuthFailureAt) since we can't sleep 6h.
+//  auth-cooldown tests tampering lastAuthFailureAt) since we can't sleep 1h.
 //  Tokens are given a far-future expiry so the synthetic clock doesn't trip
 //  the 30s token-expiry guard inside selectSticky.
 // ======================================================================
 const HOUR = 3600_000;
 const FAR = 72 * HOUR; // token expiry well past the synthetic timeline
 
-header('idle TTL — an actively-used binding survives past the 6h AGE mark');
+header('idle TTL — an actively-used binding survives past the 1h AGE mark');
 {
   const pool = new AccountPool();
   addAccount(pool, 'alpha', { util5h: 0.1, expiresInMs: FAR });
@@ -270,15 +270,15 @@ header('idle TTL — an actively-used binding survives past the 6h AGE mark');
   const t0 = Date.now();
 
   check('binds to alpha at t0', pool.selectSticky(key, null, t0)?.alias === 'alpha');
-  // Keep taking turns across many hours — each hit refreshes the idle timer,
-  // so the binding never crosses 6h of *idleness* even though its age does.
-  check('turn at t0+5h still alpha', pool.selectSticky(key, null, t0 + 5 * HOUR)?.alias === 'alpha');
-  check('turn at t0+9h still alpha (age > 6h, idle never > 6h)', pool.selectSticky(key, null, t0 + 9 * HOUR)?.alias === 'alpha');
-  check('turn at t0+14h still alpha', pool.selectSticky(key, null, t0 + 14 * HOUR)?.alias === 'alpha');
+  // Keep taking turns every 30-60 minutes — each hit refreshes the idle timer,
+  // so the binding never crosses 1h of *idleness* even though its age does.
+  check('turn at t0+30m still alpha', pool.selectSticky(key, null, t0 + 30 * 60_000)?.alias === 'alpha');
+  check('turn at t0+90m still alpha (age > 1h, idle <= 1h)', pool.selectSticky(key, null, t0 + 90 * 60_000)?.alias === 'alpha');
+  check('turn at t0+150m still alpha', pool.selectSticky(key, null, t0 + 150 * 60_000)?.alias === 'alpha');
   check('exactly one binding throughout (never rebound)', pool.stickyCount() === 1);
 }
 
-header('idle TTL — a binding idle past 6h is reaped and re-picks the current best');
+header('idle TTL — a binding idle past 1h is reaped and re-picks the current best');
 {
   const pool = new AccountPool();
   addAccount(pool, 'alpha', { util5h: 0.1, expiresInMs: FAR }); // best at t0
@@ -290,10 +290,10 @@ header('idle TTL — a binding idle past 6h is reaped and re-picks the current b
   // alpha drains so a FRESH selection would now prefer beta — but alpha still
   // has 0.4 headroom, above the 2% floor, so stickiness holds it within the TTL.
   pool.updateRateLimits('alpha', { ...EMPTY_SNAPSHOT, util5h: 0.6, status: 'ok', measured: true, updatedAt: Date.now() });
-  check('return at t0+3h stays on alpha (within idle TTL)', pool.selectSticky(key, null, t0 + 3 * HOUR)?.alias === 'alpha');
-  // That t0+3h hit re-based the timer; 7h later (idle > 6h) the binding is reaped
+  check('return at t0+30m stays on alpha (within idle TTL)', pool.selectSticky(key, null, t0 + 30 * 60_000)?.alias === 'alpha');
+  // That t0+30m hit re-based the timer; 90m later (idle > 1h) the binding is reaped
   // and the returning conversation re-picks the current best, which is now beta.
-  check('return at t0+10h reaped → re-picks beta', pool.selectSticky(key, null, t0 + 10 * HOUR)?.alias === 'beta');
+  check('return at t0+2h reaped → re-picks beta', pool.selectSticky(key, null, t0 + 2 * HOUR)?.alias === 'beta');
   check('still one binding after reap+rebind', pool.stickyCount() === 1);
   check('binding now points at beta', pool.stickyAliasFor(key) === 'beta');
 }

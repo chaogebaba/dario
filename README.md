@@ -143,7 +143,7 @@ dario proxy
 Three things it does that a round-robin doesn't:
 
 - **Per-model headroom routing.** Anthropic meters each model family separately — a `5h` bucket, a `7d` bucket, and a per-model `7d_<family>` bucket. dario reads all of them off every response and routes each request by the bucket that governs it: an Opus call to the seat with Opus room, a Sonnet call to the seat with Sonnet room, independently. Plan tiers mix freely — dario cares about headroom, not tier.
-- **Session stickiness.** Claude's prompt cache is scoped to `{account × cache key}`, so rotating a long conversation across seats on headroom alone re-pays cache-create every turn — a **5–10× token-cost multiplier** on the cached portion. dario pins each conversation to one account (hashed from its first message, deterministic) for the life of the session, and rebinds only when that account is exhausted.
+- **Session stickiness.** Claude's prompt cache is scoped to `{account × cache key}`, so rotating a long conversation across seats on headroom alone re-pays cache-create every turn — a **5–10× token-cost multiplier** on the cached portion. dario uses explicit session/body identifiers when available and falls back to a deterministic first-turn hash; bindings are model-scoped and rebind only when that account is unavailable.
 - **In-flight 429 failover.** A seat hits its wall mid-request and dario retries the *same request* against the next-best account before your client ever sees an error. The sticky binding follows to the new seat, so the next turn doesn't re-select the cold one.
 
 ```

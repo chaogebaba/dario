@@ -2,22 +2,9 @@
 // Pool eligibility — the predicate `select()` filters on, and the invariant
 // every diagnostic that reports "what will serve next" depends on.
 //
-// `select()` does not return only eligible accounts. When nothing is
-// eligible it falls back to the earliest-reset account, and failing that to
-// the least-used one, so the caller gets *something* rather than null. That
-// is deliberate — an unmeasured account has to be tried before it can be
-// measured — but it means a non-null return is not a promise that the
-// account can serve.
-//
-// `dario doctor` read it as one. On a pool of one whose token had expired
-// three months earlier it printed:
-//
-//   [WARN]  Pool             pool of 1, 1 expired
-//   [INFO]  Pool routing     next: login  (max-headroom select; 0/1 healthy)
-//
-// naming a seat that answers every request with a 401. `ineligibleReason`
-// is the router's own filter, extracted so a diagnostic asks the same
-// question rather than re-deriving a subtly different one.
+// Selection and diagnostics share one eligibility predicate. When every
+// account is expired or cooling, selection returns null instead of dispatching
+// a request that is already known to fail.
 
 import { AccountPool, EMPTY_SNAPSHOT, ineligibleReason, authCooldownMs } from '../dist/pool.js';
 
@@ -39,6 +26,7 @@ const acct = (over = {}) => ({
   expiresAt: NOW + 3600_000,
   rateLimit: { ...EMPTY_SNAPSHOT },
   consecutiveAuthFailures: 0,
+  rateLimitCooldowns: {},
   ...over,
 });
 
@@ -62,7 +50,10 @@ header('ineligibleReason — one cause per state');
     ineligibleReason(acct({ expiresAt: NOW + 31_000 }), NOW) === null);
 
   check('a rejected (429) account is ineligible',
-    ineligibleReason(acct({ rateLimit: { ...EMPTY_SNAPSHOT, status: 'rejected' } }), NOW) === 'rate-limited');
+    ineligibleReason(acct({
+      rateLimit: { ...EMPTY_SNAPSHOT, status: 'rejected' },
+      rateLimitCooldowns: { '*': { until: NOW + 1000, backoffLevel: 1 } },
+    }), NOW) === 'rate-limited');
 
   check('an account inside its auth cool-down is ineligible',
     ineligibleReason(acct({ lastAuthFailureAt: NOW - 1000, consecutiveAuthFailures: 1 }), NOW) === 'auth-cooldown');
@@ -89,7 +80,7 @@ header('ineligibleReason — one cause per state');
 }
 
 // ======================================================================
-header('select() still falls back — a non-null return is not a promise');
+header('select() fails closed when every account is unavailable');
 {
   const pool = new AccountPool();
   pool.add('dead', {
@@ -99,18 +90,11 @@ header('select() still falls back — a non-null return is not a promise');
   });
 
   const next = pool.select();
-  // If this ever changes to null, doctor's guard becomes dead code rather
-  // than wrong — but the routing change would be the news, so pin it.
-  check('select() returns the expired account anyway', next?.alias === 'dead');
-  check('and the predicate flags it', ineligibleReason(next) === 'expired');
-  check('so the two disagree — which is the whole point of asking',
-    next !== null && ineligibleReason(next) !== null);
+  check('select() returns null for the expired-only pool', next === null);
 
   const st = pool.status();
   check('status() counts it as unhealthy', st.healthy === 0 && st.exhausted === 1);
-  // bestAccount is documented as "what select() returns", so it names the
-  // same seat. Anything rendering it for humans needs the predicate too.
-  check('bestAccount names it regardless', st.bestAccount === 'dead');
+  check('bestAccount truthfully reports none', st.bestAccount === 'none');
 }
 
 // ======================================================================

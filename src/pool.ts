@@ -109,6 +109,13 @@ export interface PoolAccount {
    */
   lastAuthFailureAt?: number;
   consecutiveAuthFailures: number;
+  /** Per-model quota cooldowns established by 429 responses. */
+  rateLimitCooldowns: Record<string, RateLimitCooldown>;
+}
+
+interface RateLimitCooldown {
+  until: number;
+  backoffLevel: number;
 }
 
 /**
@@ -152,11 +159,40 @@ export type IneligibleReason = 'expired' | 'auth-cooldown' | 'rate-limited';
 export function ineligibleReason(
   account: PoolAccount,
   now: number = Date.now(),
+  family?: string | null,
 ): IneligibleReason | null {
   if (account.expiresAt <= now + 30_000) return 'expired';
   if (isInAuthCooldown(account, now)) return 'auth-cooldown';
-  if (account.rateLimit.status === 'rejected') return 'rate-limited';
+  if (isInRateLimitCooldown(account, family, now)) return 'rate-limited';
   return null;
+}
+
+const RATE_LIMIT_COOLDOWN_BASE_MS = 1_000;
+const RATE_LIMIT_COOLDOWN_MAX_MS = 30 * 60 * 1000;
+const GLOBAL_RATE_LIMIT_SCOPE = '*';
+
+function rateLimitScope(family?: string | null): string {
+  return family?.trim().toLowerCase() || GLOBAL_RATE_LIMIT_SCOPE;
+}
+
+export function rateLimitCooldownMs(backoffLevel: number): number {
+  const level = Math.max(0, Math.floor(backoffLevel));
+  return Math.min(RATE_LIMIT_COOLDOWN_BASE_MS * Math.pow(2, level), RATE_LIMIT_COOLDOWN_MAX_MS);
+}
+
+export function isInRateLimitCooldown(
+  account: PoolAccount,
+  family?: string | null,
+  now: number = Date.now(),
+): boolean {
+  const global = account.rateLimitCooldowns?.[GLOBAL_RATE_LIMIT_SCOPE];
+  if (global && global.until > now) return true;
+  const scoped = account.rateLimitCooldowns?.[rateLimitScope(family)];
+  return Boolean(scoped && scoped.until > now);
+}
+
+function hasActiveRateLimitCooldown(account: PoolAccount, now: number): boolean {
+  return Object.values(account.rateLimitCooldowns ?? {}).some((cooldown) => cooldown.until > now);
 }
 
 export interface PoolStatus {
@@ -321,8 +357,8 @@ export function computeHeadroom(snapshot: RateLimitSnapshot, family?: string | n
 }
 
 /**
- * Session stickiness binding — ties a conversation key (derived from the
- * first user message) to one account so multi-turn agent sessions don't
+ * Session stickiness binding — ties a prioritized explicit/body/fallback
+ * conversation key to one account so multi-turn agent sessions don't
  * rotate accounts mid-conversation and destroy the Anthropic prompt cache.
  *
  * Prompt cache on Claude Max is scoped to `{account × cache_control key}`.
@@ -333,12 +369,12 @@ export function computeHeadroom(snapshot: RateLimitSnapshot, family?: string | n
  *
  * Stickiness: bind the conversation's stickyKey to an account for the life
  * of that conversation, and fall off only when the bound account is
- * exhausted / rejected. The 6-hour TTL is measured from a binding's LAST
+ * exhausted / rejected. The 1-hour TTL is measured from a binding's LAST
  * use, not its creation: an actively-running session refreshes the timer on
  * every turn (see selectSticky), so it is never rebound out from under a
- * warm prompt cache — agent sessions routinely run past 6h, and an age-based
+ * warm prompt cache — agent sessions routinely run past 1h, and an age-based
  * TTL would force such a session onto a cold account mid-conversation. A
- * conversation that goes quiet is reaped 6h after its final turn; by then
+ * conversation that goes quiet is reaped 1h after its final turn; by then
  * its cache has long expired (Anthropic prompt cache lives at most 1h) and a
  * "same" conversation returning would start fresh anyway, so rebinding is free.
  */
@@ -347,7 +383,7 @@ interface StickyBinding {
   boundAt: number;    // creation time — retained for observability/debugging
   lastUsedAt: number; // last time this binding was returned; drives the idle TTL and LRU eviction
 }
-const STICKY_IDLE_TTL_MS_DEFAULT = 6 * 60 * 60 * 1000; // default 6h; overridden by sessionAffinity.ttlMs
+const STICKY_IDLE_TTL_MS_DEFAULT = 60 * 60 * 1000; // default 1h; overridden by sessionAffinity.ttlMs
 const STICKY_MAX_ENTRIES = 2_000;          // lazy cleanup cap
 const STICKY_CLEANUP_INTERVAL_MS = 30_000; // amortize the O(n) TTL/orphan sweep
 
@@ -421,7 +457,7 @@ export class AccountPool {
   // Alias most recently returned by round-robin. An alias cursor remains
   // correct when failover/exhaustion changes the candidate set; an array index
   // can point at a different account after filtering.
-  private roundRobinCursor: string | null = null;
+  private roundRobinCursors = new Map<string, string>();
   // Session affinity (sticky bindings) toggle + TTL.
   private readonly stickyEnabled: boolean;
   private readonly stickyIdleTtlMs: number;
@@ -469,6 +505,7 @@ export class AccountPool {
       requestCount: preserved?.requestCount ?? 0,
       lastAuthFailureAt: preserved?.lastAuthFailureAt,
       consecutiveAuthFailures: preserved?.consecutiveAuthFailures ?? 0,
+      rateLimitCooldowns: preserved?.rateLimitCooldowns ?? {},
     });
   }
 
@@ -541,9 +578,10 @@ export class AccountPool {
     if (this.accounts.size === 0) return null;
 
     const now = Date.now();
+    this.expireRateLimitCooldowns(now);
     const all = [...this.accounts.values()];
 
-    let eligible = all.filter(a => ineligibleReason(a, now) === null);
+    let eligible = all.filter(a => ineligibleReason(a, now, family) === null);
 
     // Plan-based filtering: e.g. fable → Max only. This is a HARD gate —
     // if no eligible account has the required plan, return null rather than
@@ -571,20 +609,7 @@ export class AccountPool {
       return pickMaxHeadroom(eligible, family);
     }
 
-    // All accounts exhausted — return the one with the earliest reset.
-    // Auth-cooldown'd accounts are excluded from this fallback too: we
-    // know upstream rejected their tokens, so picking them on rate-limit
-    // grounds wouldn't help. Better to return null and let the caller
-    // surface "no account available" than to hand back a dead account.
-    const withReset = all.filter(a => a.rateLimit.reset > 0 && !isInAuthCooldown(a, now));
-    if (withReset.length > 0) {
-      return withReset.reduce((a, b) => a.rateLimit.reset < b.rateLimit.reset ? a : b);
-    }
-
-    // No rate-limit data at all — least-used first, still skipping cool-downs.
-    const usable = all.filter(a => !isInAuthCooldown(a, now));
-    if (usable.length === 0) return null;
-    return usable.reduce((a, b) => a.requestCount < b.requestCount ? a : b);
+    return null;
   }
 
   /**
@@ -613,14 +638,13 @@ export class AccountPool {
     }
     this.cleanupSticky(now);
 
-    const binding = this.sticky.get(stickyKey);
+    const bindingKey = this.stickyBindingKey(stickyKey, family);
+    const binding = this.sticky.get(bindingKey);
     if (binding) {
       const bound = this.accounts.get(binding.alias);
       if (bound
         && now - binding.lastUsedAt <= this.stickyIdleTtlMs
-        && bound.rateLimit.status !== 'rejected'
-        && bound.expiresAt > now + 30_000
-        && !isInAuthCooldown(bound, now)
+        && ineligibleReason(bound, now, family) === null
         && computeHeadroom(bound.rateLimit, family) > POOL_HEADROOM_FLOOR
         && planEligible(bound, family)
       ) {
@@ -643,7 +667,7 @@ export class AccountPool {
       picked = this.select(family);
     }
     if (picked) {
-      this.sticky.set(stickyKey, { alias: picked.alias, boundAt: now, lastUsedAt: now });
+      this.sticky.set(bindingKey, { alias: picked.alias, boundAt: now, lastUsedAt: now });
     }
     return picked;
   }
@@ -654,7 +678,7 @@ export class AccountPool {
     now: number,
   ): PoolAccount | null {
     if (!hint || this.accounts.get(hint.alias) !== hint) return null;
-    if (ineligibleReason(hint, now) !== null) return null;
+    if (ineligibleReason(hint, now, family) !== null) return null;
     if (computeHeadroom(hint.rateLimit, family) <= POOL_HEADROOM_FLOOR) return null;
     return planEligible(hint, family) ? hint : null;
   }
@@ -665,11 +689,23 @@ export class AccountPool {
    * the next turn of the same conversation would re-select the exhausted
    * account via the stale binding, eat another 429, and failover again.
    */
-  rebindSticky(stickyKey: string | null, alias: string): void {
+  rebindSticky(stickyKey: string | null, alias: string, family?: string | null): void {
     if (!stickyKey || !this.stickyEnabled) return;
     if (!this.accounts.has(alias)) return;
     const now = Date.now();
-    this.sticky.set(stickyKey, { alias, boundAt: now, lastUsedAt: now });
+    this.sticky.set(this.stickyBindingKey(stickyKey, family), { alias, boundAt: now, lastUsedAt: now });
+  }
+
+  /** Release a failed binding, optionally only when it still points at alias. */
+  releaseSticky(stickyKey: string | null, family?: string | null, alias?: string): void {
+    if (!stickyKey || !this.stickyEnabled) return;
+    const key = this.stickyBindingKey(stickyKey, family);
+    const binding = this.sticky.get(key);
+    if (binding && (alias === undefined || binding.alias === alias)) this.sticky.delete(key);
+  }
+
+  private stickyBindingKey(stickyKey: string, family?: string | null): string {
+    return `${rateLimitScope(family)}\u0000${stickyKey}`;
   }
 
   /**
@@ -713,8 +749,8 @@ export class AccountPool {
   }
 
   /** Test/inspection helper — current alias bound to a key, or null. */
-  stickyAliasFor(stickyKey: string): string | null {
-    return this.sticky.get(stickyKey)?.alias ?? null;
+  stickyAliasFor(stickyKey: string, family?: string | null): string | null {
+    return this.sticky.get(this.stickyBindingKey(stickyKey, family))?.alias ?? null;
   }
 
   /**
@@ -739,10 +775,12 @@ export class AccountPool {
     const sorted = candidates.slice().sort((a, b) => a.alias.localeCompare(b.alias));
     // Continue after the last alias and wrap. Unlike an index, this preserves
     // the sequence when an exclusion or exhausted seat shrinks the list.
-    const picked = this.roundRobinCursor === null
+    const cursorKey = rateLimitScope(family);
+    const cursor = this.roundRobinCursors.get(cursorKey);
+    const picked = cursor === undefined
       ? sorted[0]
-      : (sorted.find((a) => a.alias.localeCompare(this.roundRobinCursor!) > 0) ?? sorted[0]);
-    if (advance) this.roundRobinCursor = picked.alias;
+      : (sorted.find((a) => a.alias.localeCompare(cursor) > 0) ?? sorted[0]);
+    if (advance) this.roundRobinCursors.set(cursorKey, picked.alias);
     return picked;
   }
 
@@ -751,13 +789,10 @@ export class AccountPool {
     if (this.accounts.size <= 1) return null;
 
     const now = Date.now();
+    this.expireRateLimitCooldowns(now);
     const candidates = [...this.accounts.values()].filter(a => !excluded.has(a.alias));
 
-    let eligible = candidates.filter(a =>
-      a.rateLimit.status !== 'rejected' &&
-      a.expiresAt > now + 30_000 &&
-      !isInAuthCooldown(a, now),
-    );
+    let eligible = candidates.filter(a => ineligibleReason(a, now, family) === null);
 
     // Plan-based filtering: hard gate (same semantics as select()).
     if (family) {
@@ -784,10 +819,6 @@ export class AccountPool {
       return pickMaxHeadroom(eligible, family);
     }
 
-    if (candidates.length > 0) {
-      return candidates.reduce((a, b) => a.requestCount < b.requestCount ? a : b);
-    }
-
     return null;
   }
 
@@ -799,9 +830,20 @@ export class AccountPool {
    * left it there until the next successful call, which is exactly the
    * window an operator is most likely to be staring at the numbers.
    */
-  updateRateLimits(alias: string, snapshot: RateLimitSnapshot): void {
+  updateRateLimits(
+    alias: string,
+    snapshot: RateLimitSnapshot,
+    family?: string | null,
+    successful: boolean = true,
+  ): void {
     const account = this.accounts.get(alias);
     if (!account) return;
+    if (successful) {
+      delete account.rateLimitCooldowns[rateLimitScope(family)];
+      if (!hasActiveRateLimitCooldown(account, Date.now()) && account.rateLimit.status === 'rejected') {
+        account.rateLimit.status = snapshot.measured ? snapshot.status : 'unknown';
+      }
+    }
     if (snapshot.measured) account.rateLimit = snapshot;
     account.requestCount++;
   }
@@ -813,12 +855,48 @@ export class AccountPool {
    * zeroing them there would make the exhausted account look like the
    * emptiest one in the pool.
    */
-  markRejected(alias: string, snapshot: RateLimitSnapshot): void {
+  markRejected(
+    alias: string,
+    snapshot: RateLimitSnapshot,
+    family?: string | null,
+    retryAfterMs?: number | null,
+    now: number = Date.now(),
+  ): void {
     const account = this.accounts.get(alias);
     if (!account) return;
+    const scope = rateLimitScope(family);
+    const previous = account.rateLimitCooldowns[scope];
+    const inFlightBurst = Boolean(previous && previous.until > now);
+    const backoffLevel = inFlightBurst ? previous!.backoffLevel : (previous?.backoffLevel ?? 0);
+    const fallbackMs = rateLimitCooldownMs(backoffLevel);
+    const requestedMs = Number.isFinite(retryAfterMs) && (retryAfterMs ?? 0) > 0
+      ? Math.floor(retryAfterMs!)
+      : fallbackMs;
+    const until = now + Math.min(requestedMs, RATE_LIMIT_COOLDOWN_MAX_MS);
+    account.rateLimitCooldowns[scope] = {
+      until: inFlightBurst ? Math.max(previous!.until, until) : until,
+      backoffLevel: inFlightBurst ? backoffLevel : backoffLevel + 1,
+    };
     account.rateLimit = snapshot.measured
       ? { ...snapshot, status: 'rejected' }
       : { ...account.rateLimit, status: 'rejected' };
+  }
+
+  private expireRateLimitCooldowns(now: number): void {
+    for (const account of this.accounts.values()) {
+      // Expired entries retain their backoff level until a successful response
+      // clears that model scope. This lets a later 429 escalate one rung while
+      // concurrent 429s inside the same window reuse its existing deadline.
+      if (!hasActiveRateLimitCooldown(account, now) && account.rateLimit.status === 'rejected') {
+        account.rateLimit = { ...account.rateLimit, status: 'unknown' };
+      }
+      // Utilization belongs to a completed quota window once its advertised
+      // reset passes. Keeping the old 100% snapshot would exclude this account
+      // forever because no request could reach it to collect fresh headers.
+      if (account.rateLimit.reset > 0 && account.rateLimit.reset * 1000 <= now) {
+        account.rateLimit = { ...EMPTY_SNAPSHOT };
+      }
+    }
   }
 
   updateTokens(alias: string, accessToken: string, refreshToken: string, expiresAt: number): void {
@@ -841,17 +919,14 @@ export class AccountPool {
   }
 
   all(): PoolAccount[] {
+    this.expireRateLimitCooldowns(Date.now());
     return [...this.accounts.values()];
   }
 
   status(): PoolStatus {
     const all = this.all();
     const now = Date.now();
-    const healthy = all.filter(a =>
-      a.rateLimit.status !== 'rejected' &&
-      a.expiresAt > now + 30_000 &&
-      !isInAuthCooldown(a, now),
-    );
+    const healthy = all.filter(a => ineligibleReason(a, now) === null);
     // Status is a pool-wide aggregate; family-agnostic. Per-model
     // headroom is request-context-specific and only meaningful at
     // select() time.

@@ -152,10 +152,9 @@ header('429 failover loop — selectExcluding cascades then exhausts');
   acct = pool.selectExcluding(tried, family);
   check('failover #3 → null (pool exhausted)', acct === null);
 
-  // With every account rejected, a fresh select() falls back to earliest-reset,
-  // never returns a still-usable illusion.
+  // With every account cooling, a fresh selection fails closed.
   const fallback = pool.select(family);
-  check('all-rejected select falls back to an earliest-reset account (not null)', fallback !== null);
+  check('all-rejected select returns null until cooldown recovery', fallback === null);
 }
 
 // ── Sticky session survives a mid-conversation failover ──
@@ -180,7 +179,7 @@ header('sticky + failover — conversation rebinds and stays on new account');
   applyResponse(pool, 'home', 429, { status: 'rejected', util7d: 1.0 });
   const next = pool.selectExcluding(tried, family);
   check('failover selects backup', next?.alias === 'backup');
-  pool.rebindSticky(key, next.alias);
+  pool.rebindSticky(key, next.alias, family);
 
   check('turn 4 of same conversation now sticks to backup', pool.selectSticky(key, family)?.alias === 'backup');
   check('binding did not leak (still one sticky entry)', pool.stickyCount() === 1);
