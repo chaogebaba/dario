@@ -252,5 +252,103 @@ header('plan-based routing: unknown plan passes through');
   check('unknown plan account is eligible for fable', pick?.alias === 'unknown-plan');
 }
 
+header('selectSticky with null hint and exhausted pool returns null');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: true });
+  addAccount(pool, 'only-account', { util5h: 0.1, expiresInMs: 5_000 }); // expires in 5s (< 30s threshold)
+  // Pool has one account but it's near-expired — select() returns null
+  // (expiresAt must be > now + 30_000 to be eligible, and fallback filters
+  // by !isInAuthCooldown only, but expiry check in ineligibleReason blocks it)
+  pool.markAuthFailure('only-account');
+  check('select() returns null when all in auth cooldown', pool.select() === null);
+  // selectSticky with null hint should gracefully return null
+  const key = computeStickyKey('orphan conversation');
+  const result = pool.selectSticky(key, null, Date.now(), null);
+  check('selectSticky returns null with null hint + exhausted pool', result === null);
+  // selectSticky with a stale hint (cooldown account) should also return null
+  const staleHint = pool.get('only-account');
+  const result2 = pool.selectSticky(key, null, Date.now(), staleHint);
+  check('selectSticky returns null with cooldown hint + exhausted pool', result2 === null);
+}
+
+header('round-robin with 3+ accounts distributes evenly');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'alpha', { util5h: 0.2 });
+  addAccount(pool, 'beta', { util5h: 0.3 });
+  addAccount(pool, 'gamma', { util5h: 0.4 });
+
+  const counts = { alpha: 0, beta: 0, gamma: 0 };
+  for (let i = 0; i < 9; i++) {
+    const picked = pool.select();
+    counts[picked.alias]++;
+  }
+  // With 9 picks over 3 accounts, each should get exactly 3
+  check('alpha gets 3/9 picks', counts.alpha === 3);
+  check('beta gets 3/9 picks', counts.beta === 3);
+  check('gamma gets 3/9 picks', counts.gamma === 3);
+
+  // Verify order is alias-sorted: alpha, beta, gamma, alpha, ...
+  const order = [];
+  for (let i = 0; i < 3; i++) order.push(pool.select()?.alias);
+  check('picks in alias-sorted order', order[0] === 'alpha' && order[1] === 'beta' && order[2] === 'gamma');
+}
+
+header('round-robin with 3 accounts: one exhausted drops out');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'alpha', { util5h: 0.2 });
+  addAccount(pool, 'beta', { util5h: 0.99 });  // below floor (headroom 1% < 2%)
+  addAccount(pool, 'gamma', { util5h: 0.3 });
+
+  const counts = { alpha: 0, beta: 0, gamma: 0 };
+  for (let i = 0; i < 6; i++) {
+    const picked = pool.select();
+    counts[picked.alias]++;
+  }
+  // beta should be skipped (below floor), alpha and gamma split evenly
+  check('exhausted beta gets 0 picks', counts.beta === 0);
+  check('alpha gets 3/6 picks', counts.alpha === 3);
+  check('gamma gets 3/6 picks', counts.gamma === 3);
+}
+
+header('plan hard gate: all-Pro pool + fable returns null');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'pro1', { util5h: 0.1 });
+  addAccount(pool, 'pro2', { util5h: 0.2 });
+  pool.updatePlan('pro1', 'Pro');
+  pool.updatePlan('pro2', 'Pro');
+
+  // fable requires Max — with only Pro accounts, should return null
+  const pick = pool.select('fable');
+  check('fable returns null when all accounts are Pro', pick === null);
+
+  // sonnet has no plan requirement — should still work
+  const sonnet = pool.select('sonnet');
+  check('sonnet still routes to Pro accounts', sonnet !== null);
+
+  // selectExcluding also respects the hard gate
+  const excl = pool.selectExcluding(new Set(), 'fable');
+  check('selectExcluding returns null for fable with all-Pro', excl === null);
+}
+
+header('pickRoundRobin respects per-model family in floor check');
+{
+  const pool = new AccountPool('round-robin', { sessionAffinity: false });
+  addAccount(pool, 'alpha', { util5h: 0.2, perModel7d: { sonnet: 0.99 } });  // sonnet-saturated
+  addAccount(pool, 'beta', { util5h: 0.5 });
+
+  // sonnet request: alpha is above unified floor but below per-model floor
+  const sonnetPicks = new Set();
+  for (let i = 0; i < 4; i++) sonnetPicks.add(pool.select('sonnet')?.alias);
+  check('sonnet-saturated alpha drops out of rotation for sonnet', !sonnetPicks.has('alpha'));
+
+  // opus request: alpha's per-model doesn't apply, both should be picked
+  const opusPicks = new Set();
+  for (let i = 0; i < 4; i++) opusPicks.add(pool.select('opus')?.alias);
+  check('both accounts in rotation for opus', opusPicks.has('alpha') && opusPicks.has('beta'));
+}
+
 console.log(`\n${'='.repeat(70)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(70)}`);
 process.exit(fail > 0 ? 1 : 0);

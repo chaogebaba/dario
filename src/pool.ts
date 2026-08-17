@@ -526,10 +526,16 @@ export class AccountPool {
 
     let eligible = all.filter(a => ineligibleReason(a, now) === null);
 
-    // Plan-based filtering: e.g. fable → Max only.
+    // Plan-based filtering: e.g. fable → Max only. This is a HARD gate —
+    // if no eligible account has the required plan, return null rather than
+    // silently routing to an account that will 403 upstream.
     if (family) {
       const planFiltered = eligible.filter(a => planEligible(a, family));
-      if (planFiltered.length > 0) eligible = planFiltered;
+      if (planFiltered.length > 0) {
+        eligible = planFiltered;
+      } else if (MODEL_PLAN_REQUIREMENTS[family]) {
+        return null;
+      }
     }
 
     if (eligible.length > 0) {
@@ -541,7 +547,7 @@ export class AccountPool {
         // still gets the least-drained account instead of null.
       }
       if (this._strategy === 'round-robin') {
-        return this.pickRoundRobin(eligible);
+        return this.pickRoundRobin(eligible, family);
       }
       return pickMaxHeadroom(eligible, family);
     }
@@ -688,10 +694,12 @@ export class AccountPool {
    * Accounts below the headroom floor are skipped — once exhausted they drop out
    * of the rotation until their window resets.
    */
-  private pickRoundRobin(eligible: PoolAccount[]): PoolAccount {
+  private pickRoundRobin(eligible: PoolAccount[], family?: string | null): PoolAccount {
     // Filter to accounts above the headroom floor — exhausted accounts
-    // drop out of rotation until their window resets.
-    const aboveFloor = eligible.filter(a => computeHeadroom(a.rateLimit) > POOL_HEADROOM_FLOOR);
+    // drop out of rotation until their window resets. Uses per-model bucket
+    // when family is known, so a sonnet-saturated account drops out of
+    // rotation for sonnet requests even if its unified headroom is fine.
+    const aboveFloor = eligible.filter(a => computeHeadroom(a.rateLimit, family) > POOL_HEADROOM_FLOOR);
     const candidates = aboveFloor.length > 0 ? aboveFloor : eligible;
     // Sort by alias for stable ordering regardless of Map insertion order.
     const sorted = candidates.slice().sort((a, b) => a.alias.localeCompare(b.alias));
@@ -715,10 +723,14 @@ export class AccountPool {
       !isInAuthCooldown(a, now),
     );
 
-    // Plan-based filtering: e.g. fable → Max only.
+    // Plan-based filtering: hard gate (same semantics as select()).
     if (family) {
       const planFiltered = eligible.filter(a => planEligible(a, family));
-      if (planFiltered.length > 0) eligible = planFiltered;
+      if (planFiltered.length > 0) {
+        eligible = planFiltered;
+      } else if (MODEL_PLAN_REQUIREMENTS[family]) {
+        return null;
+      }
     }
 
     if (eligible.length > 0) {
@@ -731,7 +743,7 @@ export class AccountPool {
         if (first) return first;
       }
       if (this._strategy === 'round-robin') {
-        return this.pickRoundRobin(eligible);
+        return this.pickRoundRobin(eligible, family);
       }
       return pickMaxHeadroom(eligible, family);
     }
