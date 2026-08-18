@@ -1733,16 +1733,8 @@ export function rejectsAssistantPrefill(modelId: string): boolean {
 
 const INTERRUPTED_TOOL_RESULT = 'Tool execution was interrupted before a result was recorded. The outcome is unknown; inspect external state before retrying.';
 
-/** Close an interrupted assistant turn without discarding its history. */
-export function normalizeTrailingAssistantTurn(messages: Array<Record<string, unknown>>, modelId: string): void {
-  const last = messages.at(-1);
-  if (!last || last.role !== 'assistant') return;
-  const content = last.content;
-  const hasContent = typeof content === 'string'
-    ? content.trim().length > 0
-    : Array.isArray(content) && content.length > 0;
-  if (!hasContent) return;
-
+function completeClientToolUseIds(content: unknown): string[] | null {
+  if (!Array.isArray(content)) return [];
   const toolUses = Array.isArray(content)
     ? content.filter((block): block is Record<string, unknown> => (
         typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool_use'
@@ -1751,27 +1743,69 @@ export function normalizeTrailingAssistantTurn(messages: Array<Record<string, un
   const hasServerToolUse = Array.isArray(content) && content.some((block) => (
     typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'server_tool_use'
   ));
-  if (hasServerToolUse) return;
-  if (toolUses.length > 0) {
-    const complete = toolUses.every((block) => (
-      typeof block.id === 'string' && block.id.length > 0
-      && typeof block.name === 'string' && block.name.length > 0
-      && typeof block.input === 'object' && block.input !== null && !Array.isArray(block.input)
-    ));
-    if (!complete) return;
-    const ids = toolUses.map((block) => block.id as string);
-    if (new Set(ids).size !== ids.length) return;
-    messages.push({
-      role: 'user',
-      content: ids.map((toolUseId) => ({
-        type: 'tool_result',
-        tool_use_id: toolUseId,
-        content: INTERRUPTED_TOOL_RESULT,
-        is_error: true,
-      })),
-    });
-    return;
+  if (hasServerToolUse) return null;
+  const complete = toolUses.every((block) => (
+    typeof block.id === 'string' && block.id.length > 0
+    && typeof block.name === 'string' && block.name.length > 0
+    && typeof block.input === 'object' && block.input !== null && !Array.isArray(block.input)
+  ));
+  if (!complete) return null;
+  const ids = toolUses.map((block) => block.id as string);
+  return new Set(ids).size === ids.length ? ids : null;
+}
+
+function syntheticToolResults(ids: string[]): Array<Record<string, unknown>> {
+  return ids.map((toolUseId) => ({
+    type: 'tool_result',
+    tool_use_id: toolUseId,
+    content: INTERRUPTED_TOOL_RESULT,
+    is_error: true,
+  }));
+}
+
+/** Repair interrupted tool calls and modern-model assistant prefills. */
+export function normalizeInterruptedAssistantTurns(messages: Array<Record<string, unknown>>, modelId: string): void {
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role !== 'assistant') continue;
+    const toolUseIds = completeClientToolUseIds(message.content);
+    if (toolUseIds === null || toolUseIds.length === 0) continue;
+
+    const next = messages[i + 1];
+    const nextContent = next?.role === 'user' && Array.isArray(next.content)
+      ? next.content as Array<Record<string, unknown>>
+      : [];
+    const resultIds = new Set(nextContent
+      .filter((block) => block?.type === 'tool_result' && typeof block.tool_use_id === 'string')
+      .map((block) => block.tool_use_id as string));
+    const missingIds = toolUseIds.filter((id) => !resultIds.has(id));
+    if (missingIds.length === 0) continue;
+
+    const repairs = syntheticToolResults(missingIds);
+    if (next?.role === 'user') {
+      if (Array.isArray(next.content)) {
+        const results = nextContent.filter((block) => block?.type === 'tool_result');
+        const rest = nextContent.filter((block) => block?.type !== 'tool_result');
+        next.content = [...results, ...repairs, ...rest];
+      } else {
+        const text = typeof next.content === 'string' && next.content.length > 0
+          ? [{ type: 'text', text: next.content }]
+          : [];
+        next.content = [...repairs, ...text];
+      }
+    } else {
+      messages.splice(i + 1, 0, { role: 'user', content: repairs });
+      i++;
+    }
   }
+
+  const last = messages.at(-1);
+  if (!last || last.role !== 'assistant') return;
+  const content = last.content;
+  const hasContent = typeof content === 'string'
+    ? content.trim().length > 0
+    : Array.isArray(content) && content.length > 0;
+  if (!hasContent || completeClientToolUseIds(content) === null) return;
 
   if (!rejectsAssistantPrefill(modelId)) return;
   messages.push({
@@ -1815,7 +1849,7 @@ export function buildCCRequest(
   // tool-mode flags: those configure how NON-CC clients are dressed up as
   // CC, which a genuine CC client doesn't need.
   if (isGenuineCCClient(clientBody)) {
-    normalizeTrailingAssistantTurn(messages, model);
+    normalizeInterruptedAssistantTurns(messages, model);
     const clientSystem = clientBody.system as Array<Record<string, unknown>>;
     const system = clientSystem.map((b, i) => {
       const copy = { ...b };
@@ -1913,7 +1947,7 @@ export function buildCCRequest(
     }
     break;
   }
-  normalizeTrailingAssistantTurn(messages, model);
+  normalizeInterruptedAssistantTurns(messages, model);
 
   // ── Build tool mapping ──
   // In preserveTools mode, skip the tool name/arg rewriting entirely.

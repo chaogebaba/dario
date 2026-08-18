@@ -762,6 +762,31 @@ header('trailing assistant with real content gets an explicit continuation');
   check('partial tool calls are not assigned synthetic results', built.body.messages.length === 2);
 }
 
+{
+  const body = {
+    model: 'claude-opus-4-6',
+    messages: [
+      { role: 'user', content: 'run the tool' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'orphan', name: 'Read', input: {} }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Recovered response from a prior proxy repair.' }] },
+      { role: 'user', content: 'continue' },
+    ],
+  };
+  const built = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  const finalMessages = built.body.messages;
+  check('persisted mid-history orphan gets an adjacent repair turn',
+    finalMessages.length === 5
+      && finalMessages[2]?.role === 'user'
+      && finalMessages[2]?.content[0]?.tool_use_id === 'orphan'
+      && finalMessages[3]?.role === 'assistant');
+}
+
 // ======================================================================
 //
 // ======================================================================

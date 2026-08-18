@@ -271,6 +271,35 @@ async function sendGenuineTrailingToolUse(sessionId) {
   return response.status;
 }
 
+async function sendGenuinePersistedOrphan(sessionId) {
+  const response = await realFetch(`${BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'x-api-key': 'dario',
+      'x-claude-code-session-id': 'shared-cpa-session',
+    },
+    body: JSON.stringify({
+      model: 'claude-fable-5',
+      max_tokens: 8,
+      system: [
+        { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.234;' },
+        { type: 'text', text: 'You are a Claude agent, built on the Claude Agent SDK.' },
+      ],
+      metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'inspect a file' }] },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'persisted-tool', name: 'Read', input: { file_path: '/a' } }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Recovered response.' }] },
+        { role: 'user', content: [{ type: 'text', text: 'next turn' }] },
+      ],
+    }),
+  });
+  await response.text();
+  return response.status;
+}
+
 const thinkingTail = await sendGenuineClaudeCode('callback-thinking', [
   { type: 'thinking', thinking: 'waiting' },
   { type: 'text', text: 'Waiting for the result.' },
@@ -313,6 +342,18 @@ check('genuine CC parallel tool calls receive matching error results',
     && syntheticResults[0]?.tool_use_id === 'tool-a'
     && syntheticResults[1]?.tool_use_id === 'tool-b'
     && syntheticResults.every((block) => block.type === 'tool_result' && block.is_error === true));
+
+const persistedStatus = await sendGenuinePersistedOrphan('callback-persisted-tool-use');
+const persistedBody = upstreamBodies.at(-1);
+const persistedToolIndex = persistedBody?.messages.findIndex((message) => (
+  Array.isArray(message.content) && message.content.some((block) => block.tool_use_id === 'persisted-tool')
+));
+check('genuine CC persisted orphan request succeeds', persistedStatus === 200);
+check('persisted orphan receives an adjacent synthetic result',
+  persistedToolIndex === 2
+    && persistedBody?.messages[1]?.role === 'assistant'
+    && persistedBody?.messages[2]?.role === 'user'
+    && persistedBody?.messages[3]?.role === 'assistant');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
