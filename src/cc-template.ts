@@ -1763,7 +1763,7 @@ function syntheticToolResults(ids: string[]): Array<Record<string, unknown>> {
   }));
 }
 
-/** Repair interrupted tool calls and modern-model assistant prefills. */
+/** Mutate outbound history to repair interrupted tool calls and modern-model assistant prefills. */
 export function normalizeInterruptedAssistantTurns(messages: Array<Record<string, unknown>>, modelId: string): void {
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
