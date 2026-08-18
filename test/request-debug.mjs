@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RequestDebugStore } from '../dist/request-debug.js';
@@ -20,6 +20,8 @@ for (let i = 1; i <= 4; i++) {
     model: 'claude-opus-5', account: 'seat', status: 200, latencyMs: i,
     upstreamAttempts: i === 3 ? 2 : 1, recoveryPasses: i === 3 ? 1 : 0,
     inputTokens: 10, outputTokens: 2, cacheReadTokens: 20, cacheCreateTokens: 3,
+    inputPreview: `input-${i}`, outputPreview: `output-${i}`,
+    inputChars: 7, outputChars: 8, inputTruncated: false, outputTruncated: false,
   });
 }
 await store.flush();
@@ -32,6 +34,12 @@ const restored = new RequestDebugStore({ maxEntries: 3, filePath: file });
 await restored.load();
 check('recent entries survive restart', restored.recent().map((e) => e.req).join(',') === '4,3,2');
 check('attempt diagnostics survive restart', restored.recent().find((e) => e.req === 3)?.upstreamAttempts === 2);
+check('request previews survive restart', restored.recent()[0]?.inputPreview === 'input-4');
+check('response previews survive restart', restored.recent()[0]?.outputPreview === 'output-4');
+await chmod(file, 0o644);
+const hardened = new RequestDebugStore({ maxEntries: 3, filePath: file });
+await hardened.load();
+check('existing debug file is hardened to owner-only', ((await stat(file)).mode & 0o077) === 0);
 
 await writeFile(file, `${await readFile(file, 'utf8')}{"torn":`);
 const repaired = new RequestDebugStore({ maxEntries: 3, filePath: file });

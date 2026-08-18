@@ -185,5 +185,24 @@ header('Listener-cap is generous (TUI will attach several)');
 }
 
 // ─────────────────────────────────────────────────────────────
+header('content previews age out independently of analytics metadata');
+{
+  const a = new Analytics(600);
+  for (let i = 0; i < 514; i++) {
+    a.record(makeRecord({
+      model: `m${i}`,
+      inputPreview: `input-${i}`,
+      outputPreview: `output-${i}`,
+      inputChars: 7,
+      outputChars: 8,
+    }));
+  }
+  const all = a.recent(600);
+  check('analytics metadata remains retained', all.length === 514 && all[0].model === 'm0');
+  check('old preview content is dropped', all[0].inputPreview === undefined && all[1].outputPreview === undefined);
+  check('newest 512 previews remain', all[2].inputPreview === 'input-2' && all.at(-1).outputPreview === 'output-513');
+}
+
+// ─────────────────────────────────────────────────────────────
 console.log(`\n${pass} pass, ${fail} fail`);
 process.exit(fail === 0 ? 0 : 1);

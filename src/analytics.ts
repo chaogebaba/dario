@@ -38,6 +38,31 @@ export interface RequestRecord {
   isOpenAI: boolean;
   /** Number of upstream dispatches used to complete this client request. */
   upstreamAttempts?: number;
+  /** Bounded, redacted semantic previews for local TUI diagnostics. */
+  inputPreview?: string;
+  outputPreview?: string;
+  inputChars?: number;
+  outputChars?: number;
+  inputTruncated?: boolean;
+  outputTruncated?: boolean;
+  /** Client detector result and salted request fingerprint for correlation. */
+  client?: string;
+  method?: string;
+  path?: string;
+  requestFingerprint?: string;
+  semanticFingerprint?: string;
+  requestBytes?: number;
+}
+
+const MAX_CONTENT_RECORDS = 512;
+
+function withoutContent(record: RequestRecord): RequestRecord {
+  const {
+    inputPreview: _inputPreview,
+    outputPreview: _outputPreview,
+    ...metadata
+  } = record;
+  return metadata;
 }
 
 /**
@@ -259,6 +284,8 @@ export class Analytics extends EventEmitter {
    */
   record(r: RequestRecord): void {
     this.records.push(r);
+    const contentExpiry = this.records.length - MAX_CONTENT_RECORDS - 1;
+    if (contentExpiry >= 0) this.records[contentExpiry] = withoutContent(this.records[contentExpiry]!);
     if (this.records.length > this.maxRecords) {
       this.records = this.records.slice(-this.maxRecords);
     }

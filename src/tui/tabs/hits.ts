@@ -31,6 +31,12 @@ import { billingBucketFromClaim, isNonSubscriptionBilling } from '../../analytic
 import type { RequestRecord } from '../../analytics.js';
 
 const MAX_BUFFER = 5000;
+const MAX_CONTENT_BUFFER = 512;
+
+function withoutPreview(record: RequestRecord): RequestRecord {
+  const { inputPreview: _inputPreview, outputPreview: _outputPreview, ...metadata } = record;
+  return metadata;
+}
 
 /** Live overage-halt state — populated from SSE event:overage_halt frames. */
 interface HitsHaltState {
@@ -46,6 +52,8 @@ export interface HitsState {
   connectionError: string | null;
   /** Overage-guard halt banner (v4.1, dario#288). Null when running normally. */
   halt: HitsHaltState | null;
+  detailOpen: boolean;
+  detailScroll: number;
 }
 
 export const HitsTab: Tab<HitsState> = {
@@ -54,7 +62,7 @@ export const HitsTab: Tab<HitsState> = {
   hotkey: 'h',
 
   initialState(): HitsState {
-    return { buffer: [], selectedIdx: -1, subscribed: false, connectionError: null, halt: null };
+    return { buffer: [], selectedIdx: -1, subscribed: false, connectionError: null, halt: null, detailOpen: false, detailScroll: 0 };
   },
 
   onMount(_state, ctx) {
@@ -79,9 +87,12 @@ export const HitsTab: Tab<HitsState> = {
         // Default ('message') = RequestRecord
         const record = payload as RequestRecord;
         ctx.setState((s: HitsState) => {
+          const buffer = [...s.buffer, record].slice(-MAX_BUFFER);
+          const contentExpiry = buffer.length - MAX_CONTENT_BUFFER - 1;
+          if (contentExpiry >= 0) buffer[contentExpiry] = withoutPreview(buffer[contentExpiry]!);
           const next: HitsState = {
             ...s,
-            buffer: [...s.buffer, record].slice(-MAX_BUFFER),
+            buffer,
             subscribed: true,
             connectionError: null,
           };
@@ -112,30 +123,41 @@ export const HitsTab: Tab<HitsState> = {
 
   onKey(state, key) {
     if (state.buffer.length === 0) return undefined;
+    if (state.detailOpen) {
+      if (key.name === 'escape' || key.name === 'enter') return { ...state, detailOpen: false, detailScroll: 0 };
+      if (key.name === 'up') return { ...state, detailScroll: Math.max(0, state.detailScroll - 1) };
+      if (key.name === 'down') return { ...state, detailScroll: state.detailScroll + 1 };
+      if (key.name === 'pageup') return { ...state, detailScroll: Math.max(0, state.detailScroll - 10) };
+      if (key.name === 'pagedown') return { ...state, detailScroll: state.detailScroll + 10 };
+      if (key.name === 'home') return { ...state, detailScroll: 0 };
+      if (key.name === 'end') return { ...state, detailScroll: Number.MAX_SAFE_INTEGER };
+      return undefined;
+    }
+    if (key.name === 'enter') return { ...state, detailOpen: true, detailScroll: 0 };
     // ↑ — move cursor UP on screen = toward NEWER (lower selectedIdx)
     if (key.name === 'up') {
-      return { ...state, selectedIdx: Math.max(state.selectedIdx - 1, 0) };
+      return { ...state, selectedIdx: Math.max(state.selectedIdx - 1, 0), detailScroll: 0 };
     }
     // ↓ — move cursor DOWN on screen = toward OLDER (higher selectedIdx)
     if (key.name === 'down') {
       const max = state.buffer.length - 1;
-      return { ...state, selectedIdx: Math.min(state.selectedIdx + 1, max) };
+      return { ...state, selectedIdx: Math.min(state.selectedIdx + 1, max), detailScroll: 0 };
     }
     // PgUp / PgDn — step by 10
     if (key.name === 'pageup') {
-      return { ...state, selectedIdx: Math.max(state.selectedIdx - 10, 0) };
+      return { ...state, selectedIdx: Math.max(state.selectedIdx - 10, 0), detailScroll: 0 };
     }
     if (key.name === 'pagedown') {
       const max = state.buffer.length - 1;
-      return { ...state, selectedIdx: Math.min(state.selectedIdx + 10, max) };
+      return { ...state, selectedIdx: Math.min(state.selectedIdx + 10, max), detailScroll: 0 };
     }
     // Home — jump to newest
     if (key.name === 'home') {
-      return { ...state, selectedIdx: 0 };
+      return { ...state, selectedIdx: 0, detailScroll: 0 };
     }
     // End — jump to oldest
     if (key.name === 'end') {
-      return { ...state, selectedIdx: state.buffer.length - 1 };
+      return { ...state, selectedIdx: state.buffer.length - 1, detailScroll: 0 };
     }
     return undefined;
   },
@@ -150,6 +172,8 @@ export const HitsTab: Tab<HitsState> = {
     // banner was missing from the arithmetic entirely and the detail pane
     // is 9 rows, not 8 — so the body overran its budget by 4 (#868).
     const hasSelection = state.selectedIdx >= 0 && state.selectedIdx < state.buffer.length;
+    const newestFirst = [...state.buffer].reverse();
+    if (state.detailOpen && hasSelection) return renderInspector(newestFirst[state.selectedIdx], state, w, totalRows);
     const haltRows = state.halt ? 2 : 0;         // pinned banner
     const fixedRows =
       1 +            // title
@@ -184,15 +208,14 @@ export const HitsTab: Tab<HitsState> = {
 
     // Render newest-first: the LAST element of the buffer renders at
     // the TOP of the list.
-    const newestFirst = [...state.buffer].reverse();
     const startIdx = clampVisibleStart(state.selectedIdx, listRows, newestFirst.length);
     const endIdx = Math.min(startIdx + listRows, newestFirst.length);
 
     // Column layout — fixed widths to keep alignment stable across
     // varied content. Fall back to truncation when columns overflow.
     const colTime = 9;
-    const colModel = 18;
-    const colIn = 8, colOut = 7, colLat = 7, colStatus = 5;
+    const colModel = 16;
+    const colIn = 7, colOut = 7, colCacheRead = 11, colCacheCreate = 14, colLat = 7, colStatus = 5;
 
     lines.push(truncate(' ' + brand('Hits') +
       dim(`  ${state.buffer.length} buffered · ${state.subscribed ? fg('green', 'live') : fg('yellow', 'disconnected')}`), w));
@@ -222,6 +245,8 @@ export const HitsTab: Tab<HitsState> = {
       pad('model', colModel) +
       pad('in', colIn) +
       pad('out', colOut) +
+      pad('cache read', colCacheRead) +
+      pad('cache create', colCacheCreate) +
       pad('lat', colLat) +
       pad('st', colStatus)
     ), w - 2));
@@ -240,6 +265,8 @@ export const HitsTab: Tab<HitsState> = {
         pad(shortenModel(r.model), colModel) +
         pad(formatTokens(r.inputTokens), colIn) +
         pad(formatTokens(r.outputTokens), colOut) +
+        pad(formatTokens(r.cacheReadTokens), colCacheRead) +
+        pad(formatTokens(r.cacheCreateTokens), colCacheCreate) +
         pad(formatLatency(r.latencyMs), colLat) +
         pad(formatStatus(r.status), colStatus);
       // Non-subscription rows render in red even when unselected; selection
@@ -264,11 +291,11 @@ export const HitsTab: Tab<HitsState> = {
     // to show both the list and the pane (see the budget above).
     if (!showDetail) return lines.join('\n');
 
-    lines.push(' ' + dim(BOX.horizontal.repeat(w - 2)));
+    lines.push(' ' + dim(BOX.horizontal.repeat(Math.max(0, w - 2))));
 
     if (state.selectedIdx >= 0 && state.selectedIdx < newestFirst.length) {
       const r = newestFirst[state.selectedIdx];
-      lines.push(truncate('  ' + brand('Selected') + dim(`  ${formatTime(r.timestamp)}`), w));
+      lines.push(truncate('  ' + brand('Selected') + dim(`  ${formatTime(r.timestamp)} · Enter inspect`), w));
       lines.push('  ' + renderKvRow('Account', r.account, w - 4));
       lines.push('  ' + renderKvRow('Model', r.model, w - 4));
       lines.push('  ' + renderKvRow('Billing bucket', billingBucketFromClaim(r.claim), w - 4));
@@ -347,4 +374,79 @@ function formatRemaining(ms: number): string {
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function renderInspector(r: RequestRecord, state: HitsState, width: number, rows: number): string {
+  const inner = Math.max(16, width - 4);
+  const content: string[] = [];
+  const route = [r.method, r.path].filter(Boolean).join(' ') || 'request';
+  content.push('  ' + brand('Request inspector') + dim(`  ${formatTime(r.timestamp)} · ${route}`));
+  content.push('  ' + renderKvRow('Account / client', `${r.account}${r.client ? ` / ${r.client}` : ''}`, inner));
+  content.push('  ' + renderKvRow('Model / status', `${r.model} / ${plainStatus(r.status)} / ${formatLatency(r.latencyMs)}`, inner));
+  content.push('  ' + renderKvRow('Tokens', tokenBreakdown(r), inner));
+  content.push('  ' + renderKvRow('Routing', `${r.upstreamAttempts ?? 1} upstream attempt${(r.upstreamAttempts ?? 1) === 1 ? '' : 's'} / ${billingBucketFromClaim(r.claim)}`, inner));
+  const exactFingerprint = r.requestFingerprint;
+  const repeats = exactFingerprint
+    ? state.buffer.filter((candidate) => candidate.requestFingerprint === exactFingerprint).length
+    : 0;
+  const repeatNote = repeats > 1 ? ` / ${repeats} exact body matches in buffer` : '';
+  content.push('  ' + renderKvRow('Request identity', `${r.requestFingerprint ?? '—'} / ${formatBytes(r.requestBytes ?? 0)}${repeatNote}`, inner));
+  if (r.semanticFingerprint && r.semanticFingerprint !== r.requestFingerprint) {
+    content.push('  ' + renderKvRow('Content identity', r.semanticFingerprint, inner));
+  }
+  content.push(' ' + dim(BOX.horizontal.repeat(Math.max(0, width - 2))));
+  appendPreviewSection(content, 'Input', r.inputPreview, r.inputChars, r.inputTruncated, inner);
+  content.push(' ' + dim(BOX.horizontal.repeat(Math.max(0, width - 2))));
+  appendPreviewSection(content, 'Output', r.outputPreview, r.outputChars, r.outputTruncated, inner);
+
+  const footerRows = 1;
+  const viewportRows = Math.max(1, rows - footerRows);
+  const maxScroll = Math.max(0, content.length - viewportRows);
+  const scroll = Math.min(Math.max(0, state.detailScroll), maxScroll);
+  const visible = content.slice(scroll, scroll + viewportRows).map((line) => truncate(line, width));
+  const rangeEnd = Math.min(content.length, scroll + viewportRows);
+  visible.push(truncate('  ' + dim(`Esc/Enter back · ↑↓ scroll · ${scroll + 1}-${rangeEnd}/${content.length}`), width));
+  return visible.slice(0, rows).join('\n');
+}
+
+function appendPreviewSection(
+  lines: string[],
+  label: string,
+  preview: string | undefined,
+  chars: number | undefined,
+  truncatedPreview: boolean | undefined,
+  width: number,
+): void {
+  const count = chars ?? preview?.length ?? 0;
+  const suffix = `${formatTokens(count)} chars${truncatedPreview ? ' · stored preview truncated' : ''}`;
+  lines.push('  ' + brand(label) + dim(`  ${suffix}`));
+  if (!preview) {
+    lines.push('  ' + dim(count > 0 ? '(preview aged out; token metadata retained)' : '(no textual content captured)'));
+    return;
+  }
+  for (const line of wrapPlainText(preview, Math.max(8, width - 2))) lines.push(`  ${line}`);
+}
+
+function wrapPlainText(text: string, width: number): string[] {
+  const rows: string[] = [];
+  for (const source of text.split('\n')) {
+    if (!source) { rows.push(''); continue; }
+    let rest = source;
+    while (rest.length > width) {
+      let split = rest.lastIndexOf(' ', width);
+      if (split < Math.floor(width / 2)) split = width;
+      rows.push(rest.slice(0, split));
+      rest = rest.slice(split).trimStart();
+    }
+    rows.push(rest);
+  }
+  return rows;
+}
+
+function plainStatus(code: number): string { return String(code); }
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${bytes} B`;
 }

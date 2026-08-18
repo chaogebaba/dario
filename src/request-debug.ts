@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, open, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
@@ -30,6 +30,14 @@ export interface RequestDebugEntry {
   cacheCreateTokens: number;
   bodyBytes?: number;
   bodyFingerprint?: string;
+  client?: string;
+  semanticFingerprint?: string;
+  inputPreview?: string;
+  outputPreview?: string;
+  inputChars?: number;
+  outputChars?: number;
+  inputTruncated?: boolean;
+  outputTruncated?: boolean;
 }
 
 export interface RequestDebugStoreOptions {
@@ -38,10 +46,13 @@ export interface RequestDebugStoreOptions {
 }
 
 const DEFAULT_MAX_ENTRIES = 512;
-const MAX_ENTRIES_CAP = 10_000;
+// Preview-bearing entries are intentionally bounded in both count and worst
+// case file size (about 64 MiB at the largest permitted configuration).
+const MAX_ENTRIES_CAP = 2_048;
 const MAX_MODEL_LENGTH = 128;
 const MAX_ERROR_LENGTH = 256;
-const MAX_LINE_BYTES = 16_384;
+const MAX_PREVIEW_LENGTH = 8_192;
+const MAX_LINE_BYTES = 32_768;
 const AFFINITY_RESULTS = new Set(['hit', 'new', 'rebind', 'none', 'disabled']);
 const OUTCOMES = new Set(['complete', 'stream-error', 'timeout', 'network-error', 'client-closed']);
 
@@ -93,14 +104,21 @@ function normalizeEntry(value: unknown): RequestDebugEntry | null {
     cacheCreateTokens: typeof raw.cacheCreateTokens === 'number' ? Math.max(0, Math.floor(raw.cacheCreateTokens)) : 0,
     ...(typeof raw.bodyBytes === 'number' ? { bodyBytes: Math.max(0, Math.floor(raw.bodyBytes)) } : {}),
     ...(typeof raw.bodyFingerprint === 'string' ? { bodyFingerprint: raw.bodyFingerprint.slice(0, 32) } : {}),
+    ...(typeof raw.client === 'string' ? { client: raw.client.slice(0, 80) } : {}),
+    ...(typeof raw.semanticFingerprint === 'string' ? { semanticFingerprint: raw.semanticFingerprint.slice(0, 32) } : {}),
+    ...(typeof raw.inputPreview === 'string' ? { inputPreview: raw.inputPreview.slice(0, MAX_PREVIEW_LENGTH) } : {}),
+    ...(typeof raw.outputPreview === 'string' ? { outputPreview: raw.outputPreview.slice(0, MAX_PREVIEW_LENGTH) } : {}),
+    ...(typeof raw.inputChars === 'number' ? { inputChars: Math.max(0, Math.floor(raw.inputChars)) } : {}),
+    ...(typeof raw.outputChars === 'number' ? { outputChars: Math.max(0, Math.floor(raw.outputChars)) } : {}),
+    ...(typeof raw.inputTruncated === 'boolean' ? { inputTruncated: raw.inputTruncated } : {}),
+    ...(typeof raw.outputTruncated === 'boolean' ? { outputTruncated: raw.outputTruncated } : {}),
   };
 }
 
 /**
  * A small FIFO ring with optional JSON-ND persistence. The file is metadata
- * only: callers provide fingerprints and token counts, never request content.
- * Writes are serialized so concurrent requests cannot reorder or truncate the
- * diagnostic window.
+ * plus bounded semantic previews. Files are mode 0600 and writes are
+ * serialized so concurrent requests cannot reorder or truncate the window.
  */
 export class RequestDebugStore {
   readonly maxEntries: number;
@@ -120,7 +138,21 @@ export class RequestDebugStore {
   async load(): Promise<void> {
     if (!this.filePath) return;
     try {
-      const text = (await readFile(this.filePath, 'utf8')).slice(-this.maxEntries * MAX_LINE_BYTES);
+      const info = await stat(this.filePath);
+      const maxBytes = this.maxEntries * MAX_LINE_BYTES;
+      const start = Math.max(0, info.size - maxBytes);
+      const handle = await open(this.filePath, 'r');
+      let text: string;
+      try {
+        const bytes = Buffer.alloc(Math.max(0, info.size - start));
+        await handle.read(bytes, 0, bytes.length, start);
+        text = bytes.toString('utf8');
+      } finally {
+        await handle.close();
+      }
+      // Content-bearing diagnostics must never leave an existing permissive
+      // file readable by other local users.
+      await chmod(this.filePath, 0o600);
       const loaded: RequestDebugEntry[] = [];
       let malformed = !text.endsWith('\n');
       for (const line of text.split('\n')) {
@@ -171,6 +203,7 @@ export class RequestDebugStore {
     this.writeChain = this.writeChain.then(async () => {
       while (this.persistNeeded) {
         this.persistNeeded = false;
+        await chmod(this.filePath!, 0o600).catch(() => {});
         // A single append is cheap; concurrent additions are coalesced into
         // one bounded rewrite instead of one rewrite per request.
         if (this.persistedLines < this.maxEntries && this.entries.length === this.persistedLines + 1) {

@@ -474,6 +474,8 @@ header('Hits tab — empty / connecting / populated / selected');
   const r3 = HitsTab.render(populated, DIM);
   check('populated: shows opus row',       r3.includes('opus-4-7'));
   check('populated: shows sonnet row',     r3.includes('sonnet-4-6'));
+  check('populated: shows cache read column', r3.includes('cache read'));
+  check('populated: shows cache create column', r3.includes('cache create'));
   check('populated: shows live marker',    r3.includes('live'));
   check('populated: detail section',       r3.includes('Selected') || r3.includes('Tokens'));
 
@@ -482,6 +484,25 @@ header('Hits tab — empty / connecting / populated / selected');
   check('down arrow moves selectedIdx',    moved && moved.selectedIdx === 1);
   const moved2 = HitsTab.onKey(moved, { name: 'up', ch: '', ctrl: false, shift: false, meta: false });
   check('up arrow moves selectedIdx',      moved2 && moved2.selectedIdx === 0);
+
+  const withPreview = {
+    ...populated,
+    buffer: [{
+      ...records[0], method: 'POST', path: '/v1/messages', client: 'claude-code',
+      inputPreview: '[user]\nfind duplicate requests', outputPreview: 'No duplicate dispatch found.',
+      inputChars: 30, outputChars: 28, requestFingerprint: 'abc123', requestBytes: 4096,
+    }],
+  };
+  const opened = HitsTab.onKey(withPreview, { name: 'enter', ch: '\n', ctrl: false, shift: false, meta: false });
+  const inspector = HitsTab.render(opened, { cols: 100, rows: 30 });
+  check('Enter opens request inspector', inspector.includes('Request inspector'));
+  check('inspector shows input words', inspector.includes('duplicate requests'));
+  check('inspector shows output words', inspector.includes('duplicate dispatch'));
+  check('inspector shows request identity', inspector.includes('abc123'));
+  const scrolled = HitsTab.onKey(opened, { name: 'down', ch: '', ctrl: false, shift: false, meta: false });
+  check('inspector arrows scroll content', scrolled.detailScroll === 1 && scrolled.selectedIdx === opened.selectedIdx);
+  const closed = HitsTab.onKey(opened, { name: 'escape', ch: '', ctrl: false, shift: false, meta: false });
+  check('Escape closes request inspector', closed.detailOpen === false);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -870,6 +891,10 @@ header('Hits tab — no row exceeds the terminal width');
     'populated':    (s) => { s.buffer = buffer; s.subscribed = true; },
     'halted':       (s) => { s.buffer = buffer; s.subscribed = true; s.halt = halt; },
     'no selection': (s) => { s.buffer = buffer; s.subscribed = true; s.selectedIdx = -1; },
+    'inspector':    (s) => {
+      s.buffer = [{ ...buffer[0], inputPreview: 'input '.repeat(400), outputPreview: 'output '.repeat(400), inputChars: 2400, outputChars: 2800 }];
+      s.subscribed = true; s.selectedIdx = 0; s.detailOpen = true;
+    },
   };
 
   for (const [label, mutate] of Object.entries(STATES)) {

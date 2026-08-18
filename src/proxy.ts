@@ -32,6 +32,7 @@ import { redactSecrets } from './redact.js';
 import { BAKED_BASE_MODELS, withLongContextVariants, buildOpenAIModelsList, getModelCatalog, getCachedBases, resolveAliasAgainst, prewarmModelCatalog, retryModelCatalogNow, isSuspendedModel, type CatalogDeps } from './model-catalog.js';
 import { homeDir } from './home-dir.js';
 import { RequestDebugStore, type RequestDebugEntry } from './request-debug.js';
+import { boundPreview, extractRequestPreview, extractResponsePreview, redactPreviewText, StreamingTextPreview, type TextPreview } from './request-preview.js';
 
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
@@ -1247,6 +1248,12 @@ export function sanitizeError(err: unknown): string {
   // same redaction directly on response-body strings without importing
   // proxy (which imports oauth — would circle).
   return redactSecrets(err instanceof Error ? err.message : String(err));
+}
+
+function redactedPreview(value: string): TextPreview {
+  const preview = boundPreview(value);
+  preview.text = redactPreviewText(redactSecrets(preview.text));
+  return preview;
 }
 
 /**
@@ -2761,6 +2768,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // also exactly what we want to log on early-failure paths.
     let requestModel = '';
     let detectedClientForLog: string | undefined;
+    let requestPreview: TextPreview = { text: '', chars: 0, truncated: false };
+    let responsePreview: TextPreview = { text: '', chars: 0, truncated: false };
+    let requestBodyBytes = 0;
+    let requestBodyFingerprint = '';
+    let requestFingerprint = '';
+    let semanticFingerprint = '';
     let preserveToolsEffective: boolean = Boolean(opts.preserveTools);
     let poolAccount: PoolAccount | null = null;
     let initialPoolAccountAlias: string | undefined;
@@ -2926,6 +2939,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         clearTimeout(bodyTimeout);
       }
       let body = Buffer.concat(chunks);
+      requestBodyBytes = body.length;
+      requestBodyFingerprint = debugStore.fingerprint(body.toString('utf8'));
+      requestFingerprint = requestBodyFingerprint;
 
       // Provider prefix (v3.10.0). If the body's model field is `<provider>:<model>`
       // with a recognized prefix, strip the prefix and force routing regardless of
@@ -2953,6 +2969,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         try {
           const parsed = JSON.parse(body.toString()) as Record<string, unknown>;
           parsedBody = parsed;
+          requestPreview = extractRequestPreview(parsed);
+          requestPreview.text = redactPreviewText(redactSecrets(requestPreview.text));
+          semanticFingerprint = requestPreview.text ? debugStore.fingerprint(requestPreview.text) : requestBodyFingerprint;
           // User-defined aliases first — before provider-prefix parsing, so
           // an alias target carrying a prefix (`my-fast` → `openai:gpt-4o`)
           // retargets the backend through the existing machinery below.
@@ -3597,6 +3616,34 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       req.on('close', onClientClose);
 
       const startTime = Date.now();
+      const previewFields = (): Pick<RequestRecord,
+        'inputPreview' | 'outputPreview' | 'inputChars' | 'outputChars'
+        | 'inputTruncated' | 'outputTruncated' | 'client'
+        | 'method' | 'path' | 'requestFingerprint' | 'semanticFingerprint' | 'requestBytes'> => ({
+        inputPreview: requestPreview.text,
+        outputPreview: responsePreview.text,
+        inputChars: requestPreview.chars,
+        outputChars: responsePreview.chars,
+        inputTruncated: requestPreview.truncated,
+        outputTruncated: responsePreview.truncated,
+        client: detectedClientForLog,
+        method: req.method ?? '',
+        path: urlPath,
+        requestFingerprint,
+        semanticFingerprint,
+        requestBytes: requestBodyBytes,
+      });
+      const recordFailureAnalytics = (status: number): void => {
+        const rl = poolAccount?.rateLimit ?? parseRateLimits(upstream?.headers ?? new Headers());
+        analytics.record({
+          timestamp: Date.now(), account: poolAccount?.alias ?? ACCOUNT_KEY_APIKEY,
+          model: requestModel, inputTokens: 0, outputTokens: 0,
+          cacheReadTokens: 0, cacheCreateTokens: 0, thinkingTokens: 0,
+          claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
+          latencyMs: Date.now() - startTime, status, isStream: false, isOpenAI,
+          upstreamAttempts, ...previewFields(),
+        });
+      };
       // Tracks which accounts we've already tried this request — used by the
       // inside-request 429 failover loop to avoid re-hitting exhausted accounts.
       const triedAliases = new Set<string>();
@@ -3644,8 +3691,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           affinityResult: debugAffinityResult,
           // The digest is useful for correlating duplicate requests without
           // retaining prompts, tool arguments, or credentials.
-          bodyBytes: body.length,
-          bodyFingerprint: debugStore.fingerprint(body.toString('utf8')),
+          bodyBytes: requestBodyBytes,
+          bodyFingerprint: requestBodyFingerprint,
+          semanticFingerprint,
+          client: detectedClientForLog,
+          inputPreview: requestPreview.text,
+          outputPreview: responsePreview.text,
+          inputChars: requestPreview.chars,
+          outputChars: responsePreview.chars,
+          inputTruncated: requestPreview.truncated,
+          outputTruncated: responsePreview.truncated,
           inputTokens: usage.inputTokens ?? 0,
           outputTokens: usage.outputTokens ?? 0,
           cacheReadTokens: usage.cacheReadTokens ?? 0,
@@ -3851,8 +3906,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               if (key === 'request-id') responseHeaders[key] = value;
             }
             requestCount++;
+            responsePreview = redactedPreview(peekedBody ?? '');
             res.writeHead(400, responseHeaders);
             res.end(peekedBody);
+            recordFailureAnalytics(400);
             appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
             return;
           }
@@ -3899,8 +3956,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               if (key === 'request-id') responseHeaders[key] = value;
             }
             requestCount++;
+            responsePreview = redactedPreview(peekedBody ?? '');
             res.writeHead(400, responseHeaders);
             res.end(peekedBody);
+            recordFailureAnalytics(400);
             appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
             return;
           }
@@ -3944,8 +4003,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               if (key === 'request-id') responseHeaders[key] = value;
             }
             requestCount++;
+            responsePreview = redactedPreview(peekedBody ?? '');
             res.writeHead(400, responseHeaders);
             res.end(peekedBody);
+            recordFailureAnalytics(400);
             appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
             return;
           }
@@ -4012,6 +4073,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           // bucket / utilization fields either way.
           {
             const rl = poolAccount?.rateLimit ?? parseRateLimits(upstream.headers);
+            responsePreview = redactedPreview(peekedBody ?? '');
             analytics.record({
               timestamp: Date.now(),
               account: poolAccount?.alias ?? ACCOUNT_KEY_APIKEY,
@@ -4020,6 +4082,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
               latencyMs: Date.now() - startTime, status: 429, isStream: false, isOpenAI,
               upstreamAttempts,
+              ...previewFields(),
             });
             appendDebugEntry(429, {});
           }
@@ -4038,8 +4101,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             if (key === 'request-id') responseHeaders[key] = value;
           }
           requestCount++;
+          responsePreview = redactedPreview(peekedBody ?? '');
           res.writeHead(400, responseHeaders);
           res.end(peekedBody);
+          recordFailureAnalytics(400);
           appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
           return;
         }
@@ -4109,6 +4174,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         requestCount++;
         {
           const rl = poolAccount?.rateLimit ?? parseRateLimits(upstream.headers);
+          responsePreview = redactedPreview(enriched);
           analytics.record({
             timestamp: Date.now(),
             account: poolAccount?.alias ?? ACCOUNT_KEY_APIKEY,
@@ -4117,6 +4183,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
             latencyMs: Date.now() - startTime, status: 429, isStream: false, isOpenAI,
             upstreamAttempts,
+            ...previewFields(),
           });
           appendDebugEntry(429, {});
         }
@@ -4215,8 +4282,36 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         let streamCacheReadTokens = 0;
         let streamCacheCreateTokens = 0;
         let streamThinkingChars = 0;
+        const streamPreview = new StreamingTextPreview();
         const analyticsDecoder = analytics ? new TextDecoder() : null;
         let analyticsBuffer = '';
+        const consumeAnalyticsEvent = (part: string): void => {
+          const dataLine = part.split('\n').find(l => l.startsWith('data: '));
+          if (!dataLine) return;
+          try {
+            const e = JSON.parse(dataLine.slice(6)) as Record<string, unknown>;
+            if (e.type === 'message_start') {
+              const u = (e.message as { usage?: Record<string, number> } | undefined)?.usage;
+              if (u) {
+                streamInputTokens = u.input_tokens ?? 0;
+                streamCacheReadTokens = u.cache_read_input_tokens ?? 0;
+                streamCacheCreateTokens = u.cache_creation_input_tokens ?? 0;
+              }
+            } else if (e.type === 'message_delta') {
+              const u = (e as { usage?: Record<string, number> }).usage;
+              if (u?.output_tokens) streamOutputTokens = u.output_tokens;
+            } else if (e.type === 'content_block_delta') {
+              const d = (e as { delta?: { type?: string; thinking?: string; text?: string } }).delta;
+              if (d?.type === 'thinking_delta' && typeof d.thinking === 'string') streamThinkingChars += d.thinking.length;
+              if (d?.type === 'text_delta' && typeof d.text === 'string') streamPreview.append(d.text);
+            } else if (e.type === 'content_block_start') {
+              const block = (e as { content_block?: { type?: string; name?: string } }).content_block;
+              if (block?.type === 'tool_use' || block?.type === 'server_tool_use') {
+                streamPreview.append(`[${block.type}${block.name ? ` ${block.name}` : ''}]`);
+              }
+            }
+          } catch { /* ignore malformed SSE events */ }
+        };
 
         // Stream SSE chunks through
         const reader = upstream.body.getReader();
@@ -4261,37 +4356,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
             // Parse SSE events for analytics regardless of routing branch
             if (analyticsDecoder && value) {
-              analyticsBuffer += analyticsDecoder.decode(value, { stream: true });
+              analyticsBuffer += analyticsDecoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
               const parts = analyticsBuffer.split('\n\n');
               analyticsBuffer = parts.pop() ?? '';
-              for (const part of parts) {
-                const dataLine = part.split('\n').find(l => l.startsWith('data: '));
-                if (!dataLine) continue;
-                try {
-                  const e = JSON.parse(dataLine.slice(6)) as Record<string, unknown>;
-                  if (e.type === 'message_start') {
-                    const u = (e.message as { usage?: Record<string, number> } | undefined)?.usage;
-                    if (u) {
-                      streamInputTokens = u.input_tokens ?? 0;
-                      streamCacheReadTokens = u.cache_read_input_tokens ?? 0;
-                      streamCacheCreateTokens = u.cache_creation_input_tokens ?? 0;
-                    }
-                  } else if (e.type === 'message_delta') {
-                    const u = (e as { usage?: Record<string, number> }).usage;
-                    if (u?.output_tokens) streamOutputTokens = u.output_tokens;
-                  } else if (e.type === 'content_block_delta') {
-                    // Mirror the non-streaming parseUsage thinking-token
-                    // heuristic: ~4 characters per token across thinking_delta
-                    // events. Closer than 0, and the same formula the parser
-                    // applies for buffered responses, so streaming + non-
-                    // streaming numbers stay comparable.
-                    const d = (e as { delta?: { type?: string; thinking?: string } }).delta;
-                    if (d?.type === 'thinking_delta' && typeof d.thinking === 'string') {
-                      streamThinkingChars += d.thinking.length;
-                    }
-                  }
-                } catch { /* ignore malformed SSE events */ }
-              }
+              for (const part of parts) consumeAnalyticsEvent(part);
             }
 
             if (isOpenAI) {
@@ -4336,6 +4404,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               await waitForDrain();
             }
           }
+          if (analyticsDecoder) {
+            analyticsBuffer += analyticsDecoder.decode().replace(/\r\n/g, '\n');
+            if (analyticsBuffer.trim()) consumeAnalyticsEvent(analyticsBuffer);
+            analyticsBuffer = '';
+          }
           // Flush remaining buffer
           if (isOpenAI && buffer.trim()) {
             const translated = openaiTranslate!(buffer);
@@ -4374,6 +4447,8 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         }
         {
           const rl = poolAccount?.rateLimit ?? parseRateLimits(upstream.headers);
+          responsePreview = streamPreview.preview();
+          responsePreview.text = redactPreviewText(redactSecrets(responsePreview.text));
           analytics.record({
             timestamp: Date.now(),
             account: poolAccount?.alias ?? ACCOUNT_KEY_APIKEY,
@@ -4384,6 +4459,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
             latencyMs: Date.now() - startTime, status: upstream.status, isStream: true, isOpenAI,
             upstreamAttempts,
+            ...previewFields(),
           });
           appendDebugEntry(upstream.status, {
             inputTokens: streamInputTokens,
@@ -4440,7 +4516,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         try {
           const parsed = JSON.parse(responseBody) as Record<string, unknown>;
           bufferedUsage = Analytics.parseUsage(parsed);
+          responsePreview = extractResponsePreview(parsed);
+          responsePreview.text = redactPreviewText(redactSecrets(responsePreview.text));
         } catch { /* malformed body — log without usage */ }
+        if (!responsePreview.text && responseBody) responsePreview = redactedPreview(responseBody);
 
         // Stamp response-completion state for the next request's think-time
         // delay. Same 2xx-only rule as the streaming path. Falls back to 0
@@ -4464,6 +4543,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
               latencyMs: Date.now() - startTime, status: upstream.status, isStream: false, isOpenAI,
               upstreamAttempts,
+              ...previewFields(),
             });
           } catch { /* don't let analytics errors break responses */ }
         }
