@@ -127,6 +127,63 @@ check('repeat is an affinity hit while fresh sessions are new bindings',
   events.filter((event) => event.affinity.result === 'new').length === 2
     && events.filter((event) => event.affinity.result === 'hit').length === 1);
 
+const HEADROOM_PORT = 39875;
+const HEADROOM_BASE = `http://127.0.0.1:${HEADROOM_PORT}`;
+await startProxy({
+  port: HEADROOM_PORT,
+  host: '127.0.0.1',
+  fetchImpl: fakeFetch,
+  poolStrategy: 'headroom',
+  sessionAffinity: true,
+  sessionAffinityClaudeSource: 'body',
+  pacingMinMs: 0,
+  pacingJitterMs: 0,
+  noLiveCapture: true,
+  overageGuardEnabled: false,
+});
+for (let i = 0; i < 50; i++) {
+  try { await realFetch(`${HEADROOM_BASE}/health`); break; } catch { await new Promise((resolve) => setTimeout(resolve, 50)); }
+}
+
+async function sendHeadroom(sessionId) {
+  const response = await realFetch(`${HEADROOM_BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'x-api-key': 'dario',
+      'x-claude-code-session-id': 'shared-cpa-session',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 8,
+      metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  await response.text();
+  return response.status;
+}
+
+const headroomStatuses = [
+  await sendHeadroom('headroom-session-a'),
+  await sendHeadroom('headroom-session-b'),
+  await sendHeadroom('headroom-session-a'),
+  await sendHeadroom('headroom-session-b'),
+];
+const headroomReport = await (await realFetch(`${HEADROOM_BASE}/routing/trace?limit=10`)).json();
+const headroomEvents = headroomReport.events.filter((event) => event.model === 'claude-opus-4-8');
+check('headroom requests with distinct body sessions succeed',
+  headroomStatuses.every((status) => status === 200));
+check('headroom creates one binding per body session and reuses each binding',
+  headroomEvents.filter((event) => event.affinity.result === 'new').length === 2
+    && headroomEvents.filter((event) => event.affinity.result === 'hit').length === 2);
+check('headroom keeps distinct session fingerprints independent',
+  headroomEvents.length === 4
+    && headroomEvents[0].affinity.fingerprint !== headroomEvents[1].affinity.fingerprint
+    && headroomEvents[0].affinity.fingerprint === headroomEvents[2].affinity.fingerprint
+    && headroomEvents[1].affinity.fingerprint === headroomEvents[3].affinity.fingerprint);
+
 async function sendGenuineClaudeCode(sessionId, assistantContent, model = 'claude-fable-5') {
   const callback = '<system-reminder><task-notification><summary>Agent finished</summary></task-notification></system-reminder>';
   const response = await realFetch(`${BASE}/v1/messages`, {
