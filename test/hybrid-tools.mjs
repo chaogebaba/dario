@@ -676,7 +676,7 @@ header('trailing assistant with real content gets an explicit continuation');
 
 {
   const body = {
-    model: 'claude-opus-4-6',
+    model: 'claude-opus-4-1',
     messages: [
       { role: 'user', content: 'run the tool' },
       { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] },
@@ -690,8 +690,76 @@ header('trailing assistant with real content gets an explicit continuation');
     {},
   );
   const finalMessages = built.body.messages;
-  check('tool-use tail is not followed by an invalid text continuation',
-    finalMessages.length === 2 && finalMessages.at(-1).role === 'assistant');
+  const repair = finalMessages.at(-1)?.content?.[0];
+  check('tool-use tail receives an immediate result turn',
+    finalMessages.length === 3 && finalMessages.at(-1).role === 'user');
+  check('interrupted tool result matches the call and reports an error',
+    repair?.type === 'tool_result' && repair?.tool_use_id === 't1' && repair?.is_error === true);
+  check('interrupted tool result leaves the execution outcome unknown',
+    repair?.content.includes('outcome is unknown'));
+}
+
+{
+  const body = {
+    model: 'claude-opus-4-6',
+    messages: [
+      { role: 'user', content: 'run both tools' },
+      { role: 'assistant', content: [
+        { type: 'text', text: 'I will inspect both files.' },
+        { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/a' } },
+        { type: 'tool_use', id: 't2', name: 'Read', input: { file_path: '/b' } },
+      ] },
+    ],
+  };
+  const built = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  const repairs = built.body.messages.at(-1)?.content;
+  check('parallel tool calls receive one result each in call order',
+    repairs?.length === 2
+      && repairs[0]?.tool_use_id === 't1'
+      && repairs[1]?.tool_use_id === 't2'
+      && repairs.every((block) => block.type === 'tool_result' && block.is_error === true));
+}
+
+{
+  const body = {
+    model: 'claude-opus-4-6',
+    messages: [
+      { role: 'user', content: 'search' },
+      { role: 'assistant', content: [{ type: 'server_tool_use', id: 'srv1', name: 'web_search', input: {} }] },
+    ],
+  };
+  const built = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  check('server-side tool calls are not repaired as client tool results', built.body.messages.length === 2);
+}
+
+{
+  const body = {
+    model: 'claude-opus-4-6',
+    messages: [
+      { role: 'user', content: 'read a file' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'partial', name: 'Read' }] },
+    ],
+  };
+  const built = buildCCRequest(
+    JSON.parse(JSON.stringify(body)),
+    'billing',
+    { type: 'ephemeral' },
+    { deviceId: 'd', accountUuid: 'a', sessionId: 's' },
+    {},
+  );
+  check('partial tool calls are not assigned synthetic results', built.body.messages.length === 2);
 }
 
 // ======================================================================

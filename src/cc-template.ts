@@ -1731,9 +1731,10 @@ export function rejectsAssistantPrefill(modelId: string): boolean {
     || /mythos-preview(?:\D|$)/.test(model);
 }
 
-/** Keep interrupted assistant output, then ask the model to continue. */
-export function appendPrefillContinuation(messages: Array<Record<string, unknown>>, modelId: string): void {
-  if (!rejectsAssistantPrefill(modelId)) return;
+const INTERRUPTED_TOOL_RESULT = 'Tool execution was interrupted before a result was recorded. The outcome is unknown; inspect external state before retrying.';
+
+/** Close an interrupted assistant turn without discarding its history. */
+export function normalizeTrailingAssistantTurn(messages: Array<Record<string, unknown>>, modelId: string): void {
   const last = messages.at(-1);
   if (!last || last.role !== 'assistant') return;
   const content = last.content;
@@ -1741,9 +1742,38 @@ export function appendPrefillContinuation(messages: Array<Record<string, unknown
     ? content.trim().length > 0
     : Array.isArray(content) && content.length > 0;
   if (!hasContent) return;
-  if (Array.isArray(content) && content.some((block) => (
-    typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool_use'
-  ))) return;
+
+  const toolUses = Array.isArray(content)
+    ? content.filter((block): block is Record<string, unknown> => (
+        typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool_use'
+      ))
+    : [];
+  const hasServerToolUse = Array.isArray(content) && content.some((block) => (
+    typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'server_tool_use'
+  ));
+  if (hasServerToolUse) return;
+  if (toolUses.length > 0) {
+    const complete = toolUses.every((block) => (
+      typeof block.id === 'string' && block.id.length > 0
+      && typeof block.name === 'string' && block.name.length > 0
+      && typeof block.input === 'object' && block.input !== null && !Array.isArray(block.input)
+    ));
+    if (!complete) return;
+    const ids = toolUses.map((block) => block.id as string);
+    if (new Set(ids).size !== ids.length) return;
+    messages.push({
+      role: 'user',
+      content: ids.map((toolUseId) => ({
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: INTERRUPTED_TOOL_RESULT,
+        is_error: true,
+      })),
+    });
+    return;
+  }
+
+  if (!rejectsAssistantPrefill(modelId)) return;
   messages.push({
     role: 'user',
     content: [{ type: 'text', text: 'Please continue where you left off.' }],
@@ -1779,13 +1809,13 @@ export function buildCCRequest(
   //   - cache breakpoints: client stamps are stripped and re-placed (system
   //     here, conversation in applyCcPromptCaching) so the 4-breakpoint
   //     budget stays deterministic.
-  // Messages (apart from a required continuation after a trailing assistant
-  // turn), thinking, effort, max_tokens, top-level key order: untouched — the
+  // Messages (apart from a required recovery user turn after an interrupted
+  // assistant), thinking, effort, max_tokens, top-level key order: untouched — the
   // client is the authority on its own wire shape. Outranks the
   // tool-mode flags: those configure how NON-CC clients are dressed up as
   // CC, which a genuine CC client doesn't need.
   if (isGenuineCCClient(clientBody)) {
-    appendPrefillContinuation(messages, model);
+    normalizeTrailingAssistantTurn(messages, model);
     const clientSystem = clientBody.system as Array<Record<string, unknown>>;
     const system = clientSystem.map((b, i) => {
       const copy = { ...b };
@@ -1883,7 +1913,7 @@ export function buildCCRequest(
     }
     break;
   }
-  appendPrefillContinuation(messages, model);
+  normalizeTrailingAssistantTurn(messages, model);
 
   // ── Build tool mapping ──
   // In preserveTools mode, skip the tool name/arg rewriting entirely.

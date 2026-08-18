@@ -241,6 +241,36 @@ async function sendGenuineTrailingAssistant(sessionId) {
   return response.status;
 }
 
+async function sendGenuineTrailingToolUse(sessionId) {
+  const response = await realFetch(`${BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'x-api-key': 'dario',
+      'x-claude-code-session-id': 'shared-cpa-session',
+    },
+    body: JSON.stringify({
+      model: 'claude-fable-5',
+      max_tokens: 8,
+      system: [
+        { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.234;' },
+        { type: 'text', text: 'You are a Claude agent, built on the Claude Agent SDK.' },
+      ],
+      metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'inspect both files' }] },
+        { role: 'assistant', content: [
+          { type: 'tool_use', id: 'tool-a', name: 'Read', input: { file_path: '/a' } },
+          { type: 'tool_use', id: 'tool-b', name: 'Read', input: { file_path: '/b' } },
+        ] },
+      ],
+    }),
+  });
+  await response.text();
+  return response.status;
+}
+
 const thinkingTail = await sendGenuineClaudeCode('callback-thinking', [
   { type: 'thinking', thinking: 'waiting' },
   { type: 'text', text: 'Waiting for the result.' },
@@ -272,6 +302,17 @@ check('trailing assistant history is preserved with a continuation user turn',
   trailingBody?.messages.at(-2)?.role === 'assistant'
     && trailingBody?.messages.at(-1)?.role === 'user'
     && trailingBody?.messages.at(-1)?.content[0]?.text === 'Please continue where you left off.');
+
+const toolUseStatus = await sendGenuineTrailingToolUse('callback-trailing-tool-use');
+const toolUseBody = upstreamBodies.at(-1);
+const syntheticResults = toolUseBody?.messages.at(-1)?.content;
+check('genuine CC interrupted tool-use request succeeds', toolUseStatus === 200);
+check('genuine CC parallel tool calls receive matching error results',
+  toolUseBody?.messages.at(-1)?.role === 'user'
+    && syntheticResults?.length === 2
+    && syntheticResults[0]?.tool_use_id === 'tool-a'
+    && syntheticResults[1]?.tool_use_id === 'tool-b'
+    && syntheticResults.every((block) => block.type === 'tool_result' && block.is_error === true));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
