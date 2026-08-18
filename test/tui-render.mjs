@@ -68,6 +68,10 @@ header('visibleWidth — ANSI-stripping length');
   check('color-wrapped',                visibleWidth(fg('green', 'hello')) === 5);
   check('multiple escapes',             visibleWidth(`${ESC}1m${ESC}32mhello${ESC}0m`) === 5);
   check('embedded cursor moves',        visibleWidth(`hello${moveTo(1,1)}world`) === 10);
+  check('CJK uses two terminal cells',  visibleWidth('日本') === 4);
+  check('emoji uses two terminal cells', visibleWidth('🙂') === 2);
+  check('combining marks add no cell',  visibleWidth('e\u0301') === 1);
+  check('tabs reserve four cells',      visibleWidth('\t') === 4);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -84,6 +88,9 @@ header('truncate — respect visible width + ANSI safety');
   const out = truncate(colored, 8);
   check('truncated keeps opening escape', out.startsWith(`${ESC}32m`));
   check('truncated visible width = 8',    visibleWidth(out) === 8);
+  const wide = truncate('日本語', 5);
+  check('truncate respects wide chars', visibleWidth(wide) <= 5 && wide === '日本…');
+  check('truncate preserves emoji code points', truncate('🙂🙂', 3) === '🙂…');
 }
 
 // ─────────────────────────────────────────────────────────────

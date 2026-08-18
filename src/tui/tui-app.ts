@@ -91,7 +91,7 @@ export function startTuiApp(opts: TuiAppOpts): Promise<void> {
   app = new App<TuiState>({
     initialState,
     render: (state, dim_) => renderTui(state, dim_, opts.version, proxyUrl),
-    onKey: (state, key) => onKey(state, key, app, client, cleanupsByTab),
+    onKey: (state, key, dim) => onKey(state, key, dim, app, client, cleanupsByTab),
     afterFrame: () => { /* no-op for now */ },
   });
 
@@ -130,6 +130,7 @@ export function startTuiApp(opts: TuiAppOpts): Promise<void> {
 function onKey(
   state: TuiState,
   key: Key,
+  dim: { cols: number; rows: number },
   app: App<TuiState>,
   client: ProxyClient,
   cleanupsByTab: Map<number, Array<() => void>>,
@@ -163,7 +164,10 @@ function onKey(
 
   // Delegate to the active tab's onKey
   const tabSlice = stateOf(state, state.activeTab);
-  const nextSlice = tab.onKey?.(tabSlice, key);
+  // Tabs render in the body below the global chrome (header, tabs, rule,
+  // footer), so give key handlers the same viewport dimensions they use
+  // during rendering. This keeps page-local navigation deterministic.
+  const nextSlice = tab.onKey?.(tabSlice, key, { cols: dim.cols, rows: Math.max(1, dim.rows - 5) });
   if (nextSlice !== undefined && nextSlice !== tabSlice) {
     return withTabState(state, state.activeTab, nextSlice);
   }

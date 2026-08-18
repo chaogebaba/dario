@@ -121,17 +121,33 @@ export function brand(text: string): string {
 // ── String helpers ─────────────────────────────────────────────────
 
 /**
- * Visible-width of a string. ANSI escape sequences and zero-width
- * sequences contribute 0. Tabs count as 1 (terminals vary; better
- * to under- than over-estimate). Multi-byte characters (CJK, emoji)
- * are NOT special-cased in v4.0 — the TUI's content is ASCII-dominant
- * (model names, numbers, labels). A future revision can add a
- * `string-width`-style lookup if non-ASCII becomes common.
+ * Visible terminal-cell width of a string. ANSI escape sequences and
+ * combining/format characters contribute 0; CJK and emoji use two cells.
+ * Tabs are expanded conservatively to four cells so arbitrary model output
+ * cannot make a row wider than the terminal budget.
  */
 export function visibleWidth(s: string): number {
   // Strip ANSI escape sequences (CSI + everything up to terminating byte).
   const stripped = s.replace(/\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g, '');
-  return stripped.length;
+  let width = 0;
+  for (const ch of stripped) width += terminalCellWidth(ch);
+  return width;
+}
+
+function terminalCellWidth(ch: string): number {
+  const cp = ch.codePointAt(0) ?? 0;
+  if (cp === 0x09) return 4;
+  if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
+  // Combining marks, variation selectors, joiners, and emoji modifiers.
+  if ((cp >= 0x300 && cp <= 0x36f) || (cp >= 0x1ab0 && cp <= 0x1aff) ||
+      (cp >= 0x1dc0 && cp <= 0x1dff) || (cp >= 0x20d0 && cp <= 0x20ff) ||
+      (cp >= 0xfe00 && cp <= 0xfe0f) || cp === 0x200d || (cp >= 0x1f3fb && cp <= 0x1f3ff)) return 0;
+  // East Asian wide/fullwidth ranges plus the principal emoji blocks.
+  if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2329 && cp <= 0x232a) ||
+      (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe10 && cp <= 0xfe6f) ||
+      (cp >= 0xff01 && cp <= 0xff60) || (cp >= 0x1f000 && cp <= 0x1faff)) return 2;
+  return 1;
 }
 
 /**
@@ -152,15 +168,19 @@ export function truncate(text: string, maxWidth: number, ellipsis: string = '…
   let out = '';
   let visible = 0;
   let i = 0;
-  while (i < text.length && visible < target) {
+  while (i < text.length) {
     if (text[i] === '\x1b' && text[i + 1] === '[') {
       // Copy the full escape sequence
       const m = text.slice(i).match(/^\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/);
       if (m) { out += m[0]; i += m[0].length; continue; }
     }
-    out += text[i];
-    visible++;
-    i++;
+    const cp = text.codePointAt(i)!;
+    const ch = String.fromCodePoint(cp);
+    const w = terminalCellWidth(ch);
+    if (visible + w > target) break;
+    out += ch;
+    visible += w;
+    i += ch.length;
   }
   // Flush SGR sequences from the clipped remainder. Without this, a cut
   // that lands inside a dim()/fg() block drops the closing code, leaving

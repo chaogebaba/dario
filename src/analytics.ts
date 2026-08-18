@@ -56,7 +56,7 @@ export interface RequestRecord {
 
 const MAX_CONTENT_RECORDS = 512;
 
-function withoutContent(record: RequestRecord): RequestRecord {
+export function withoutRequestPreviews(record: RequestRecord): RequestRecord {
   const {
     inputPreview: _inputPreview,
     outputPreview: _outputPreview,
@@ -285,7 +285,7 @@ export class Analytics extends EventEmitter {
   record(r: RequestRecord): void {
     this.records.push(r);
     const contentExpiry = this.records.length - MAX_CONTENT_RECORDS - 1;
-    if (contentExpiry >= 0) this.records[contentExpiry] = withoutContent(this.records[contentExpiry]!);
+    if (contentExpiry >= 0) this.records[contentExpiry] = withoutRequestPreviews(this.records[contentExpiry]!);
     if (this.records.length > this.maxRecords) {
       this.records = this.records.slice(-this.maxRecords);
     }

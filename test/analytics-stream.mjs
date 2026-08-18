@@ -14,7 +14,7 @@
 // contract so a regression in the EventEmitter wiring is caught
 // independently of the network surface.
 
-import { Analytics } from '../dist/analytics.js';
+import { Analytics, withoutRequestPreviews } from '../dist/analytics.js';
 
 let pass = 0, fail = 0;
 function check(name, cond, detail) {
@@ -43,6 +43,20 @@ function makeRecord(overrides = {}) {
     isOpenAI: false,
     ...overrides,
   };
+}
+
+header('Remote stream projection removes textual previews');
+{
+  const source = makeRecord({
+    inputPreview: 'private prompt', outputPreview: 'private answer',
+    inputChars: 14, outputChars: 14, requestFingerprint: 'abc123',
+  });
+  const projected = withoutRequestPreviews(source);
+  check('input preview removed', !('inputPreview' in projected));
+  check('output preview removed', !('outputPreview' in projected));
+  check('token and correlation metadata retained',
+    projected.inputTokens === 100 && projected.requestFingerprint === 'abc123');
+  check('projection does not mutate local record', source.inputPreview === 'private prompt');
 }
 
 // ─────────────────────────────────────────────────────────────

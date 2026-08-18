@@ -24,19 +24,14 @@
  *   └─────────────────────────────────────────────────────────────
  */
 
-import type { Tab, TabContext } from '../tab.js';
-import { fg, dim, brand, inverse, BOX, pad, truncate } from '../render.js';
+import type { Tab, TabContext, TabDimensions } from '../tab.js';
+import { fg, dim, brand, inverse, BOX, pad, truncate, visibleWidth } from '../render.js';
 import { renderKvRow } from '../layout.js';
-import { billingBucketFromClaim, isNonSubscriptionBilling } from '../../analytics.js';
+import { billingBucketFromClaim, isNonSubscriptionBilling, withoutRequestPreviews } from '../../analytics.js';
 import type { RequestRecord } from '../../analytics.js';
 
 const MAX_BUFFER = 5000;
 const MAX_CONTENT_BUFFER = 512;
-
-function withoutPreview(record: RequestRecord): RequestRecord {
-  const { inputPreview: _inputPreview, outputPreview: _outputPreview, ...metadata } = record;
-  return metadata;
-}
 
 /** Live overage-halt state — populated from SSE event:overage_halt frames. */
 interface HitsHaltState {
@@ -89,7 +84,7 @@ export const HitsTab: Tab<HitsState> = {
         ctx.setState((s: HitsState) => {
           const buffer = [...s.buffer, record].slice(-MAX_BUFFER);
           const contentExpiry = buffer.length - MAX_CONTENT_BUFFER - 1;
-          if (contentExpiry >= 0) buffer[contentExpiry] = withoutPreview(buffer[contentExpiry]!);
+          if (contentExpiry >= 0) buffer[contentExpiry] = withoutRequestPreviews(buffer[contentExpiry]!);
           const next: HitsState = {
             ...s,
             buffer,
@@ -102,7 +97,13 @@ export const HitsTab: Tab<HitsState> = {
           // they auto-follow. If they scrolled down (idx > 0), shift to keep
           // the same record selected. -1 means "no selection yet"; auto-select
           // newest on first record.
-          if (s.selectedIdx <= 0) {
+          if (s.detailOpen && s.selectedIdx >= 0) {
+            // An open inspector is a modal view of one record. New SSE
+            // entries prepend to newestFirst, so shift the index to keep
+            // the inspected record stable instead of silently replacing it.
+            const max = next.buffer.length - 1;
+            next.selectedIdx = Math.min(s.selectedIdx + 1, max);
+          } else if (s.selectedIdx <= 0) {
             next.selectedIdx = 0;
           } else {
             // The new record went to the front of newestFirst, so the
@@ -121,16 +122,17 @@ export const HitsTab: Tab<HitsState> = {
     return undefined;
   },
 
-  onKey(state, key) {
+  onKey(state, key, dim) {
     if (state.buffer.length === 0) return undefined;
     if (state.detailOpen) {
       if (key.name === 'escape' || key.name === 'enter') return { ...state, detailOpen: false, detailScroll: 0 };
-      if (key.name === 'up') return { ...state, detailScroll: Math.max(0, state.detailScroll - 1) };
-      if (key.name === 'down') return { ...state, detailScroll: state.detailScroll + 1 };
-      if (key.name === 'pageup') return { ...state, detailScroll: Math.max(0, state.detailScroll - 10) };
-      if (key.name === 'pagedown') return { ...state, detailScroll: state.detailScroll + 10 };
-      if (key.name === 'home') return { ...state, detailScroll: 0 };
-      if (key.name === 'end') return { ...state, detailScroll: Number.MAX_SAFE_INTEGER };
+      const maxScroll = detailMaxScroll(state, dim);
+      if (key.name === 'up') return setDetailScroll(state, Math.max(0, Math.min(maxScroll, state.detailScroll) - 1));
+      if (key.name === 'down') return setDetailScroll(state, Math.min(maxScroll, Math.max(0, state.detailScroll) + 1));
+      if (key.name === 'pageup') return setDetailScroll(state, Math.max(0, Math.min(maxScroll, state.detailScroll) - pageStep(dim)));
+      if (key.name === 'pagedown') return setDetailScroll(state, Math.min(maxScroll, Math.max(0, state.detailScroll) + pageStep(dim)));
+      if (key.name === 'home') return setDetailScroll(state, 0);
+      if (key.name === 'end') return setDetailScroll(state, maxScroll);
       return undefined;
     }
     if (key.name === 'enter') return { ...state, detailOpen: true, detailScroll: 0 };
@@ -377,6 +379,18 @@ function formatRemaining(ms: number): string {
 }
 
 function renderInspector(r: RequestRecord, state: HitsState, width: number, rows: number): string {
+  const content = inspectorContent(r, state, width);
+  const footerRows = 1;
+  const viewportRows = Math.max(1, rows - footerRows);
+  const maxScroll = Math.max(0, content.length - viewportRows);
+  const scroll = Math.min(Math.max(0, state.detailScroll), maxScroll);
+  const visible = content.slice(scroll, scroll + viewportRows).map((line) => truncate(line, width));
+  const rangeEnd = Math.min(content.length, scroll + viewportRows);
+  visible.push(truncate('  ' + dim(`Esc/Enter back · ↑↓ scroll · ${scroll + 1}-${rangeEnd}/${content.length}`), width));
+  return visible.slice(0, rows).join('\n');
+}
+
+function inspectorContent(r: RequestRecord, state: HitsState, width: number): string[] {
   const inner = Math.max(16, width - 4);
   const content: string[] = [];
   const route = [r.method, r.path].filter(Boolean).join(' ') || 'request';
@@ -398,15 +412,25 @@ function renderInspector(r: RequestRecord, state: HitsState, width: number, rows
   appendPreviewSection(content, 'Input', r.inputPreview, r.inputChars, r.inputTruncated, inner);
   content.push(' ' + dim(BOX.horizontal.repeat(Math.max(0, width - 2))));
   appendPreviewSection(content, 'Output', r.outputPreview, r.outputChars, r.outputTruncated, inner);
+  return content;
+}
 
-  const footerRows = 1;
-  const viewportRows = Math.max(1, rows - footerRows);
-  const maxScroll = Math.max(0, content.length - viewportRows);
-  const scroll = Math.min(Math.max(0, state.detailScroll), maxScroll);
-  const visible = content.slice(scroll, scroll + viewportRows).map((line) => truncate(line, width));
-  const rangeEnd = Math.min(content.length, scroll + viewportRows);
-  visible.push(truncate('  ' + dim(`Esc/Enter back · ↑↓ scroll · ${scroll + 1}-${rangeEnd}/${content.length}`), width));
-  return visible.slice(0, rows).join('\n');
+function detailMaxScroll(state: HitsState, dim?: TabDimensions): number {
+  const width = dim?.cols ?? 80;
+  const rows = dim?.rows ?? 19;
+  const newestFirst = [...state.buffer].reverse();
+  const selected = newestFirst[state.selectedIdx];
+  if (!selected) return 0;
+  const contentRows = inspectorContent(selected, state, width).length;
+  return Math.max(0, contentRows - Math.max(1, rows - 1));
+}
+
+function pageStep(dim?: TabDimensions): number {
+  return Math.max(1, (dim?.rows ?? 19) - 2);
+}
+
+function setDetailScroll(state: HitsState, detailScroll: number): HitsState {
+  return detailScroll === state.detailScroll ? state : { ...state, detailScroll };
 }
 
 function appendPreviewSection(
@@ -429,16 +453,32 @@ function appendPreviewSection(
 
 function wrapPlainText(text: string, width: number): string[] {
   const rows: string[] = [];
-  for (const source of text.split('\n')) {
+  // Request text is untrusted terminal input. Preserve line structure and
+  // tabs, but neutralize C0 controls (especially ESC/OSC/CSI introducers)
+  // before it reaches the alternate screen.
+  const terminalSafe = text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '?');
+  for (const source of terminalSafe.split('\n')) {
     if (!source) { rows.push(''); continue; }
-    let rest = source;
-    while (rest.length > width) {
-      let split = rest.lastIndexOf(' ', width);
-      if (split < Math.floor(width / 2)) split = width;
+    let rest = source.replace(/\t/g, '    ');
+    while (rest.length > 0) {
+      let split = 0;
+      let cells = 0;
+      for (const ch of rest) {
+        const w = visibleWidth(ch);
+        if (cells + w > width) break;
+        cells += w;
+        split += ch.length;
+      }
+      if (split >= rest.length) {
+        rows.push(rest);
+        break;
+      }
+      const wordBreak = rest.lastIndexOf(' ', split);
+      if (wordBreak >= Math.floor(split / 2)) split = wordBreak;
+      if (split <= 0) split = Array.from(rest)[0]?.length ?? 1;
       rows.push(rest.slice(0, split));
       rest = rest.slice(split).trimStart();
     }
-    rows.push(rest);
   }
   return rows;
 }

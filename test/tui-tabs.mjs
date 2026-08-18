@@ -499,10 +499,49 @@ header('Hits tab — empty / connecting / populated / selected');
   check('inspector shows input words', inspector.includes('duplicate requests'));
   check('inspector shows output words', inspector.includes('duplicate dispatch'));
   check('inspector shows request identity', inspector.includes('abc123'));
-  const scrolled = HitsTab.onKey(opened, { name: 'down', ch: '', ctrl: false, shift: false, meta: false });
+  const controlPreview = { ...opened, buffer: [{ ...withPreview.buffer[0], inputPreview: 'safe\x1b[2Jstill-here' }] };
+  const sanitizedInspector = HitsTab.render(controlPreview, { cols: 50, rows: 12 });
+  check('inspector neutralizes terminal controls in previews',
+    sanitizedInspector.includes('safe?[2J') && !sanitizedInspector.includes('\x1b[2J'));
+  const inspectorDim = { cols: 50, rows: 8 };
+  const scrolled = HitsTab.onKey(opened, { name: 'down', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
   check('inspector arrows scroll content', scrolled.detailScroll === 1 && scrolled.selectedIdx === opened.selectedIdx);
+  let atBottom = opened;
+  for (let i = 0; i < 100; i++) {
+    atBottom = HitsTab.onKey(atBottom, { name: 'down', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
+  }
+  check('inspector down clamps at content end', atBottom.detailScroll > 0);
+  const extraDown = HitsTab.onKey(atBottom, { name: 'down', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
+  check('inspector ignores key repeat at bottom', extraDown === atBottom);
+  const movedUp = HitsTab.onKey(atBottom, { name: 'up', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
+  check('inspector up works after reaching bottom', movedUp.detailScroll === atBottom.detailScroll - 1);
+  const pageBottom = HitsTab.onKey(opened, { name: 'pagedown', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
+  const pageUp = HitsTab.onKey(pageBottom, { name: 'pageup', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
+  check('inspector PageUp works after PageDown', pageBottom.detailScroll > 0 && pageUp.detailScroll < pageBottom.detailScroll);
+  const ended = HitsTab.onKey(opened, { name: 'end', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
+  const endUp = HitsTab.onKey(ended, { name: 'up', ch: '', ctrl: false, shift: false, meta: false }, inspectorDim);
+  check('inspector up works after End', endUp.detailScroll === Math.max(0, ended.detailScroll - 1));
   const closed = HitsTab.onKey(opened, { name: 'escape', ch: '', ctrl: false, shift: false, meta: false });
   check('Escape closes request inspector', closed.detailOpen === false);
+
+  let streamCallback;
+  let liveHits = opened;
+  HitsTab.onMount(liveHits, {
+    client: {
+      subscribeAnalyticsStream: (onRecord) => {
+        streamCallback = onRecord;
+        return () => {};
+      },
+    },
+    setState: (updater) => {
+      liveHits = typeof updater === 'function' ? updater(liveHits) : { ...liveHits, ...updater };
+    },
+    registerCleanup: () => {},
+  });
+  streamCallback({ ...records[1], timestamp: Date.now(), account: 'new-arrival' }, 'message');
+  const inspectedAfterArrival = [...liveHits.buffer].reverse()[liveHits.selectedIdx];
+  check('live requests do not replace the inspected record',
+    liveHits.detailOpen && inspectedAfterArrival.requestFingerprint === 'abc123');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -892,7 +931,7 @@ header('Hits tab — no row exceeds the terminal width');
     'halted':       (s) => { s.buffer = buffer; s.subscribed = true; s.halt = halt; },
     'no selection': (s) => { s.buffer = buffer; s.subscribed = true; s.selectedIdx = -1; },
     'inspector':    (s) => {
-      s.buffer = [{ ...buffer[0], inputPreview: 'input '.repeat(400), outputPreview: 'output '.repeat(400), inputChars: 2400, outputChars: 2800 }];
+      s.buffer = [{ ...buffer[0], inputPreview: '日本語🙂\tinput '.repeat(400), outputPreview: 'résumé output '.repeat(400), inputChars: 4400, outputChars: 5600 }];
       s.subscribed = true; s.selectedIdx = 0; s.detailOpen = true;
     },
   };

@@ -40,9 +40,10 @@ export interface AppOptions<S> {
    * Key dispatch. Receives every parsed key from stdin (after the
    * App has already handled global keys like Ctrl-C). Return a new
    * state (or undefined for no change) — same shape as React's
-   * setState reducer.
+   * setState reducer. Terminal dimensions are sampled with the key event so
+   * viewport-aware controls do not depend on stale render state.
    */
-  onKey: (state: S, key: Key) => S | undefined;
+  onKey: (state: S, key: Key, dim: { cols: number; rows: number }) => S | undefined;
   /**
    * Optional: called on every redraw after the new frame has been
    * written. Used by tabs that have async data (e.g. SSE-fed Hits
@@ -140,7 +141,10 @@ export class App<S> {
           this.scheduleRedraw(true);
           return;
         }
-        const next = this.keyFn(this.state, key);
+        const next = this.keyFn(this.state, key, {
+          cols: this.stdout.columns ?? 80,
+          rows: this.stdout.rows ?? 24,
+        });
         if (next !== undefined && next !== this.state) {
           this.state = next;
           this.scheduleRedraw();

@@ -17,7 +17,7 @@ import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion }
 import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinitySignals, selectSessionAffinitySignal, type ClaudeSessionIdentitySource, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
-import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, type RequestRecord } from './analytics.js';
+import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, withoutRequestPreviews, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
 import { notify as osNotify } from './notify.js';
 import { loadAllAccounts, loadAccount, saveAccount, refreshAccountToken, resyncLoginFromCredentialsIfStale, ensureLoginCredentialsInPool, mirrorLoginToCredentials } from './accounts.js';
@@ -2564,6 +2564,13 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // Disconnect handling: the 'close' event on `req` removes our
     // listener from the Analytics EventEmitter so we don't leak.
     if (urlPath === '/analytics/stream' && req.method === 'GET') {
+      // Prompt/output previews are local operator data, not part of the
+      // authenticated proxy-client contract. Remote API-key holders receive
+      // the same token/routing metadata with textual previews removed.
+      const disclosePreviews = isLoopbackAddr(req.socket?.remoteAddress)
+        && req.headers['cf-ray'] === undefined;
+      const streamRecord = (record: RequestRecord): RequestRecord =>
+        disclosePreviews ? record : withoutRequestPreviews(record);
       // SECURITY_HEADERS sets Cache-Control: no-store; SSE wants
       // no-cache, no-transform. Spread SECURITY_HEADERS first then
       // override the cache directive — order matters since spread
@@ -2581,7 +2588,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // sees something. 50 is a soft default; lots of room to send more
       // since this is one-time on connect.
       for (const past of analytics.recent(50)) {
-        res.write(`data: ${JSON.stringify(past)}\n\n`);
+        res.write(`data: ${JSON.stringify(streamRecord(past))}\n\n`);
       }
       // Backlog the current halt state if any — a TUI attaching mid-halt
       // needs to see the banner immediately without waiting for the
@@ -2597,7 +2604,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // Use try/catch so a broken socket (peer hung up between events)
         // doesn't crash the request hot-path — Analytics already wraps
         // its emit in try/catch but the .write itself can also throw.
-        try { res.write(`data: ${JSON.stringify(r)}\n\n`); } catch { /* ignored */ }
+        try { res.write(`data: ${JSON.stringify(streamRecord(r))}\n\n`); } catch { /* ignored */ }
       };
       const onHalt = (state: HaltState) => {
         try { res.write(`event: overage_halt\ndata: ${JSON.stringify(state)}\n\n`); } catch { /* ignored */ }

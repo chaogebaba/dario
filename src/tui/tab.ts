@@ -20,6 +20,11 @@
 import type { Key } from './input.js';
 import type { ProxyClient } from './proxy-client.js';
 
+export interface TabDimensions {
+  cols: number;
+  rows: number;
+}
+
 export interface TabContext<S = unknown> {
   /** The proxy HTTP client. Tabs use it to fetch /analytics, subscribe to /analytics/stream, etc. */
   client: ProxyClient;
@@ -69,9 +74,10 @@ export interface Tab<S> {
    * Handle a keypress. Return the next state (or undefined for no
    * change). Global keys (Tab, q, Ctrl+C, hotkeys) are intercepted
    * by the parent before reaching this; the tab only sees keys the
-   * parent didn't claim.
+   * parent didn't claim. `dim` is the same body viewport passed to render;
+   * it is optional only for direct unit-test and standalone tab callers.
    */
-  onKey?(state: S, key: Key): S | undefined;
+  onKey?(state: S, key: Key, dim?: TabDimensions): S | undefined;
   /**
    * Run once when this tab becomes active. May fire async work that
    * calls `ctx.setState(...)` to update the slice once the data lands.
