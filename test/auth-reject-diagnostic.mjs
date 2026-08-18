@@ -6,7 +6,7 @@
 // authenticateRequest outcomes that each reason corresponds to, so a future
 // refactor can't drift the two apart.
 
-import { authenticateRequest, describeAuthReject } from '../dist/proxy.js';
+import { authenticateRequest, describeAuthReject, isAuthFailureResponseBody } from '../dist/proxy.js';
 
 let pass = 0, fail = 0;
 function check(name, cond) {
@@ -99,6 +99,21 @@ header('describeAuthReject / authenticateRequest — consistency');
     check(`reject + non-empty reason for ${JSON.stringify(h)}`,
       allowed === false && reason.length > 0);
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+header('isAuthFailureResponseBody — structured provider errors');
+{
+  check('Anthropic authentication_error is classified',
+    isAuthFailureResponseBody(JSON.stringify({
+      type: 'error', error: { type: 'authentication_error', message: 'expired' },
+    })));
+  check('permission_error is classified',
+    isAuthFailureResponseBody('{"error":{"type":"permission_error"}}'));
+  check('invalid_grant is classified from a non-JSON body',
+    isAuthFailureResponseBody('invalid_grant: refresh token rejected'));
+  check('ordinary invalid request is not classified as auth',
+    !isAuthFailureResponseBody('{"error":{"type":"invalid_request_error"}}'));
 }
 
 // ─────────────────────────────────────────────────────────────

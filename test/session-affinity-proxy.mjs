@@ -35,6 +35,7 @@ for (const alias of ['alpha', 'beta']) {
 const realFetch = globalThis.fetch;
 const upstreamAccounts = [];
 const upstreamBodies = [];
+let authBodyFailuresRemaining = 0;
 const fakeFetch = async (url, init) => {
   if (String(url).includes('/api/oauth/profile')) {
     return new Response(JSON.stringify({ account: { has_claude_max: true } }), {
@@ -55,6 +56,16 @@ const fakeFetch = async (url, init) => {
         ? Buffer.from(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength).toString('utf8')
         : '';
     upstreamBodies.push(JSON.parse(bodyText));
+    if (authBodyFailuresRemaining > 0) {
+      authBodyFailuresRemaining--;
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: { type: 'authentication_error', message: 'credential rejected' },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
   }
   return new Response(JSON.stringify({
     id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-opus-4-8',
@@ -184,6 +195,12 @@ check('headroom keeps distinct session fingerprints independent',
     && headroomEvents[0].affinity.fingerprint === headroomEvents[2].affinity.fingerprint
     && headroomEvents[1].affinity.fingerprint === headroomEvents[3].affinity.fingerprint);
 
+authBodyFailuresRemaining = 1;
+const authBodyStatus = await send('auth-body-failover');
+check('structured auth failure on HTTP 400 fails over and succeeds', authBodyStatus === 200);
+check('structured auth failure skips the invalid account on retry',
+  upstreamAccounts.slice(-2).join(',') === 'alpha,beta');
+
 async function sendGenuineClaudeCode(sessionId, assistantContent, model = 'claude-fable-5') {
   const callback = '<system-reminder><task-notification><summary>Agent finished</summary></task-notification></system-reminder>';
   const response = await realFetch(`${BASE}/v1/messages`, {
@@ -311,6 +328,9 @@ const unsupportedSystem = await sendGenuineClaudeCode('callback-sonnet', [
   { type: 'text', text: 'Waiting for the result.' },
 ], 'claude-sonnet-4-6');
 const callbackBodies = upstreamBodies.slice(-3);
+const supportedSonnet = await sendGenuineClaudeCode('callback-sonnet-5', [
+  { type: 'text', text: 'Waiting for the result.' },
+], 'claude-sonnet-5');
 check('genuine CC callback requests succeed through the proxy path',
   thinkingTail.status === 200 && textTail.status === 200 && unsupportedSystem.status === 200);
 check('genuine CC callback remains the final user turn for both assistant shapes',
@@ -323,6 +343,9 @@ check('supported Fable preserves native system turns',
   callbackBodies.slice(0, 2).every((body) => body.messages.some((message) => message.role === 'system')));
 check('unsupported Sonnet folds system turns into user content',
   callbackBodies[2]?.messages.every((message) => message.role !== 'system'));
+check('Sonnet 5 preserves native system turns',
+  supportedSonnet.status === 200
+    && upstreamBodies.at(-1)?.messages.some((message) => message.role === 'system'));
 
 const trailingStatus = await sendGenuineTrailingAssistant('callback-trailing-assistant');
 const trailingBody = upstreamBodies.at(-1);

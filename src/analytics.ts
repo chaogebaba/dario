@@ -36,6 +36,8 @@ export interface RequestRecord {
   status: number;
   isStream: boolean;
   isOpenAI: boolean;
+  /** Number of upstream dispatches used to complete this client request. */
+  upstreamAttempts?: number;
 }
 
 /**

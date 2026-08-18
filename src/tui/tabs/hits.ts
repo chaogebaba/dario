@@ -148,7 +148,7 @@ export const HitsTab: Tab<HitsState> = {
     // flat guess. The old `detailRows = 9; totalRows - detailRows - 2`
     // reserved 11 but the tab renders up to 15 non-list rows — the halt
     // banner was missing from the arithmetic entirely and the detail pane
-    // is 8 rows, not 9 — so the body overran its budget by 4 (#868).
+    // is 9 rows, not 8 — so the body overran its budget by 4 (#868).
     const hasSelection = state.selectedIdx >= 0 && state.selectedIdx < state.buffer.length;
     const haltRows = state.halt ? 2 : 0;         // pinned banner
     const fixedRows =
@@ -157,7 +157,7 @@ export const HitsTab: Tab<HitsState> = {
       1 +            // blank before the table
       1 +            // column header
       1;             // scroll hint (reserved; only drawn when the list overflows)
-    const detailPaneRows = (hasSelection ? 8 : 2) + 1;   // pane + its separator
+    const detailPaneRows = (hasSelection ? 9 : 2) + 1;   // pane + its separator
     // The list is the tab's reason to exist, so the detail pane yields to
     // it rather than the other way round: on a terminal too short to show
     // both, drop the pane and spend the rows on requests. Without this the
@@ -273,6 +273,7 @@ export const HitsTab: Tab<HitsState> = {
       lines.push('  ' + renderKvRow('Model', r.model, w - 4));
       lines.push('  ' + renderKvRow('Billing bucket', billingBucketFromClaim(r.claim), w - 4));
       lines.push('  ' + renderKvRow('Tokens', tokenBreakdown(r), w - 4));
+      lines.push('  ' + renderKvRow('Upstream attempts', String(r.upstreamAttempts ?? 1), w - 4));
       lines.push('  ' + renderKvRow('Latency', `${formatLatency(r.latencyMs)}  ${dim(r.isStream ? '(streaming)' : '(buffered)')}`, w - 4));
       lines.push('  ' + renderKvRow('Util at request',
         `5h ${(r.util5h * 100).toFixed(0)}%   7d ${(r.util7d * 100).toFixed(0)}%`, w - 4));

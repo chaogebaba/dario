@@ -162,6 +162,11 @@ Wants=network-online.target
 Type=simple
 ExecStart="$e_bun" "$e_entry" proxy
 WorkingDirectory=$e_repo
+# Persist the bounded redacted request diagnostics for the managed service.
+# Foreground/test processes remain memory-only unless they opt in with
+# DARIO_DEBUG_LOG_FILE themselves.
+Environment=DARIO_DEBUG_LOG_FILE="$e_home/debug-requests.ndjson"
+Environment=DARIO_DEBUG_LOG_LIMIT=512
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=15

@@ -31,6 +31,7 @@ import { RequestQueue, QueueFullError, QueueTimeoutError, DEFAULT_MAX_CONCURRENT
 import { redactSecrets } from './redact.js';
 import { BAKED_BASE_MODELS, withLongContextVariants, buildOpenAIModelsList, getModelCatalog, getCachedBases, resolveAliasAgainst, prewarmModelCatalog, retryModelCatalogNow, isSuspendedModel, type CatalogDeps } from './model-catalog.js';
 import { homeDir } from './home-dir.js';
+import { RequestDebugStore, type RequestDebugEntry } from './request-debug.js';
 
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
@@ -673,6 +674,7 @@ export function supportsMidConversationSystemMessages(modelId: string): boolean 
   const model = stripContext1mTag(modelId).toLowerCase();
   return model.includes('fable-5')
     || model.includes('mythos-5')
+    || model.includes('sonnet-5')
     || model.includes('opus-4-8')
     || model.includes('opus-5');
 }
@@ -1310,6 +1312,29 @@ function enrich429(body: string, headers: Headers): string {
   }
 }
 
+/** Detect provider auth failures even when Anthropic returns a non-401 status. */
+export function isAuthFailureResponseBody(body: string): boolean {
+  const markers = /\b(?:authentication_error|permission_error|invalid_grant)\b/i;
+  if (!body || !markers.test(body)) return false;
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const nested = parsed.error;
+    const values = [
+      parsed.type,
+      parsed.error,
+      typeof nested === 'object' && nested !== null
+        ? (nested as Record<string, unknown>).type
+        : undefined,
+      typeof nested === 'object' && nested !== null
+        ? (nested as Record<string, unknown>).code
+        : undefined,
+    ];
+    return values.some((value) => typeof value === 'string' && markers.test(value));
+  } catch {
+    return markers.test(body);
+  }
+}
+
 
 /**
  * Build the upstream auth header for the request to api.anthropic.com.
@@ -1686,6 +1711,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   // : null` — that gated the /analytics endpoint, but burn-rate /
   // per-request visibility is useful for a pool of one too.
   const analytics = new Analytics();
+  const debugLogDisabled = process.env.DARIO_DEBUG_LOG === '0';
+  const debugLimitRaw = Number(process.env.DARIO_DEBUG_LOG_LIMIT ?? 512);
+  const debugStore = new RequestDebugStore({
+    maxEntries: Number.isFinite(debugLimitRaw) ? debugLimitRaw : 512,
+    filePath: debugLogDisabled
+      ? null
+      : (process.env.DARIO_DEBUG_LOG_FILE || null),
+  });
+  await debugStore.load();
+  console.log(`  Debug request log: ${debugStore.filePath ?? 'memory only'} (FIFO ${debugStore.maxEntries})`);
 
   // Overage-guard (v4.1, dario#288). Resolved from opts with built-in
   // defaults (enabled=true, behavior='halt', cooldown=30min, notifyOs=true)
@@ -1936,6 +1971,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   }
   let requestCount = 0;
   let routingRequestCount = 0;
+  let debugRequestCount = 0;
   const queue = new RequestQueue({
     maxConcurrent: opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
     maxQueued: opts.maxQueued ?? DEFAULT_MAX_QUEUED,
@@ -2443,6 +2479,38 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       return;
     }
 
+    // Bounded, redacted request diagnostics for agents investigating routing
+    // or token burn. This is loopback-only even with an API key because it
+    // includes account aliases and request fingerprints.
+    if (urlPath === '/debug/requests') {
+      if (req.method !== 'GET') {
+        res.writeHead(405, JSON_HEADERS);
+        res.end(ERR_METHOD);
+        return;
+      }
+      // Unlike /health, this route is never remotely disclosable: the debug
+      // window contains cross-client account and session metadata.
+      const discloseDebug = isLoopbackAddr(req.socket?.remoteAddress)
+        && req.headers['cf-ray'] === undefined;
+      if (!discloseDebug) {
+        res.writeHead(403, JSON_HEADERS);
+        res.end(JSON.stringify({ error: 'Forbidden', message: 'Request diagnostics are available only from loopback.' }));
+        return;
+      }
+      const parsedUrl = new URL(req.url ?? '/debug/requests', `http://localhost:${port}`);
+      const rawLimit = Number(parsedUrl.searchParams.get('limit') ?? debugStore.maxEntries);
+      const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(debugStore.maxEntries, Math.floor(rawLimit))) : debugStore.maxEntries;
+      res.writeHead(200, JSON_HEADERS);
+      res.end(JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        retained: debugStore.size(),
+        capacity: debugStore.maxEntries,
+        file: debugStore.filePath,
+        entries: debugStore.recent(limit),
+      }));
+      return;
+    }
+
     // Status endpoint
     if (urlPath === '/status') {
       const s = await currentStatus();
@@ -2607,6 +2675,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     const targetBase = route.target;
     const isCountTokens = route.thin;
     if (req.method !== 'POST') { res.writeHead(405, JSON_HEADERS); res.end(ERR_METHOD); return; }
+    // Monotonic request identity is separate from requestCount, which is a
+    // completion counter and therefore repeats under concurrent requests.
+    const debugRequestId = ++debugRequestCount;
+    const recordEarlyDebug = (status: number, error: string): void => {
+      debugStore.add({
+        ts: new Date().toISOString(), req: debugRequestId, method: req.method ?? '', path: urlPath,
+        model: '', initialAccount: '', account: '', status, latencyMs: 0,
+        upstreamAttempts: 0, recoveryPasses: 0, failoverCount: 0, retryReasons: [],
+        outcome: 'complete', error, inputTokens: 0, outputTokens: 0,
+        cacheReadTokens: 0, cacheCreateTokens: 0,
+      });
+    };
 
     // Overage-guard halt check (v4.1, dario#288). Subscribers should never
     // see a single `representative-claim: overage` response during normal
@@ -2618,6 +2698,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // the halt and the user needs /admin/resume to clear it.
     if (overageGuard.isHalted()) {
       requestCount++;
+      recordEarlyDebug(503, 'overage-halt');
       const state = overageGuard.state()!;
       writeLogLine(logFileStream, {
         ts: new Date().toISOString(), req: requestCount,
@@ -2636,6 +2717,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       await queue.acquire();
     } catch (err) {
       if (err instanceof QueueFullError) {
+        recordEarlyDebug(429, 'queue-full');
         writeLogLine(logFileStream, {
           ts: new Date().toISOString(), req: requestCount,
           method: req.method ?? '', path: urlPath, status: 429, reject: 'queue-full',
@@ -2651,6 +2733,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         return;
       }
       if (err instanceof QueueTimeoutError) {
+        recordEarlyDebug(504, 'queue-timeout');
         writeLogLine(logFileStream, {
           ts: new Date().toISOString(), req: requestCount,
           method: req.method ?? '', path: urlPath, status: 504, reject: 'queue-timeout',
@@ -2680,6 +2763,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     let detectedClientForLog: string | undefined;
     let preserveToolsEffective: boolean = Boolean(opts.preserveTools);
     let poolAccount: PoolAccount | null = null;
+    let initialPoolAccountAlias: string | undefined;
+    let debugAffinityResult: RequestDebugEntry['affinityResult'] = 'none';
+    let latestUpstreamStatus = 502;
+    let appendDebugEntry: (status: number, usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreateTokens?: number }, details?: { outcome?: RequestDebugEntry['outcome']; error?: string }) => void = () => {};
     let stickyKey: string | null = null;
     let affinitySignals: SessionAffinitySignal[] = [];
     let stickyLease: StickyLease | null = null;
@@ -2709,6 +2796,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           ? pool.selectStickyWithLease(stickyKey, family)
           : { account: pool.select(family), lease: null };
         poolAccount = selection.account;
+        debugAffinityResult = opts.sessionAffinity === false
+          ? 'disabled'
+          : !stickyKey ? 'none'
+          : !bindingBefore ? 'new'
+          : bindingBefore === (poolAccount?.alias ?? null) ? 'hit' : 'rebind';
+        if (initialPoolAccountAlias === undefined) {
+          initialPoolAccountAlias = poolAccount?.alias ?? ACCOUNT_KEY_APIKEY;
+        }
         stickyLease = selection.lease;
         poolSelectionCommitted = true;
         accessToken = poolAccount?.accessToken ?? '';
@@ -2734,7 +2829,28 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         return poolAccount;
       };
       const recordFailover = (next: PoolAccount, status: number, reason: 'rate-limit' | 'auth'): void => {
+        failoverCount++;
+        retryReasons.push(reason === 'auth' ? 'auth-failover' : 'rate-limit-failover');
         routingHandle?.failover(next.alias, status, reason);
+      };
+      const handleAuthFailure = (status: number): boolean => {
+        if (!poolAccount) return false;
+        pool.markAuthFailure(poolAccount.alias);
+        if (verbose) {
+          console.error(`[dario] auth failure (${status}) on account "${poolAccount.alias}" — placing in cool-down and attempting failover`);
+        }
+        const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
+        if (nextAccount) {
+          triedAliases.add(nextAccount.alias);
+          recordFailover(nextAccount, status, 'auth');
+          activatePoolAccount(nextAccount);
+          stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
+          return true;
+        }
+        pool.releaseStickyLease(stickyLease);
+        recordRelease('terminal-auth');
+        stickyLease = null;
+        return false;
       };
       if (upstreamApiKey) {
         // Per-token API-key mode: no OAuth, no pool selection. `poolAccount`
@@ -3489,6 +3605,54 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       let upstream!: Response;
       let peekedBody: string | null = null;
       let observedAuthFailureEpoch: number | undefined;
+      let upstreamAttempts = 0;
+      let failoverCount = 0;
+      const retryReasons: string[] = [];
+      let debugRecorded = false;
+      appendDebugEntry = (status: number, usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreateTokens?: number }, details: { outcome?: RequestDebugEntry['outcome']; error?: string } = {}): void => {
+        if (debugRecorded) return;
+        debugRecorded = true;
+        const selectedSignal = affinitySignals.find((signal) => signal.bindingEligible && signal.key === stickyKey);
+        const entry: RequestDebugEntry = {
+          ts: new Date().toISOString(),
+          req: debugRequestId,
+          method: req.method ?? '',
+          path: urlPath,
+          model: requestModel,
+          initialAccount: initialPoolAccountAlias ?? poolAccount?.alias ?? ACCOUNT_KEY_APIKEY,
+          account: poolAccount?.alias ?? ACCOUNT_KEY_APIKEY,
+          status,
+          latencyMs: Date.now() - startTime,
+          upstreamAttempts,
+          recoveryPasses,
+          failoverCount,
+          retryReasons: [...retryReasons],
+          ...details,
+          outcome: details.outcome ?? 'complete',
+          selectionReason: debugAffinityResult === 'hit' ? 'affinity-hit'
+            : debugAffinityResult === 'new' ? 'affinity-new'
+            : debugAffinityResult === 'rebind' ? 'affinity-rebind'
+            : pool.strategy,
+          affinitySource: selectedSignal?.source ?? null,
+          affinityFingerprint: selectedSignal ? debugStore.fingerprint(selectedSignal.key) : null,
+          affinitySignals: affinitySignals.slice(0, 16).map((signal) => ({
+            source: signal.source,
+            fingerprint: debugStore.fingerprint(signal.key),
+            bindingEligible: signal.bindingEligible,
+            selected: signal.key === stickyKey,
+          })),
+          affinityResult: debugAffinityResult,
+          // The digest is useful for correlating duplicate requests without
+          // retaining prompts, tool arguments, or credentials.
+          bodyBytes: body.length,
+          bodyFingerprint: debugStore.fingerprint(body.toString('utf8')),
+          inputTokens: usage.inputTokens ?? 0,
+          outputTokens: usage.outputTokens ?? 0,
+          cacheReadTokens: usage.cacheReadTokens ?? 0,
+          cacheCreateTokens: usage.cacheCreateTokens ?? 0,
+        };
+        debugStore.add(entry);
+      };
 
       // Inside-request 429 failover loop (v3.8.0). On a 429, pool mode tries
       // the next-best account before surfacing the error to the client.
@@ -3508,12 +3672,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         const outboundHeaders = passthrough ? headers : orderHeadersForOutbound(headers);
         const observedRejectionEpoch = poolAccount?.rejectionEpoch;
         observedAuthFailureEpoch = poolAccount?.authFailureEpoch;
+        upstreamAttempts++;
         upstream = await upstreamFetch(targetBase, {
           method: req.method ?? 'POST',
           headers: outboundHeaders,
           body: finalBody ? new Uint8Array(finalBody) : undefined,
           signal: upstreamAbort.signal,
         });
+        latestUpstreamStatus = upstream.status;
 
         // Pool mode: capture the rate-limit snapshot from the response, which
         // is the ONLY way dario ever learns an account's utilization. This
@@ -3560,6 +3726,28 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           }
         }
 
+      // Passthrough mode skips the normal recovery chain, but pool auth
+      // failover still needs to inspect structured 400/429 response bodies.
+      // Rebuild non-auth responses after peeking so the normal forwarder can
+      // consume them unchanged.
+      if (passthrough && poolAccount && (upstream.status === 400 || upstream.status === 429)) {
+        const body = await upstream.text().catch(() => '');
+        if (isAuthFailureResponseBody(body) && handleAuthFailure(upstream.status)) {
+          continue dispatchLoop;
+        }
+        const replayHeaders = new Headers(upstream.headers);
+        // The consumed response may advertise the original byte length. The
+        // rebuilt body can differ, so forwarding that stale length can make
+        // Node clients truncate the error or wait for bytes that will never
+        // arrive.
+        replayHeaders.delete('content-length');
+        upstream = new Response(body, {
+          status: upstream.status,
+          statusText: upstream.statusText,
+          headers: replayHeaders,
+        });
+      }
+
       // Auto-retry without context-1m if it triggers a long-context billing error.
       // Anthropic returns this as either 400 ("long context beta is not yet available
       // for this subscription") or 429 ("Extra usage is required for long context
@@ -3570,6 +3758,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       peekedBody = null;
       if ((upstream.status === 400 || upstream.status === 429) && !passthrough) {
         peekedBody = await upstream.text().catch(() => '');
+        // Some Anthropic-compatible endpoints encode an invalid credential as
+        // a structured 400/429 body instead of using HTTP 401/403. Treat that
+        // response exactly like the status-based auth path below so one dead
+        // account cannot consume every retry from a session.
+        if (poolAccount && isAuthFailureResponseBody(peekedBody)) {
+          if (handleAuthFailure(upstream.status)) {
+            continue dispatchLoop;
+          }
+        }
         const isLongContextError = peekedBody.includes('long context')
           || peekedBody.includes('Extra usage is required')
           || peekedBody.includes('long_context');
@@ -3606,6 +3803,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           // reduced beta set sticks and the response re-enters this chain.
           headers['anthropic-beta'] = reducedBeta;
           recoveryPasses++;
+          retryReasons.push('anthropic-beta');
           peekedBody = null;
           continue dispatchLoop;
         } else if (upstream.status === 400 && parseEffortRejection(peekedBody) && finalBody && recoveryPasses < MAX_RECOVERY_PASSES) {
@@ -3634,6 +3832,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               // (opus-4-1: no `effort` AND a 32000 max_tokens cap) is fully fixed
               // inside one client request instead of 400ing the first caller.
               recoveryPasses++;
+              retryReasons.push('effort-level');
               peekedBody = null;
               retried = true;
               continue dispatchLoop;
@@ -3654,6 +3853,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             requestCount++;
             res.writeHead(400, responseHeaders);
             res.end(peekedBody);
+            appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
             return;
           }
         } else if (upstream.status === 400 && isEffortParamUnsupported(peekedBody) && finalBody && recoveryPasses < MAX_RECOVERY_PASSES) {
@@ -3682,6 +3882,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               // (opus-4-1: no `effort` AND a 32000 max_tokens cap) is fully fixed
               // inside one client request instead of 400ing the first caller.
               recoveryPasses++;
+              retryReasons.push('effort-unsupported');
               peekedBody = null;
               retried = true;
               continue dispatchLoop;
@@ -3700,6 +3901,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             requestCount++;
             res.writeHead(400, responseHeaders);
             res.end(peekedBody);
+            appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
             return;
           }
         } else if (upstream.status === 400 && parseMaxTokensRejection(peekedBody) !== null && finalBody && recoveryPasses < MAX_RECOVERY_PASSES) {
@@ -3725,6 +3927,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               // (opus-4-1: no `effort` AND a 32000 max_tokens cap) is fully fixed
               // inside one client request instead of 400ing the first caller.
               recoveryPasses++;
+              retryReasons.push('max-tokens');
               peekedBody = null;
               retried = true;
               continue dispatchLoop;
@@ -3743,6 +3946,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             requestCount++;
             res.writeHead(400, responseHeaders);
             res.end(peekedBody);
+            appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
             return;
           }
         } else if (isLongContextError && recoveryPasses < MAX_RECOVERY_PASSES) {
@@ -3770,6 +3974,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           // reduced beta set sticks and the response re-enters this chain.
           headers['anthropic-beta'] = reducedBeta;
           recoveryPasses++;
+          retryReasons.push('long-context');
           peekedBody = null;
           continue dispatchLoop;
         } else if (upstream.status === 429) {
@@ -3814,7 +4019,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, thinkingTokens: 0,
               claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
               latencyMs: Date.now() - startTime, status: 429, isStream: false, isOpenAI,
+              upstreamAttempts,
             });
+            appendDebugEntry(429, {});
           }
           res.writeHead(429, responseHeaders);
           res.end(enriched);
@@ -3833,6 +4040,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           requestCount++;
           res.writeHead(400, responseHeaders);
           res.end(peekedBody);
+          appendDebugEntry(400, {}, { outcome: 'complete', error: 'upstream-400' });
           return;
         }
       }
@@ -3845,23 +4053,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // cool-down here, try the next-best account, fall through to the
       // normal forwarding only if no peer is available.
       if (poolAccount && (upstream.status === 401 || upstream.status === 403)) {
-        pool.markAuthFailure(poolAccount.alias);
-        if (verbose) {
-          console.error(`[dario] auth failure (${upstream.status}) on account "${poolAccount.alias}" — placing in cool-down and attempting failover`);
-        }
-        const nextAccount = pool.selectExcluding(triedAliases, modelFamily(requestModel));
-        if (nextAccount) {
-          triedAliases.add(nextAccount.alias);
-          recordFailover(nextAccount, upstream.status, 'auth');
-          activatePoolAccount(nextAccount);
-          stickyLease = pool.rebindSticky(stickyKey, nextAccount.alias, modelFamily(requestModel));
+        if (handleAuthFailure(upstream.status)) {
           continue dispatchLoop;
         }
-        // No peer available — fall through to normal forwarding so the
-        // client sees the upstream's 401/403. Don't swallow the error.
-        pool.releaseStickyLease(stickyLease);
-        recordRelease('terminal-auth');
-        stickyLease = null;
       }
 
       // Enrich 429 errors with rate limit details from headers (Anthropic only returns "Error")
@@ -3922,7 +4116,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, thinkingTokens: 0,
             claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
             latencyMs: Date.now() - startTime, status: 429, isStream: false, isOpenAI,
+            upstreamAttempts,
           });
+          appendDebugEntry(429, {});
         }
         res.writeHead(429, responseHeaders);
         res.end(enriched);
@@ -4055,6 +4251,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         // dario#905 wedge. See waitForClientDrain in src/stream-drain.ts.
         const waitForDrain = () => waitForClientDrain(res, upstreamAbort.signal);
         let streamCompleted = false;
+        let streamError: string | undefined;
         try {
           let buffer = '';
           const MAX_LINE_LENGTH = 1_000_000; // 1MB max per SSE line
@@ -4150,6 +4347,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           }
           streamCompleted = upstreamAbortReason === null;
         } catch (err) {
+          streamError = sanitizeError(err);
           if (verbose) console.error('[dario] Stream error:', sanitizeError(err));
           // Tear down the upstream body reader deterministically on an abnormal
           // mid-stream error (e.g. a bare upstream socket reset) so the undici
@@ -4185,7 +4383,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             thinkingTokens: Math.round(streamThinkingChars / 4),
             claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
             latencyMs: Date.now() - startTime, status: upstream.status, isStream: true, isOpenAI,
+            upstreamAttempts,
           });
+          appendDebugEntry(upstream.status, {
+            inputTokens: streamInputTokens,
+            outputTokens: streamOutputTokens,
+            cacheReadTokens: streamCacheReadTokens,
+            cacheCreateTokens: streamCacheCreateTokens,
+          }, streamCompleted ? {} : upstreamAbortReason === 'client_closed'
+            ? { outcome: 'client-closed', error: 'client-closed' }
+            : { outcome: 'stream-error', error: streamError ?? upstreamAbortReason ?? 'stream-incomplete' });
         }
         writeLogLine(logFileStream, {
           ts: new Date().toISOString(), req: requestCount,
@@ -4256,9 +4463,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               thinkingTokens: bufferedUsage.thinkingTokens,
               claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
               latencyMs: Date.now() - startTime, status: upstream.status, isStream: false, isOpenAI,
+              upstreamAttempts,
             });
           } catch { /* don't let analytics errors break responses */ }
         }
+        appendDebugEntry(upstream.status, bufferedUsage ?? {});
 
         writeLogLine(logFileStream, {
           ts: new Date().toISOString(), req: requestCount,
@@ -4290,6 +4499,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       } as const;
       if (upstreamAbortReason === 'client_closed') {
         if (verbose) console.log(`[dario] #${requestCount} aborted (client disconnected)`);
+        appendDebugEntry(latestUpstreamStatus || 499, {}, { outcome: 'client-closed', error: 'client-closed' });
         writeLogLine(logFileStream, { ...errLogBase, reject: 'client-closed' });
       } else if (upstreamAbortReason === 'timeout') {
         if (poolAccount) {
@@ -4303,6 +4513,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         } else if (!res.writableEnded) {
           res.end();
         }
+        appendDebugEntry(504, {}, { outcome: 'timeout', error: 'upstream-timeout' });
         writeLogLine(logFileStream, { ...errLogBase, status: 504, error: 'upstream-timeout' });
       } else {
         if (poolAccount) {
@@ -4317,6 +4528,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         } else if (!res.writableEnded) {
           res.end();
         }
+        appendDebugEntry(502, {}, { outcome: 'network-error', error: sanitizeError(err) });
         writeLogLine(logFileStream, { ...errLogBase, status: 502, error: sanitizeError(err) });
       }
     } finally {
@@ -4558,7 +4770,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // Flush tokens first (best-effort, bounded), then close the server. The
     // flush is fire-and-forget under the same 5s force-exit guard below so a
     // hung fsync can't wedge shutdown.
-    void flushPoolTokens().finally(() => {
+    void Promise.all([flushPoolTokens(), debugStore.flush()]).finally(() => {
       server.close(() => process.exit(0));
     });
     // Force exit after 5s if connections (or the flush) don't complete.
