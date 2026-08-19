@@ -16,6 +16,14 @@
  * never leaves the machine — we send CC to a loopback URL that CC itself
  * trusts because we set ANTHROPIC_BASE_URL in the child's environment.
  *
+ * Setting it in the environment is necessary but NOT sufficient: CC's
+ * `settings.json` `env` block overrides the inherited environment, so an
+ * operator running behind a router proxy would send the capture upstream
+ * for real — billing their subscription for a probe that is supposed to be
+ * free, while the MITM reported the same "no request arrived" as a machine
+ * with no CC installed. The spawn therefore relocates CLAUDE_CONFIG_DIR to
+ * a throwaway dir so no settings.json is in scope at all.
+ *
  * --------------------------------------------------------------------
  * "Hide in the population" roadmap (v3.13 → ?)
  * --------------------------------------------------------------------
@@ -88,8 +96,8 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'node:fs';
-
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homeDir } from './home-dir.js';
@@ -590,6 +598,13 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
       settled = true;
       try { server.close(); } catch { /* noop */ }
       try { child?.kill('SIGTERM'); } catch { /* noop */ }
+      // The throwaway config dir is CC's HOME for this spawn, so CC writes a
+      // session transcript and config into it. Removing it keeps capture from
+      // littering the operator's real ~/.claude/projects with one junk
+      // `hi` session per proxy start.
+      if (captureHome) {
+        try { rmSync(captureHome, { recursive: true, force: true }); } catch { /* noop */ }
+      }
       resolve(result);
     };
 
@@ -711,18 +726,46 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
       }
 
       try {
+        // Isolate CC's config for this spawn. `settings.json`'s `env` block
+        // takes PRECEDENCE over the environment we hand the child, so on any
+        // machine whose ~/.claude/settings.json pins ANTHROPIC_BASE_URL — the
+        // normal setup behind a router proxy (cli-proxy-api, LiteLLM,
+        // OpenRouter) — our ANTHROPIC_BASE_URL below was silently overridden.
+        // The spawned CC then billed a REAL request against the operator's
+        // subscription, the MITM timed out, and capture reported the
+        // indistinguishable "CC did not send a /v1/messages request".
+        // Observed in the wild at ~21.5K cached + 3.2K input tokens per proxy
+        // start, with cc-template.live.json never once written.
+        //
+        // CLAUDE_CONFIG_DIR relocates CC's whole config root, so no
+        // settings.json is found and nothing can override the sandbox. It also
+        // re-arms ANTHROPIC_MODEL below, which settings' ANTHROPIC_DEFAULT_*
+        // entries were overriding the same way.
+        captureHome = mkdtempSync(join(tmpdir(), 'dario-capture-'));
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          CLAUDE_CONFIG_DIR: captureHome,
+          ANTHROPIC_BASE_URL: url,
+          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'sk-dario-fingerprint-capture',
+          // Pin the base-prompt model. An unpinned `claude --print` uses the
+          // user's DEFAULT model, which made the captured base machine-specific.
+          // A caller-supplied value wins: capture-and-bake sets this per variant.
+          ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? TEMPLATE_BASE_MODEL,
+          // Prevent CC from launching its own interactive UI or OAuth flow.
+          CLAUDE_NONINTERACTIVE: '1',
+        };
+        // A router proxy's token would send the child to that router rather
+        // than to us. The MITM authenticates nothing, so drop it.
+        delete env.ANTHROPIC_AUTH_TOKEN;
+
         child = spawn(claudeBin, ['--print', '-p', 'hi'], {
-          env: {
-            ...process.env,
-            ANTHROPIC_BASE_URL: url,
-            ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'sk-dario-fingerprint-capture',
-            // Pin the base-prompt model. An unpinned `claude --print` uses the
-            // user's DEFAULT model, which made the captured base machine-specific.
-            // A caller-supplied value wins: capture-and-bake sets this per variant.
-            ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? TEMPLATE_BASE_MODEL,
-            // Prevent CC from launching its own interactive UI or OAuth flow.
-            CLAUDE_NONINTERACTIVE: '1',
-          },
+          env,
+          // Run in the throwaway dir, not wherever the proxy happens to be
+          // started from. Under the systemd unit that was the operator's
+          // checkout, so the captured `hi` turn dragged in that repo's
+          // CLAUDE.md and git state — machine-specific noise in a template
+          // that is supposed to be generic.
+          cwd: captureHome,
           stdio: ['ignore', 'ignore', 'ignore'],
           windowsHide: true,
           shell: useShell,
@@ -740,6 +783,7 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
     });
 
     let child: ReturnType<typeof spawn> | undefined;
+    let captureHome: string | undefined;
 
     // Hard timeout.
     setTimeout(() => settle(captured), timeoutMs);
