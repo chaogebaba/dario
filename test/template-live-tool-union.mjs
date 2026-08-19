@@ -26,7 +26,8 @@
 // order straight onto the wire when the client declares nothing — so the union
 // has to rebuild on the bundle's ordering, not append.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -34,7 +35,8 @@ import { dirname, join } from 'node:path';
 // module init can never read (or be confused by) a real live capture.
 process.env.DARIO_LIVE_TEMPLATE_CACHE = join(dirname(fileURLToPath(import.meta.url)), 'does-not-exist.json');
 
-const { withBundledFallbacks } = await import('../dist/live-fingerprint.js');
+const { withBundledFallbacks, describeTemplate, templateRegression, loadTemplate } =
+  await import('../dist/live-fingerprint.js');
 const { PLATFORM_ONLY_TOOLS, INTERACTIVE_ONLY_TOOLS, CONFIG_SCOPED_TOOLS } =
   await import('../dist/cc-template.js');
 
@@ -190,6 +192,146 @@ header('the variants merge it already did still works');
   const own = withBundledFallbacks(liveish({ system_prompt_variants: { 'opus-5': 'LIVE-WINS' } }));
   check('a variant the live template already has still wins',
     own.system_prompt_variants['opus-5'] === 'LIVE-WINS');
+}
+
+// ======================================================================
+header('the merge reports what it had to supply');
+{
+  // The union above is a repair, and a repair that leaves no trace is how a
+  // halved tool list read as healthy for a release: the startup banner said
+  // `live capture … variants: fable+opus-5+sonnet-5` off a cache that carried
+  // no variants and ten of thirty-four tools. Every axis it named came from
+  // the bundle. `_fromBundle` is what makes that sayable.
+  const merged = withBundledFallbacks(liveish());
+  check('_fromBundle names the tools the capture lacked',
+    JSON.stringify([...merged._fromBundle.tools].sort())
+    === JSON.stringify([...preserved].sort()),
+    `got ${merged._fromBundle.tools.length}, want ${preserved.size}`);
+  check('_fromBundle names the variants the capture lacked',
+    JSON.stringify(merged._fromBundle.variants)
+    === JSON.stringify(Object.keys(bundle.system_prompt_variants ?? {}).sort()));
+
+  // A capture that carried everything must not be labelled as borrowing.
+  const complete = withBundledFallbacks(liveish({
+    tools: bundle.tools,
+    tool_names: bundleNames,
+    system_prompt_variants: { ...(bundle.system_prompt_variants ?? {}) },
+  }));
+  check('a complete capture borrows no tools', complete._fromBundle.tools.length === 0);
+  check('…and no variants', complete._fromBundle.variants.length === 0);
+
+  // The banner is the whole point of the field, so assert the string, not just
+  // the field. Counting is not attributing: `tools: 34` was always true.
+  const line = describeTemplate(merged);
+  check('the banner attributes the borrowed tools',
+    line.includes(`tools: ${bundle.tools.length} (${preserved.size} bundled)`), line);
+  check('the banner attributes the borrowed variants',
+    /variants: [^,]*\(\d+\/\d+ bundled\)/.test(line), line);
+  check('a complete capture gets no parenthetical at all',
+    !describeTemplate(complete).includes('bundled)'), describeTemplate(complete));
+  check('the banner still leads with source, version and age',
+    /^live capture, CC v[\d.]+ \(\d+\w+ old\), /.test(line), line);
+}
+
+// ======================================================================
+header('a template the bundle beats outright is refused, not merged');
+{
+  // The repair above covers `tools` and `system_prompt_variants`. Nothing
+  // repairs `system_prompt` — there is no fallback for it, so a degenerate one
+  // wins for the cache's full 24h TTL and the only route back to the bundle is
+  // deleting the file by hand. That is the axis this gate exists for.
+  check('a healthy capture is accepted', templateRegression(liveish(), bundle) === null);
+  check('an empty prompt is refused',
+    /system prompt is empty/.test(templateRegression(liveish({ system_prompt: '' }), bundle) ?? ''));
+  check('an empty identity is refused',
+    /identity block is empty/.test(templateRegression(liveish({ agent_identity: '' }), bundle) ?? ''));
+  // The realistic shape of the failure: CC reshuffles its system blocks, so
+  // `systemBlocks[2]` is no longer the prompt. Both fields stay non-empty and
+  // every other check passes.
+  check('the prompt being the identity block is refused',
+    templateRegression(liveish({ system_prompt: bundle.agent_identity }), bundle) !== null);
+  // The same defect where the two are not byte-equal: block [2] holding the
+  // tiny billing tag. CC's prompt is never shorter than its identity line.
+  check('a prompt no longer than the identity block is refused',
+    templateRegression(liveish({ system_prompt: 'x'.repeat(bundle.agent_identity.length) }), bundle) !== null);
+  check('…and one byte longer is not',
+    templateRegression(liveish({ system_prompt: 'x'.repeat(bundle.agent_identity.length + 1) }), bundle) === null);
+
+  // The gate is structural on purpose — no size ratio against the bundle. A
+  // `--print` capture is narrower than the bundle by construction, and the
+  // legitimate prompt spread across model families is 5.7x on this bundle
+  // alone, so any ratio interesting enough to add something sits inside the
+  // range of correct prompts. These pin that nothing size-based crept back in.
+  check('a headless-narrow tool list is NOT a reason to refuse',
+    templateRegression(liveish(), bundle) === null,
+    `${liveish().tools.length} tools vs bundle ${bundle.tools.length}`);
+  check('a short but structurally sound prompt is served, not refused',
+    templateRegression(liveish({ system_prompt: `# Harness\n${'x'.repeat(300)}` }), bundle) === null);
+
+  // Not a count test — an identity test. A capture sharing no tool with the
+  // bundle did not come from a CC this dario knows.
+  check('a capture sharing no tool with the bundle is refused',
+    /did not come from a CC/.test(templateRegression(
+      liveish({ tools: [{ name: 'Zorp', description: '', input_schema: {} }], tool_names: ['Zorp'] }), bundle) ?? ''));
+  check('one shared tool is enough to be recognised',
+    templateRegression(liveish({
+      tools: [bundle.tools[0], { name: 'Zorp', description: '', input_schema: {} }],
+      tool_names: [bundle.tools[0].name, 'Zorp'],
+    }), bundle) === null);
+
+  // Returning a reason is not refusing. `loadTemplate` is the seam that acts
+  // on the verdict, so drive it: a gate that computed the reason and then
+  // merged anyway would leave every assertion above green.
+  const solo = mkdtempSync(join(tmpdir(), 'dario-gate-served-'));
+  const saved = process.env.DARIO_LIVE_TEMPLATE_CACHE;
+  try {
+    const cachePath = join(solo, 'cc-template.live.json');
+    writeFileSync(cachePath, JSON.stringify(liveish({
+      _version: '99.99.99-refused',
+      _schemaVersion: bundle._schemaVersion,
+      system_prompt: 'x',
+    })));
+    process.env.DARIO_LIVE_TEMPLATE_CACHE = cachePath;
+    const served = loadTemplate({ silent: true });
+    check('a refused cache is replaced by the bundle, not served',
+      served._version !== '99.99.99-refused' && served._source !== 'live'
+      && served.system_prompt === bundle.system_prompt,
+      `${served._version} / ${served._source} / ${served.system_prompt.length}B`);
+
+    // Negative control on the same path: the only edit is the prompt, so this
+    // pins the gate rather than the schema check or the TTL above it.
+    writeFileSync(cachePath, JSON.stringify(liveish({
+      _version: '99.99.99-accepted',
+      _schemaVersion: bundle._schemaVersion,
+    })));
+    check('…while a sound cache at the same path is served',
+      loadTemplate({ silent: true })._version === '99.99.99-accepted');
+  } finally {
+    if (saved === undefined) delete process.env.DARIO_LIVE_TEMPLATE_CACHE;
+    else process.env.DARIO_LIVE_TEMPLATE_CACHE = saved;
+    rmSync(solo, { recursive: true, force: true });
+  }
+
+  // The merge itself stays a pure merge and passes a degenerate template
+  // straight through — the refusal lives in loadTemplate, which is what
+  // decides what to serve. Folding it in here is what broke four suites that
+  // build four-byte prompts to exercise the merge.
+  const merged = withBundledFallbacks(liveish({ system_prompt: 'x' }));
+  check('the merge does not second-guess a degenerate prompt', merged.system_prompt === 'x');
+}
+
+// ======================================================================
+header('the merge parses the bundle once when handed it');
+{
+  // loadTemplate loads the 168 KB snapshot to run the gate; passing it through
+  // is what keeps the live path from parsing it a second time.
+  const sentinel = { ...bundle, system_prompt_variants: { sentinel: 'FROM-THE-PRELOAD' } };
+  const merged = withBundledFallbacks(liveish(), sentinel);
+  check('a preloaded bundle is the one that is merged',
+    merged.system_prompt_variants.sentinel === 'FROM-THE-PRELOAD');
+  check('…and the on-disk bundle is not also consulted',
+    merged.system_prompt_variants['opus-5'] === undefined,
+    Object.keys(merged.system_prompt_variants).join(','));
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed`);

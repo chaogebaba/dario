@@ -325,6 +325,18 @@ header('loadTemplate — reads fresh live cache in preference to bundled');
   check('live cache used (version matches)', loaded._version === '99.99.99-live-test');
   check('live cache agent_identity used', loaded.agent_identity === 'FAKE LIVE IDENTITY');
   check('source marked live', loaded._source === 'live');
+  check('live cache system_prompt used', loaded.system_prompt === 'FAKE LIVE SYSTEM PROMPT');
+
+  // The negative control for the acceptance gate, on the smallest possible
+  // edit: an identity block longer than the prompt is the shape a reshuffled
+  // system-block layout produces, and it must not be served.
+  writeFileSync(LIVE_CACHE, JSON.stringify({
+    ...fakeLive, agent_identity: `${'i'.repeat(100)}`,
+  }));
+  const shifted = loadTemplate({ silent: true });
+  check('a cache whose prompt is shorter than its identity is refused',
+    shifted._version !== '99.99.99-live-test' && shifted._source !== 'live',
+    `${shifted._version} / ${shifted._source}`);
 }
 
 // ======================================================================

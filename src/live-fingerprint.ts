@@ -187,6 +187,20 @@ export interface TemplateData {
    * file written by an older dario. Folded into the map by promptVariantsOf().
    */
   system_prompt_fable?: string;
+  /**
+   * What the BUNDLE supplied because the live capture did not carry it.
+   * Stamped by `withBundledFallbacks`; DERIVED, never persisted — the cache
+   * file records what was captured, and the union is recomputed against
+   * whatever bundle is shipped at read time, which is what lets a bundle
+   * that drops a tool actually drop it.
+   *
+   * Exists so the startup banner can attribute each axis. It used to report
+   * `variants: fable+opus-5+sonnet-5` off a live cache that carried no
+   * variants and ten of the bundle's thirty-four tools — every word after
+   * "live capture" came from the bundle, and the one axis it named was the
+   * one axis with carry-forward protection.
+   */
+  _fromBundle?: { tools: string[]; variants: string[] };
 }
 
 /**
@@ -358,16 +372,22 @@ function unionToolsOnBundleOrder(
  * not. Measured: the shared 24 were byte-identical and in the same order, so
  * the live cache contributed nothing here and cost ten tools.
  */
-export function withBundledFallbacks(live: TemplateData): TemplateData {
+export function withBundledFallbacks(live: TemplateData, preloaded?: TemplateData): TemplateData {
   let bundled: TemplateData;
-  try {
-    bundled = loadBundledTemplate({ silent: true });
-  } catch {
-    return live; // bundle unreadable — better the base prompt than a throw
+  if (preloaded) {
+    bundled = preloaded;
+  } else {
+    try {
+      bundled = loadBundledTemplate({ silent: true });
+    } catch {
+      return live; // bundle unreadable — better the base prompt than a throw
+    }
   }
+
   const out: TemplateData = { ...live };
 
-  const merged = { ...promptVariantsOf(bundled), ...promptVariantsOf(live) };
+  const liveVariants = promptVariantsOf(live);
+  const merged = { ...promptVariantsOf(bundled), ...liveVariants };
   if (Object.keys(merged).length > 0) out.system_prompt_variants = merged;
 
   const tools = unionToolsOnBundleOrder(live.tools, bundled.tools);
@@ -381,7 +401,79 @@ export function withBundledFallbacks(live: TemplateData): TemplateData {
     // tools.
     out.tool_names = tools.map((tool) => tool.name);
   }
+
+  // Attribution, for the banner. Computed here because this is the only place
+  // that holds both sides; see `_fromBundle`.
+  const liveToolNames = new Set((Array.isArray(live.tools) ? live.tools : []).map((t) => t.name));
+  out._fromBundle = {
+    tools: (out.tools ?? []).map((t) => t.name).filter((n) => !liveToolNames.has(n)),
+    variants: Object.keys(merged).filter((k) => liveVariants[k] === undefined).sort(),
+  };
   return out;
+}
+
+/** Once per process: the banner already reports the outcome on every start. */
+let warnedRegression = false;
+
+/**
+ * Why a live template must not be used, or null when it is fit to serve.
+ *
+ * Compared against the bundle, because the bundle is the only reference the
+ * running proxy has for what a healthy template looks like. What this does
+ * NOT do is reject a capture for carrying fewer tools than the bundle: a
+ * `claude --print` capture is narrower by construction — measured on CC
+ * 2.1.236, twelve of the bundle's thirty-four, missing Glob, Grep, the Web*
+ * pair, AskUserQuestion and the whole Task/Cron families, because none of
+ * them mean anything without a UI. Rejecting on tool count would reject every
+ * capture on every machine and throw away the prompt, which is the part only a
+ * capture can supply. `unionToolsOnBundleOrder` repairs that axis; this one
+ * guards the axes nothing can repair.
+ *
+ * The prompt is checked structurally rather than by size. The failure worth
+ * catching is `pickTextBlock(systemBlocks[2])` returning something that is not
+ * the prompt — the billing tag or the identity, after CC reshuffles its system
+ * blocks — and the invariant that separates those cases is that CC's prompt is
+ * always longer than its identity block, by three orders of magnitude on every
+ * capture measured (62 bytes against 4802 to 27594).
+ *
+ * A size floor relative to the bundle was the first attempt and it was wrong.
+ * The legitimate spread across model families is 5.7x on this bundle alone, so
+ * any ratio tight enough to add something over the structural rule sits inside
+ * the range of correct prompts. What it did catch, immediately, was three
+ * suites' synthetic templates — which is not proof it would misfire in
+ * production, but it does mean the rule was keying on size where nothing else
+ * in the system does, to catch a collapsed-but-still-larger-than-the-identity
+ * prompt that has never been observed.
+ */
+export function templateRegression(live: TemplateData, bundled: TemplateData): string | null {
+  const prompt = typeof live.system_prompt === 'string' ? live.system_prompt : '';
+  const identity = typeof live.agent_identity === 'string' ? live.agent_identity : '';
+  if (prompt.length === 0) return 'the system prompt is empty';
+  if (identity.length === 0) return 'the agent identity block is empty';
+  // The 3-block layout shifting by one puts the identity where the prompt
+  // belongs. Both fields stay non-empty, so every other check passes.
+  if (prompt === identity) {
+    return 'the system prompt and the agent identity are the same string, so the captured '
+      + 'system blocks are not in the layout extractTemplate assumes';
+  }
+  // Same defect, the cases where the two blocks are not byte-equal: block [2]
+  // holding the billing tag, or a truncated read. CC's prompt is never shorter
+  // than its identity line.
+  if (prompt.length <= identity.length) {
+    return `the system prompt is ${prompt.length} bytes against a ${identity.length}-byte `
+      + 'identity block, so the captured system blocks are not in the layout '
+      + 'extractTemplate assumes';
+  }
+  // Not a count test — an identity test. A capture sharing no tool with the
+  // bundle is not a narrower CC, it is not CC: a wrapper binary, a different
+  // product, or a `claude` on PATH that belongs to something else.
+  const bundledNames = new Set((Array.isArray(bundled.tools) ? bundled.tools : []).map((t) => t.name));
+  const liveTools = Array.isArray(live.tools) ? live.tools : [];
+  if (bundledNames.size > 0 && liveTools.length > 0 && !liveTools.some((t) => bundledNames.has(t.name))) {
+    return `none of the ${liveTools.length} captured tools appear in the bundle, so the capture `
+      + 'did not come from a CC this dario knows';
+  }
+  return null;
 }
 
 /**
@@ -425,9 +517,27 @@ const LIVE_TTL_MS = 24 * 60 * 60 * 1000; // re-extract once a day
 export function loadTemplate(_options?: { silent?: boolean }): TemplateData {
   const cached = readLiveCache();
   if (cached) {
+    const bundled = loadBundledTemplate(_options);
+    // A live template the bundle beats outright is not merged, it is dropped.
+    // The merge repairs `tools` and `system_prompt_variants`; nothing repairs
+    // `system_prompt`, so a degenerate one is served for the cache's whole TTL
+    // and there is no route back to the bundle short of deleting the file by
+    // hand. The write path refuses to create one; this refuses to serve one
+    // that is already on disk, written by an older dario or by hand.
+    const regression = templateRegression(cached, bundled);
+    if (regression) {
+      if (!warnedRegression) {
+        warnedRegression = true;
+        console.error(
+          `[dario] ⚠  live template ignored: ${regression}. Serving the bundled snapshot; `
+          + 'the next background refresh will re-capture.',
+        );
+      }
+      return bundled;
+    }
     const age = Date.now() - new Date(cached._captured).getTime();
     if (age < LIVE_TTL_MS) {
-      return withBundledFallbacks(cached);
+      return withBundledFallbacks(cached, bundled);
     }
     // Stale cache: prefer whichever of the live cache and the bundled
     // snapshot was captured more recently — do NOT blindly keep the cache.
@@ -438,10 +548,9 @@ export function loadTemplate(_options?: { silent?: boolean }): TemplateData {
     // comparison, every bundled-template update is silently ignored until the
     // cache file is removed by hand. A fresh live capture (age < TTL) still
     // wins above; a stale cache only wins if it is still newer than the bundle.
-    const bundled = loadBundledTemplate(_options);
     const cachedAt = new Date(cached._captured).getTime();
     const bundledAt = new Date(bundled._captured).getTime();
-    return Number.isFinite(bundledAt) && bundledAt > cachedAt ? bundled : withBundledFallbacks(cached);
+    return Number.isFinite(bundledAt) && bundledAt > cachedAt ? bundled : withBundledFallbacks(cached, bundled);
   }
   return loadBundledTemplate(_options);
 }
@@ -479,6 +588,19 @@ export async function refreshLiveFingerprintAsync(options?: {
     if (!live) {
       log('live fingerprint refresh: capture returned null (CC did not send a /v1/messages request within the timeout)');
       return null;
+    }
+    // Gate BEFORE the variant sweep, not after: the sweep is four more
+    // captures, and there is no point paying for them to decorate a template
+    // that is about to be thrown away.
+    try {
+      const regression = templateRegression(live, loadBundledTemplate({ silent: true }));
+      if (regression) {
+        log(`live fingerprint refresh: capture rejected — ${regression}. Keeping the bundled template.`);
+        return null;
+      }
+    } catch {
+      // Bundle unreadable — nothing to compare against. Writing an unchecked
+      // capture is still better than serving a bundle we cannot even load.
     }
     const variants = await captureVariantPromptsAsync(live.system_prompt, timeoutMs, log);
     if (Object.keys(variants).length > 0) {
@@ -1663,7 +1785,22 @@ export function describeTemplate(t: TemplateData): string {
   // that degradation is otherwise invisible (dario#lock-step).
   const keys = Object.keys(promptVariantsOf(t)).sort();
   const variants = keys.length > 0 ? keys.join('+') : 'none';
-  return `${source} capture, CC v${t._version} (${age} old), variants: ${variants}`;
+  // Attribution, not just coverage. `variants:` names what the SERVED template
+  // has, and on a live capture that is very often the bundle's — a live cache
+  // carries no variants at all until a runtime variant sweep has run, and it
+  // carries a headless subset of the tools always. Reporting the merged totals
+  // and calling the result a live capture is how a halved tool list read as
+  // healthy for a release. Both counts are suppressed when the bundle
+  // contributed nothing, so the common healthy line stays short.
+  const from = t._fromBundle;
+  const parts = [
+    `${source} capture, CC v${t._version} (${age} old)`,
+    `variants: ${variants}`
+    + (from && from.variants.length > 0 ? ` (${from.variants.length}/${keys.length} bundled)` : ''),
+    `tools: ${t.tools?.length ?? 0}`
+    + (from && from.tools.length > 0 ? ` (${from.tools.length} bundled)` : ''),
+  ];
+  return parts.join(', ');
 }
 
 export interface DriftResult {
