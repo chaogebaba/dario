@@ -35,10 +35,26 @@
  * free: system prompt content and length are not billing-classifier inputs
  * (docs/research/system-prompt-classifier-study.md).
  *
+ * The same module handles CC's `gitStatus:` block, which it appends after the
+ * last heading whenever the working directory is a git repository. That block
+ * had no captured shape at all until the capture sandbox was made a repo
+ * (`live-fingerprint.ts:seedCaptureRepo`), because a bare `/tmp` directory
+ * makes CC emit nothing. With a shape to model, the branch, main branch, git
+ * user, status and recent commits are substituted from the serving host's own
+ * repository, and a host that is not in one drops the block entirely — which
+ * is what CC does there too.
+ *
+ * One cost worth naming: the system prompt carries `cache_control: ephemeral`,
+ * so a gitStatus that moves invalidates a ~25KB cached block. It only moves
+ * when the repository actually changes, and the caller snapshots on a TTL no
+ * shorter than the cache's own lifetime, which bounds the churn to at most one
+ * extra miss per cache generation.
+ *
  * Pure over its inputs — every fact is passed in explicitly — so the tests can
  * exercise each host and model combination without touching the real system.
  */
 
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { release, type as osType } from 'node:os';
@@ -247,4 +263,185 @@ export function applyEnvironmentSection(
   const capturedId = capturedModelId(captured);
   const keepCutoff = capturedId !== null && sameModel(capturedId, modelId);
   return spliceEnvironmentSection(prompt, rewriteEnvironmentBlock(captured, facts, keepCutoff));
+}
+
+// ── CC's gitStatus block ─────────────────────────────────────────────
+
+/**
+ * The values CC writes into `gitStatus:`, read off a real repository.
+ *
+ * `status` and `recentCommits` are the raw multi-line bodies, already
+ * trimmed. An empty `status` means a clean tree, which CC renders with its own
+ * literal rather than an empty list — see `rewriteGitStatusBlock`.
+ */
+export interface GitStatusFacts {
+  branch: string;
+  /**
+   * The branch CC names as the PR target. Measured against CC 2.1.236: `main`
+   * when the repo has one, `master` when it has only that, and `main` when it
+   * has neither — a repo on `trunk` with no main and no master is still told
+   * `main`.
+   */
+  mainBranch: string;
+  /**
+   * `git config user.name`, or null where none is set — a container, a CI
+   * runner, a machine whose identity lives only in per-repo config. The
+   * section is dropped rather than guessed, and the rest of the block still
+   * renders; losing all of it over one unset field is how a sandboxed HOME
+   * first surfaced this.
+   */
+  user: string | null;
+  /** `git status --porcelain`, empty when the tree is clean. */
+  status: string;
+  /** `git log --oneline -5`. */
+  recentCommits: string;
+}
+
+const GIT_STATUS_LABEL = 'gitStatus:';
+
+/**
+ * Read the git half of the facts off the repository at `cwd`, or null when
+ * there is no repository, no git, or any command fails.
+ *
+ * Null is a real answer, not a degraded one: it means the block is dropped,
+ * which is what CC sends outside a working tree.
+ *
+ * Runs on a snapshot cadence, not per request — CC itself describes the block
+ * as "the git status at the start of the conversation", and the caller
+ * memoizes accordingly.
+ */
+export function detectGitStatusFacts(cwd: string): GitStatusFacts | null {
+  // Trailing whitespace only. `git status --porcelain` puts the two-column
+  // XY code in the first two characters, so an unstaged edit reads " M path"
+  // — a full trim eats that leading space on the FIRST line alone and sends a
+  // status list whose first row is shaped differently from the rest.
+  const git = (...args: string[]): string => execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf-8',
+    timeout: 5_000,
+    // A repository with a busy index must not make dario hang or log; the
+    // read-only commands here do not need the lock.
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).replace(/\s+$/, '');
+  // Every field but the branch degrades on its own: an unset user.name, a
+  // repository with no commits yet, a `git status` that fails on a permission
+  // error. Each of those still leaves a block CC would have sent, minus a
+  // section — which is the module's standing rule for a fact it cannot source.
+  const tryGit = (...args: string[]): string | null => {
+    try {
+      return git(...args);
+    } catch {
+      return null;
+    }
+  };
+  const branchExists = (name: string): boolean => tryGit('rev-parse', '--verify', '--quiet', `refs/heads/${name}`) !== null;
+  try {
+    // Not a repo, or no git at all. CC sends no block from there either, and
+    // an unforeseen git failure must cost this block rather than the request —
+    // this runs on the request path.
+    if (tryGit('rev-parse', '--is-inside-work-tree')?.trim() !== 'true') return null;
+    // `--abbrev-ref HEAD` names a detached HEAD as `HEAD` but fails outright on
+    // a repository with no commits, where `--show-current` still names the
+    // unborn branch. Between them there is always an answer, and without one
+    // there is no block to render.
+    const branch = tryGit('rev-parse', '--abbrev-ref', 'HEAD')?.trim()
+      || tryGit('branch', '--show-current')?.trim();
+    if (!branch) return null;
+    return {
+      branch,
+      mainBranch: branchExists('main') ? 'main' : branchExists('master') ? 'master' : 'main',
+      user: tryGit('config', 'user.name')?.trim() || null,
+      status: tryGit('status', '--porcelain') ?? '',
+      recentCommits: tryGit('log', '--oneline', '-5') ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The `gitStatus:` block of `prompt`, or null when there is none.
+ *
+ * CC appends it after the last heading, so the block runs to the next
+ * top-level heading or to the end — the same boundary `scrub-template.ts`
+ * strips on.
+ */
+export function extractGitStatusBlock(prompt: string): string | null {
+  const at = prompt.indexOf(`\n${GIT_STATUS_LABEL}`);
+  if (at < 0) return null;
+  const start = at + 1;
+  const next = prompt.indexOf('\n# ', start);
+  const end = next < 0 ? prompt.length : next;
+  return prompt.slice(start, end).replace(/\s+$/, '');
+}
+
+/**
+ * Rewrite a captured `gitStatus:` block to describe the repository at hand.
+ *
+ * Section-keyed on CC's own labels, for the same reason the environment
+ * rewrite is line-keyed: a section CC adds later passes through untouched
+ * rather than being dropped by a whole-block re-render. The preamble sentence
+ * is CC's prose and is never touched.
+ *
+ * Three sections have an empty case. An unset `user.name` drops its own
+ * section and leaves the rest standing. The other two resolve opposite ways: a clean
+ * tree leaves CC's own rendering of one standing — the capture sandbox is
+ * seeded clean precisely so that word is `(clean)` and not a stale file list.
+ * A repository with no commits drops the section instead, because the captured
+ * list names commits that are not this repository's, and restating them would
+ * be the fabrication this module exists to remove.
+ */
+export function rewriteGitStatusBlock(block: string, facts: GitStatusFacts): string {
+  const out: string[] = [];
+  for (const section of block.split('\n\n')) {
+    if (section.startsWith('Current branch: ')) {
+      out.push(`Current branch: ${facts.branch}`);
+    } else if (/^Main branch \(.*\): /.test(section)) {
+      out.push(section.replace(/^(Main branch \(.*\): ).*$/, `$1${facts.mainBranch}`));
+    } else if (section.startsWith('Git user: ')) {
+      if (facts.user) out.push(`Git user: ${facts.user}`);
+    } else if (section === 'Status:' || section.startsWith('Status:\n')) {
+      out.push(facts.status ? `Status:\n${facts.status}` : section);
+    } else if (section === 'Recent commits:' || section.startsWith('Recent commits:\n')) {
+      if (facts.recentCommits) out.push(`Recent commits:\n${facts.recentCommits}`);
+    } else {
+      out.push(section);
+    }
+  }
+  return out.join('\n\n');
+}
+
+/**
+ * Put `block` at the end of `prompt`, replacing an existing `gitStatus:` block.
+ * A null block removes one — the case where dario is not serving from a
+ * repository and CC would send none.
+ */
+export function spliceGitStatusBlock(prompt: string, block: string | null): string {
+  const at = prompt.indexOf(`\n${GIT_STATUS_LABEL}`);
+  if (at >= 0) {
+    const next = prompt.indexOf('\n# ', at + 1);
+    const end = next < 0 ? prompt.length : next;
+    const head = block === null ? prompt.slice(0, at) : `${prompt.slice(0, at + 1)}${block}`;
+    return head + prompt.slice(end);
+  }
+  if (block === null) return prompt;
+  return `${prompt.replace(/\s+$/, '')}\n\n${block}`;
+}
+
+/**
+ * Give `prompt` the `gitStatus:` block CC would send from this host, modelled
+ * on `captured`.
+ *
+ * With no captured block there is nothing to model and the prompt is returned
+ * untouched. With no facts — dario serving from outside a repository — any
+ * block already in the prompt is removed, since that is what CC does there.
+ */
+export function applyGitStatusBlock(
+  prompt: string,
+  captured: string | null,
+  facts: GitStatusFacts | null,
+): string {
+  if (!captured) return prompt;
+  if (!facts) return spliceGitStatusBlock(prompt, null);
+  return spliceGitStatusBlock(prompt, rewriteGitStatusBlock(captured, facts));
 }
