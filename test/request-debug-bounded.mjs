@@ -1,12 +1,21 @@
 #!/usr/bin/env bun
 // The debug store must stay bounded when persistence is failing.
 //
-// `pending` was unbounded. mkdir sits before the drain loop, so a failure
-// there leaves the queue untouched and the next request appends to it again.
-// `entries` is a ring and stays flat; `pending` grew forever, on a diagnostics
-// buffer whose entire premise is a bound. On this machine the way in is a
-// debug log pointed at a directory the proxy cannot create — a stale
-// DARIO_DEBUG_LOG_FILE after a mount goes away, say.
+// Two failure-mode bugs, both reached by the same trigger: a write path that
+// keeps throwing. On this machine the way in is a debug log pointed at a
+// directory the proxy cannot create — a stale DARIO_DEBUG_LOG_FILE after a
+// mount goes away, say.
+//
+// 1. `pending` was unbounded. mkdir sits before the drain loop, so a failure
+//    there leaves the queue untouched and the next request appends to it
+//    again. `entries` is a ring and stays flat; `pending` grew forever, on a
+//    diagnostics buffer whose entire premise is a bound.
+//
+// 2. The retry was hot. Every request re-armed the write, and once the file is
+//    past the compaction threshold that means a full O(maxEntries)
+//    serialization per request: `persistedLines` is only lowered by a
+//    SUCCESSFUL rewrite, so a failing one leaves the store above the threshold
+//    permanently. The store spent the most CPU exactly when I/O was broken.
 
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -56,6 +65,16 @@ check(
 const oldest = blocked.recent().map((e) => e.req).sort((a, b) => a - b)[0];
 check('the ring holds the newest entries', oldest === 196);
 
+// 200 requests against a path that can never work must not mean 200 write
+// attempts. Backoff starts at 1s and this loop finishes well inside that, so a
+// backing-off store records a handful of failures; a hot-retrying one records
+// one per request.
+check(
+  `repeated failure backs off instead of retrying per request (${blocked._persistFailuresForTest()} failures / 200 requests)`,
+  blocked._persistFailuresForTest() <= 5,
+);
+check('but it did actually try', blocked._persistFailuresForTest() >= 1);
+
 // --- a store that recovers keeps working ---
 // Same store shape, writable path, driven past the compaction threshold
 // (maxEntries * COMPACT_FACTOR = 10 lines) several times over.
@@ -64,6 +83,7 @@ for (let i = 1; i <= 60; i++) good.add(entry(i));
 await good.flush();
 check('a healthy store still drains its queue', good._pendingSizeForTest() === 0);
 check('a healthy store still holds its ring', good.size() === 5);
+check('a healthy store records no failures', good._persistFailuresForTest() === 0);
 const { readFile } = await import('node:fs/promises');
 const lines = (await readFile(join(dir, 'ok', 'requests.ndjson'), 'utf8')).trim().split('\n');
 check(`the file stayed within the compaction bound (${lines.length} lines)`, lines.length <= 10);

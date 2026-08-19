@@ -63,6 +63,15 @@ const MAX_LINE_BYTES = 32_768;
 // which is what keeps the steady state off the event loop. `load()` already
 // keeps only the last maxEntries lines, so the surplus is read-tolerant.
 const COMPACT_FACTOR = 2;
+// A write failure is usually environmental and usually not transient. Retrying
+// on the very next request is worse than useless once the file is past the
+// compaction threshold: `persistedLines` is only lowered by a SUCCESSFUL
+// rewrite, so a failing one leaves the store above the threshold and every
+// subsequent request takes the rewrite branch — a full O(maxEntries)
+// serialization each time, precisely while I/O is the broken thing. Back off
+// instead. No timer is needed; the next `add` past the deadline re-arms it.
+const PERSIST_BACKOFF_BASE_MS = 1_000;
+const PERSIST_BACKOFF_MAX_MS = 5 * 60 * 1000;
 const AFFINITY_RESULTS = new Set(['hit', 'new', 'rebind', 'none', 'disabled']);
 const OUTCOMES = new Set(['complete', 'stream-error', 'timeout', 'network-error', 'client-closed']);
 
@@ -153,6 +162,8 @@ export class RequestDebugStore {
   private entries: RequestDebugEntry[] = [];
   /** Added but not yet on disk. Drained by `schedulePersist`. */
   private pending: RequestDebugEntry[] = [];
+  private persistFailures = 0;
+  private persistPausedUntil = 0;
   /** Lines currently in the file — may exceed `maxEntries` until compaction. */
   private persistedLines = 0;
   private writeChain: Promise<void> = Promise.resolve();
@@ -243,8 +254,12 @@ export class RequestDebugStore {
   /** Test-only — the undrained write queue. Production code has no business peeking. */
   _pendingSizeForTest(): number { return this.pending.length; }
 
+  /** Test-only — consecutive persistence failures driving the backoff. */
+  _persistFailuresForTest(): number { return this.persistFailures; }
+
   private schedulePersist(): void {
     if (!this.filePath || this.persistScheduled) return;
+    if (Date.now() < this.persistPausedUntil) return;
     this.persistScheduled = true;
     this.writeChain = this.writeChain.then(async () => {
       await mkdir(dirname(this.filePath!), { recursive: true });
@@ -266,9 +281,20 @@ export class RequestDebugStore {
         this.persistedLines += batch.length;
       }
       this.persistScheduled = false;
+      this.persistFailures = 0;
+      this.persistPausedUntil = 0;
     }).catch((error) => {
       this.persistScheduled = false;
-      console.error(`[dario] debug log write failed: ${(error as Error).message}`);
+      this.persistFailures += 1;
+      const delayMs = Math.min(
+        PERSIST_BACKOFF_MAX_MS,
+        PERSIST_BACKOFF_BASE_MS * 2 ** (this.persistFailures - 1),
+      );
+      this.persistPausedUntil = Date.now() + delayMs;
+      console.error(
+        `[dario] debug log write failed, pausing ${Math.round(delayMs / 1000)}s `
+        + `(failure ${this.persistFailures}): ${(error as Error).message}`,
+      );
     });
   }
 
