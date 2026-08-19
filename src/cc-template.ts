@@ -86,12 +86,23 @@ export const INTERACTIVE_ONLY_TOOLS: Set<string> = new Set([
  * The bundle must stay a SUPERSET, so the bake preserves these from the previous
  * bundle exactly as it does the platform- and interactive-only sets. The cost of
  * the two directions is asymmetric, which is what settles it: a stale entry is
- * INERT, because buildCCRequest advertises only the intersection of the bundle
- * with what the client declared — no client declares it, nothing is advertised.
- * Dropping one is NOT inert: CC_NATIVE_NAMES_UNION is derived from this bundle,
- * so a client that does declare TaskCreate stops identity-mapping, falls into
- * the unmapped round-robin, and is renamed onto a fallback slot with junk args
- * (the v4.8.93 regression, caught here by issue-29-tool-translation.mjs).
+ * inert on the paths that INTERSECT the bundle with the client's declaration —
+ * no client declares it, nothing is advertised. It is NOT inert on the three
+ * paths with no client declaration to mirror (the full-template fallback, the
+ * merge-mode base array, and Fable's no-tools shape), which send the array
+ * whole: a retired-but-pinned tool does reach the wire there, and the harness
+ * then rejects it with "<Tool> exists but is not enabled in this context" —
+ * the same failure the advertise-filter below exists to prevent. Fable pins
+ * `tool_choice: none`, so the model cannot call one there; merge mode is an
+ * opt-in already declared a fingerprint trade-off.
+ *
+ * Dropping one is NOT inert either, and is worse: CC_NATIVE_NAMES_UNION is
+ * derived from this bundle, so a client that does declare TaskCreate stops
+ * identity-mapping, falls into the unmapped round-robin, and is renamed onto a
+ * fallback slot with junk args (the v4.8.93 regression, caught here by
+ * issue-29-tool-translation.mjs). That asymmetry is what still settles it —
+ * bounded harness rejections on three paths against silent argument corruption
+ * on every path.
  *
  * Add new config-scoped tools here as CC's remote config churns. Removing a name
  * is a deliberate act: it means CC genuinely retired the tool, and it should be
