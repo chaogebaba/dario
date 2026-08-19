@@ -144,7 +144,7 @@ check(
 // timed sweep loses. Kill uncatchably and sweep on the exit event instead.
 check(
   'the capture child is SIGKILLed so it cannot write again',
-  /child\?\.kill\('SIGKILL'\)/.test(src) && !/kill\('SIGTERM'\)/.test(src),
+  /child\??\.kill\('SIGKILL'\)/.test(src) && !/kill\('SIGTERM'\)/.test(src),
 );
 check(
   'cleanup is driven by the child exit event, not a timer race',
@@ -153,6 +153,35 @@ check(
 check(
   'a backstop sweep exists and is unref\'d so it cannot delay shutdown',
   /setTimeout\(sweep, 30_000\)/.test(src) && /backstop\.unref\(\)/.test(src),
+);
+
+// The above three all held while the capture still stranded its config dir,
+// which is why they are not enough on their own. They assert that a sweep is
+// ARMED on the exit event; they say nothing about a `settle` that runs when the
+// child has ALREADY exited. On that path the `exitCode === null` guard was
+// false, so nothing was armed, `kill` was a no-op on a corpse, and the
+// `if (!child)` fallback was false because the child object still existed.
+//
+// Guaranteed on the failed-capture path (a child that exits without sending
+// settles from its own `exit` handler), which is the path that repeats once per
+// proxy start for as long as capture is broken; racy on the success path, where
+// a 500ms request-arrived timer and a 200ms child-exited timer decide it.
+// Verified A/B against a stub binary that exits without sending: unfixed
+// stranded one dir per run, fixed stranded none. 19 had accumulated on the
+// audit machine, each holding a full .claude.json and a session transcript.
+check(
+  'an already-exited child is swept immediately instead of being handed a handler that will never fire',
+  /\}\s*else\s*\{[\s\S]{0,1400}?sweep\(\);\s*\n\s*\}/.test(src),
+);
+check(
+  'the unreachable `if (!child) sweep()` fallback is gone',
+  !/if \(!child\) sweep\(\);/.test(src),
+);
+// Both the live branch and the already-dead branch must end in a sweep, so
+// there is no settle path that returns without cleaning up.
+check(
+  'the kill moved inside the still-running branch, where the child is known to exist',
+  /child\.once\('exit', sweep\)[\s\S]{0,400}child\.kill\('SIGKILL'\)/.test(src),
 );
 
 // The MITM must never become a forwarding proxy: it answers locally.

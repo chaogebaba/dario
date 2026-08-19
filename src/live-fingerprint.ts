@@ -709,9 +709,27 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
         // pending sweep can never hold the proxy open on shutdown.
         const backstop = setTimeout(sweep, 30_000);
         if (typeof backstop.unref === 'function') backstop.unref();
+        try { child.kill('SIGKILL'); } catch { /* noop */ }
+      } else {
+        // The child is already gone, or was never spawned. Reached whenever
+        // `settle` runs after the child has exited, which the old code had no
+        // sweep for at all: the `exitCode === null` guard was false, `once`
+        // was never armed, `kill` was a no-op on a corpse, and the `if (!child)`
+        // fallback was false because the child object still existed.
+        //
+        // Guaranteed on the failed-capture path — a child that exits without
+        // sending settles from its own `exit` handler 200ms later — and that
+        // is the path that repeats, once per proxy start, for as long as
+        // capture stays broken. It is also racy on the SUCCESS path: the
+        // request-arrived settle is on a 500ms timer and the child-exited one
+        // on a 200ms timer, so a CC that exits promptly after sending settles
+        // through here too. Measured at 19 stranded dirs on one machine, each
+        // holding a full .claude.json and a session transcript.
+        //
+        // Nothing can write to the dir any more, so sweep now rather than
+        // arming a handler on a process that will never emit again.
+        sweep();
       }
-      try { child?.kill('SIGKILL'); } catch { /* noop */ }
-      if (!child) sweep();
       resolve(result);
     };
 
