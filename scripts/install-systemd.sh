@@ -166,7 +166,7 @@ WorkingDirectory=$e_repo
 # Foreground/test processes remain memory-only unless they opt in with
 # DARIO_DEBUG_LOG_FILE themselves.
 Environment=DARIO_DEBUG_LOG_FILE="$e_home/debug-requests.ndjson"
-Environment=DARIO_DEBUG_LOG_LIMIT=512
+Environment=DARIO_DEBUG_LOG_LIMIT=4096
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=15

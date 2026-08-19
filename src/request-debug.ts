@@ -45,10 +45,10 @@ export interface RequestDebugStoreOptions {
   filePath?: string | null;
 }
 
-const DEFAULT_MAX_ENTRIES = 512;
+export const DEFAULT_MAX_ENTRIES = 4096;
 // Preview-bearing entries are intentionally bounded in both count and worst
 // case file size (about 64 MiB at the largest permitted configuration).
-const MAX_ENTRIES_CAP = 2_048;
+const MAX_ENTRIES_CAP = 16_384;
 const MAX_MODEL_LENGTH = 128;
 const MAX_ERROR_LENGTH = 256;
 const MAX_PREVIEW_LENGTH = 8_192;

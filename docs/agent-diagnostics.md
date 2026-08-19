@@ -9,7 +9,7 @@ redacted data.
 
 Confirm the proxy is serving, then collect both views from the same time
 window. `limit` is newest-first and is capped by the proxy's configured
-retention limit (512 entries by default). If `DARIO_API_KEY` is configured,
+retention limit (4096 entries by default). If `DARIO_API_KEY` is configured,
 the same key is required by these endpoints.
 
 ```bash
@@ -59,7 +59,7 @@ Each `entries[]` item is one client request, newest first:
 | `client` | Best-effort client detector (for example, Claude Code or an OpenAI-compatible client). |
 
 The persisted debug file is configured with `DARIO_DEBUG_LOG_FILE`; the
-default request capacity is 512 and `DARIO_DEBUG_LOG_LIMIT` can lower or raise
+default request capacity is 4096 and `DARIO_DEBUG_LOG_LIMIT` can lower or raise
 it up to the built-in cap. Entries age out FIFO. The file is written with mode
 `0600`.
 
