@@ -213,7 +213,10 @@ function rejectionCooldownScope(snapshot: RateLimitSnapshot, family?: string | n
 export interface PoolStatus {
   accounts: number;
   healthy: number;
+  /** Enabled, but no request can reach them right now (quota, cool-down, expiry). */
   exhausted: number;
+  /** Switched off by the operator. Not a quota condition. */
+  disabled: number;
   totalHeadroom: number;
   bestAccount: string;
   queued: number;
@@ -1104,6 +1107,13 @@ export class AccountPool {
     const all = this.all();
     const now = Date.now();
     const healthy = all.filter(a => ineligibleReason(a, now) === null);
+    // A benched seat is not a drained one. `exhausted` was `accounts - healthy`,
+    // which folded both causes together: switching an account off moved it from
+    // `healthy` to `exhausted` and reported an operator's own deliberate act as
+    // spent quota — on a seat whose token was fine and whose window was empty.
+    // Split them so `healthy + exhausted + disabled === accounts` holds and each
+    // number names one cause.
+    const disabled = all.filter(a => a.enabled === false).length;
     // Status is a pool-wide aggregate; family-agnostic. Per-model
     // headroom is request-context-specific and only meaningful at
     // select() time.
@@ -1116,7 +1126,8 @@ export class AccountPool {
     return {
       accounts: all.length,
       healthy: healthy.length,
-      exhausted: all.length - healthy.length,
+      exhausted: all.length - healthy.length - disabled,
+      disabled,
       totalHeadroom: Math.round(avgHeadroom * 100),
       bestAccount: best?.alias ?? 'none',
       queued: this.queue.length,

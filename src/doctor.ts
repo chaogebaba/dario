@@ -1013,6 +1013,16 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
               'auth-cooldown': ' Run `dario login` if it persists.',
               'rate-limited': '',
             };
+            // `exhausted` no longer means "everything that can't serve" — a
+            // disabled seat is counted apart from a drained one. The operator
+            // reading this line wants the total, so add them back, and name
+            // the benched ones rather than filing them under cool-down.
+            const unavailable = ps.exhausted + ps.disabled;
+            const causes = ps.disabled === 0
+              ? 'all rejected, expired, or in cool-down'
+              : ps.exhausted === 0
+                ? `all ${ps.disabled} disabled`
+                : `${ps.disabled} disabled, the rest rejected, expired, or in cool-down`;
             checks.push({
               status: 'warn',
               label: 'Pool routing',
@@ -1021,8 +1031,8 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
                 // is eligible: it still dispatches to this account and takes
                 // the 401, which is what shows up in the logs.
                 ? `no account can serve — ${next.alias} is next in line but ${why[blocked!]}`
-                  + ` (${ps.exhausted}/${ps.accounts} unavailable).${fix[blocked!]}`
-                : `no account can serve — all rejected, expired, or in cool-down (${ps.exhausted}/${ps.accounts} unavailable).`,
+                  + ` (${unavailable}/${ps.accounts} unavailable).${fix[blocked!]}`
+                : `no account can serve — ${causes} (${unavailable}/${ps.accounts} unavailable).`,
             });
           }
         } catch (err) {
