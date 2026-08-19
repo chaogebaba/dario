@@ -291,8 +291,26 @@ function unionToolsOnBundleOrder(
   const out = bundled.map((t) => liveByName.get(t.name) ?? t);
   // A tool live has and the bundle does not is genuinely new — a CC that
   // shipped after the last bake. Keeping it is the self-healing the live cache
-  // exists for. There is no known-good position for it, so it goes last.
-  for (const tool of live) if (!bundledNames.has(tool.name)) out.push(tool);
+  // exists for.
+  //
+  // It goes at its ALPHABETICAL position, not at the end. CC sends tools sorted
+  // by name — the bundle is strictly ordered by localeCompare, and
+  // capture-and-bake.mjs:211 sorts after each of its three preservation merges
+  // for exactly this reason. Appending instead would emit `…Workflow, Write,
+  // Bookmark` where real CC sends Bookmark at index 3, and it would do it in
+  // precisely the branch this arm exists to serve: a CC newer than the last
+  // bake, on the no-client-declaration paths that write template order onto the
+  // wire verbatim. Same defect as taking live's order wholesale, one tool wide.
+  //
+  // Spliced per tool rather than sorting `out`, so a future bundle that is
+  // deliberately not alphabetical keeps its spine byte-exact instead of being
+  // silently re-sorted under us.
+  for (const tool of live) {
+    if (bundledNames.has(tool.name)) continue;
+    const at = out.findIndex((t) => t.name.localeCompare(tool.name) > 0);
+    if (at === -1) out.push(tool);
+    else out.splice(at, 0, tool);
+  }
   return out;
 }
 

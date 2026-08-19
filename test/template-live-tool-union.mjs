@@ -134,10 +134,35 @@ header('live still wins where it should');
   const mergedNew = withBundledFallbacks(withNew);
   const names = mergedNew.tools.map((t) => t.name);
   check('a live-only tool is preserved', names.includes('BrandNewTool'));
-  check('the live-only tool goes last, after the known spine',
-    names[names.length - 1] === 'BrandNewTool');
+  // NOT at the end. CC sends tools alphabetically and the bundle is ordered
+  // that way; capture-and-bake.mjs sorts after every preservation merge for
+  // this reason. Appending would emit an order no real CC sends, in exactly
+  // the newer-than-the-bake branch this arm exists to serve.
+  check('the live-only tool lands at its alphabetical position, not appended',
+    names.indexOf('BrandNewTool') === [...names].sort((a, b) => a.localeCompare(b)).indexOf('BrandNewTool'),
+    `at ${names.indexOf('BrandNewTool')} of ${names.length}`);
+  check('a live-only tool sorting last still ends up last',
+    withBundledFallbacks({
+      ...liveish(),
+      tools: [...liveish().tools, { name: 'ZzzTool', description: 'x', input_schema: {} }],
+    }).tools.map((t) => t.name).at(-1) === 'ZzzTool');
   check('tool_names still agrees after an addition',
     JSON.stringify(mergedNew.tool_names) === JSON.stringify(names));
+}
+
+// ======================================================================
+header('the alphabetical invariant itself');
+{
+  // Nothing else in the suite asserts this, yet the whole ordering argument
+  // rests on it: buildCCRequest writes template order onto the wire verbatim,
+  // and real CC sends tools sorted by name.
+  const sorted = [...bundleNames].sort((a, b) => a.localeCompare(b));
+  check('the bundle is strictly alphabetical by localeCompare',
+    JSON.stringify(bundleNames) === JSON.stringify(sorted),
+    `first divergence at ${bundleNames.findIndex((n, i) => n !== sorted[i])}`);
+  const merged = withBundledFallbacks(liveish()).tools.map((t) => t.name);
+  check('…and the merge preserves it',
+    JSON.stringify(merged) === JSON.stringify([...merged].sort((a, b) => a.localeCompare(b))));
 }
 
 // ======================================================================
