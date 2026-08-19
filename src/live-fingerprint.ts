@@ -96,7 +96,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -601,15 +601,42 @@ export async function captureLiveTemplateAsync(timeoutMs: number = 10_000): Prom
  * We cannot neutralize the policy file. We can decline to spend the
  * operator's subscription discovering it, and say why.
  *
+ * Paths and precedence read out of the CC 2.1.235 binary, not inferred:
+ * the base dir is a hardcoded switch (`/Library/Application Support/ClaudeCode`,
+ * `C:\Program Files\ClaudeCode`, else `/etc/claude-code`) with no env or CLI
+ * override, plus a `managed-settings.d` drop-in dir beside it. Note it is
+ * Program Files, NOT ProgramData — that string appears nowhere in the binary,
+ * and a bail pointed at it would silently never fire on Windows.
+ *
+ * This is best-effort by nature and cannot be completed by adding paths: under
+ * WSL with `wslInheritsWindowsSettings`, CC also reads the Windows policy
+ * chain including an HKLM registry key, which is not a file at all. The
+ * post-spawn check in `runCapture` is the sound backstop; this one just makes
+ * the common cases cheap and legible.
+ *
  * `paths` is injectable so this is testable without writing to a real
  * machine-level policy path.
  */
 export function managedSettingsBaseUrlOverride(paths?: string[]): string | null {
-  const candidates = paths ?? (process.platform === 'darwin'
-    ? ['/Library/Application Support/ClaudeCode/managed-settings.json']
+  const baseDir = process.platform === 'darwin'
+    ? '/Library/Application Support/ClaudeCode'
     : process.platform === 'win32'
-      ? ['C:\\ProgramData\\ClaudeCode\\managed-settings.json']
-      : ['/etc/claude-code/managed-settings.json']);
+      ? 'C:\\Program Files\\ClaudeCode'
+      : '/etc/claude-code';
+  let candidates: string[];
+  if (paths) {
+    candidates = paths;
+  } else {
+    candidates = [join(baseDir, 'managed-settings.json')];
+    // Drop-in dirs are the standard shape for config-management-deployed
+    // policy, so this is the likelier real-world layout of the two.
+    try {
+      const dropIn = join(baseDir, 'managed-settings.d');
+      for (const name of readdirSync(dropIn).sort()) {
+        if (name.endsWith('.json')) candidates.push(join(dropIn, name));
+      }
+    } catch { /* absent or unreadable — nothing to add */ }
+  }
   for (const path of candidates) {
     try {
       if (!existsSync(path)) continue;
@@ -639,6 +666,27 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
       if (settled) return;
       settled = true;
       try { server.close(); } catch { /* noop */ }
+      // Positive assertion, and the only check that is sound across every
+      // override channel. A path-scanning guard cannot be completed — settings
+      // can be overridden from the user config, a project `.claude/`, a managed
+      // policy file, a drop-in dir, or (under WSL) an HKLM registry key that is
+      // not a file at all. But whatever won, exactly one thing is true
+      // afterwards: either the nonce'd request arrived here, or it went
+      // somewhere else and was probably billed.
+      //
+      // Distinguishing that from "no CC installed" is the whole lesson of this
+      // bug: for a month both reported the same "capture returned null", so a
+      // billed-and-failing probe was indistinguishable from a no-op.
+      if (result === null && childSpawned && foreign === 0) {
+        console.error(
+          '[dario] live capture: CC ran but its request never reached the capture endpoint. '
+          + 'Either it went upstream instead — in which case it was BILLED to your subscription — '
+          + 'or it exited without sending one. If this repeats, something is overriding '
+          + 'ANTHROPIC_BASE_URL for the child: a settings.json `env` block (user, project, or '
+          + 'managed policy), or CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX. '
+          + 'Set DARIO_NO_LIVE_CAPTURE=1 to stop capturing until it is resolved.',
+        );
+      }
       // The throwaway config dir is CC's HOME for this spawn, so CC writes a
       // session transcript and config into it. Removing it keeps capture from
       // littering the operator's real ~/.claude/projects with one junk
@@ -836,7 +884,10 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
           windowsHide: true,
           shell: useShell,
         });
-        child.on('error', () => settle(null));
+        childSpawned = true;
+        // An exec failure (ENOENT, EACCES) means nothing ran and nothing was
+        // billed, so retract the flag before settling or the warning misfires.
+        child.on('error', () => { childSpawned = false; settle(null); });
         child.on('exit', () => {
           // Give the server a brief moment to finish reading the body in case
           // exit and request-end race.
@@ -850,6 +901,9 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
 
     let child: ReturnType<typeof spawn> | undefined;
     let captureHome: string | undefined;
+    // Only true once the spawn actually succeeded. Without it, "no claude
+    // binary on PATH" would trip the billed-request warning above.
+    let childSpawned = false;
 
     // Hard timeout.
     setTimeout(() => settle(captured), timeoutMs);

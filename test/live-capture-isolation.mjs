@@ -75,10 +75,43 @@ check(
   'the managed-settings bail is a distinct log line, not a silent null',
   /live capture skipped: \$\{managed\} sets env\.ANTHROPIC_BASE_URL/.test(src),
 );
+
+// The base dirs are read out of the CC binary, not inferred from docs. The
+// Windows one is `Program Files`; an earlier cut of this guard used
+// `ProgramData`, which appears NOWHERE in the binary — so the bail would have
+// silently never fired on Windows while the suite stayed green, because the
+// test asserted the same wrong constant the implementation used.
 check(
-  'the managed-settings path is checked per-platform',
-  /ProgramData\\\\ClaudeCode\\\\managed-settings\.json/.test(src)
-  && /\/etc\/claude-code\/managed-settings\.json/.test(src),
+  'macOS managed base dir matches CC',
+  /'\/Library\/Application Support\/ClaudeCode'/.test(src),
+);
+check(
+  'Windows managed base dir is Program Files, not ProgramData',
+  src.includes("'C:\\\\Program Files\\\\ClaudeCode'") && !src.includes('ProgramData\\\\ClaudeCode'),
+);
+check('Linux managed base dir matches CC', /'\/etc\/claude-code'/.test(src));
+check(
+  'the managed-settings.d drop-in dir is scanned too',
+  /join\(baseDir, 'managed-settings\.d'\)/.test(src) && /readdirSync\(dropIn\)/.test(src),
+);
+
+// The sound backstop: whatever config layer won, either the nonce'd request
+// arrived or it went elsewhere and was billed. This is the check that would
+// have caught the original bug on day one.
+check(
+  'a spawned-but-unreached capture warns that it may have been billed',
+  /result === null && childSpawned && foreign === 0/.test(src)
+  && /BILLED to your subscription/.test(src),
+);
+// The branch also catches a child that exited without sending anything, so the
+// wording must not assert billing as fact — loud beats silent, but not by lying.
+check(
+  'the warning admits the non-billed possibility instead of asserting billing',
+  /or it exited without sending one/.test(src),
+);
+check(
+  'an exec failure retracts childSpawned so the billed warning cannot misfire',
+  /child\.on\('error', \(\) => \{ childSpawned = false; settle\(null\); \}\)/.test(src),
 );
 
 // Without an explicit cwd the child inherits the unit's WorkingDirectory,
