@@ -9,6 +9,7 @@
  */
 
 import { loadTemplate, promptVariantsOf, TemplateData, VARIANT_FAMILIES } from './live-fingerprint.js';
+import { applyEnvironmentSection, extractEnvironmentSection } from './environment-block.js';
 
 // Load template at module init — prefer live cache, fall back to bundled.
 const TEMPLATE: TemplateData = loadTemplate({ silent: true });
@@ -281,12 +282,46 @@ function stripBehavioralConstraintsMemo(base: string, level: 'partial' | 'aggres
   return v;
 }
 
+/**
+ * The `# Environment` block a real CC produced on this machine, or null when
+ * no live capture has run. Read once from the base prompt: the bake scrubs
+ * host context before publishing, so the bundled variants never carry one and
+ * the live base is the only place it can come from.
+ */
+const CAPTURED_ENV_BLOCK = extractEnvironmentSection(TEMPLATE.system_prompt);
+
+// Memoize the environment splice by (prompt, model) for the same reason the
+// strip above is memoized: it runs per request over the whole prompt, and the
+// answer only moves when the template is re-captured or the model changes.
+// The host facts are read fresh per miss; a proxy's cwd does not move under it.
+const _envCache = new Map<string, Map<string, string>>();
+function withEnvironmentMemo(prompt: string, model: string): string {
+  if (!CAPTURED_ENV_BLOCK) return prompt;
+  if (_envCache.size > 8) _envCache.clear();
+  let byModel = _envCache.get(prompt);
+  if (!byModel) { byModel = new Map(); _envCache.set(prompt, byModel); }
+  let v = byModel.get(model);
+  if (v === undefined) {
+    v = applyEnvironmentSection(prompt, CAPTURED_ENV_BLOCK, model);
+    byModel.set(model, v);
+  }
+  return v;
+}
+
 export function resolveSystemPrompt(arg: string | undefined, model?: string): string {
   const base = systemPromptForModel(model);
-  if (!arg || arg === 'verbatim') return base;
-  if (arg === 'partial') return stripBehavioralConstraintsMemo(base, 'partial');
-  if (arg === 'aggressive') return stripBehavioralConstraintsMemo(base, 'aggressive');
-  return arg;
+  // A fully custom prompt is the operator's text, not CC's — dario has no
+  // business editing an environment section into or out of it.
+  if (arg && arg !== 'verbatim' && arg !== 'partial' && arg !== 'aggressive') return arg;
+  const stripped = arg === 'partial' || arg === 'aggressive'
+    ? stripBehavioralConstraintsMemo(base, arg)
+    : base;
+  // Every model gets the environment of the machine actually serving it, and
+  // its own name in the model line. Before this, the captured block rode along
+  // on the base — a deleted `/tmp` capture sandbox, asserted as the cwd to
+  // every non-variant model, each of them told it was the captured one — while
+  // the three bundled variants carried no environment section at all.
+  return withEnvironmentMemo(stripped, model ?? '');
 }
 
 /**
