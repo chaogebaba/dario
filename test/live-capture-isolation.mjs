@@ -127,9 +127,13 @@ check(
   'ANTHROPIC_BASE_URL is still pinned to the loopback MITM',
   /ANTHROPIC_BASE_URL:\s*url/.test(spawnBlock),
 );
+// The variant sweep passes its family's model as an argument, so the pin is a
+// chain now. What must not change is the tail: an unpinned capture would use
+// whatever model the operator has set as their default, which is how the
+// captured base became machine-specific in the first place.
 check(
   'the base-prompt model is still pinned',
-  /ANTHROPIC_MODEL:\s*process\.env\.ANTHROPIC_MODEL\s*\?\?\s*TEMPLATE_BASE_MODEL/.test(spawnBlock),
+  /ANTHROPIC_MODEL:\s*(?:model\s*\?\?\s*)?process\.env\.ANTHROPIC_MODEL\s*\?\?\s*TEMPLATE_BASE_MODEL/.test(spawnBlock),
 );
 
 // Cleanup — CC treats the config dir as its home and writes a session

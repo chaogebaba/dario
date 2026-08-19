@@ -349,10 +349,19 @@ header('bundled artifact: variant families agree with VARIANT_FAMILIES (dario#lo
   );
   const variants = bundled.system_prompt_variants ?? {};
   for (const f of VARIANT_FAMILIES) {
-    check(`bundle carries a ${f.key} variant`,
-      typeof variants[f.key] === 'string' && variants[f.key].length > 0);
-    check(`${f.key} variant differs from the base`,
-      variants[f.key] !== bundled.system_prompt);
+    const present = typeof variants[f.key] === 'string' && variants[f.key].length > 0;
+    if (f.awaitingFirstBake) {
+      // The flag licenses exactly one absence, and only until the bake that
+      // ends it. Asserting the absence is what stops it outliving its reason:
+      // the run after the bot's re-bake lands fails here, naming the line to
+      // delete, rather than leaving a permanent hole in the invariant above.
+      check(`${f.key} is still awaiting its first bake — drop awaitingFirstBake from VARIANT_FAMILIES once the bundle carries it`,
+        !present);
+    } else {
+      check(`bundle carries a ${f.key} variant`, present);
+      check(`${f.key} variant differs from the base`,
+        variants[f.key] !== bundled.system_prompt);
+    }
     check(`${f.key} matcher accepts its own capture model`,
       f.matches(f.captureModel.toLowerCase()));
   }

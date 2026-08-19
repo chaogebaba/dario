@@ -210,6 +210,20 @@ export interface VariantFamily {
   captureModel: string;
   /** True when a lowercased model id belongs to this family. */
   matches: (model: string) => boolean;
+  /**
+   * Set on a family added to this table AFTER the shipped bundle was baked.
+   *
+   * The bundle can only gain a variant through `capture-and-bake`, and that
+   * script also stamps `_supportedMaxTested`, which the cc-drift bot owns — so
+   * a family added by hand cannot be filled in by the same commit without
+   * racing the bot. The drift check reports the absence, the bot's next bake
+   * supplies the text, and until then the family resolves to the base exactly
+   * as it did before it was named here. A live capture fills it immediately.
+   *
+   * The invariant suite treats the flag as a licence for one specific absence
+   * and fails once the bake lands, so it cannot outlive its reason.
+   */
+  awaitingFirstBake?: true;
 }
 
 /**
@@ -234,6 +248,14 @@ export const VARIANT_FAMILIES: readonly VariantFamily[] = [
   // (which is not a digit) still does.
   { key: 'opus-5', captureModel: 'claude-opus-5', matches: (m) => /opus-5(?!\d)/.test(m) },
   { key: 'sonnet-5', captureModel: 'claude-sonnet-5', matches: (m) => /sonnet-5(?!\d)/.test(m) },
+  // Haiku is the largest divergence of the four and was missing from this
+  // table entirely, so every haiku request was served the 6.2K base where CC
+  // sends 27.7K. Measured against CC 2.1.236 on a sandbox capture: haiku's
+  // prompt is sonnet-5's long-form prompt plus a TaskCreate planning line,
+  // with its own cutoff (February 2025, against the base's January 2026).
+  // Matched on the family word rather than a pinned version so 4.5 and any
+  // later haiku both land here — the capture model is what decides the text.
+  { key: 'haiku', captureModel: 'claude-haiku-4-5-20251001', matches: (m) => m.includes('haiku'), awaitingFirstBake: true },
 ];
 
 /**
@@ -452,10 +474,15 @@ export async function refreshLiveFingerprintAsync(options?: {
   if (!findClaudeBinary()) return null;
 
   try {
-    const live = await captureLiveTemplateAsync(options?.timeoutMs ?? 10_000);
+    const timeoutMs = options?.timeoutMs ?? 10_000;
+    const live = await captureLiveTemplateAsync(timeoutMs);
     if (!live) {
       log('live fingerprint refresh: capture returned null (CC did not send a /v1/messages request within the timeout)');
       return null;
+    }
+    const variants = await captureVariantPromptsAsync(live.system_prompt, timeoutMs, log);
+    if (Object.keys(variants).length > 0) {
+      live.system_prompt_variants = { ...(live.system_prompt_variants ?? {}), ...variants };
     }
     writeLiveCache(live);
     log(`live fingerprint refreshed from CC ${live._version}`);
@@ -464,6 +491,61 @@ export async function refreshLiveFingerprintAsync(options?: {
     log(`live fingerprint refresh failed: ${(err as Error).message}`);
     return null;
   }
+}
+
+/**
+ * Capture each family in VARIANT_FAMILIES under its own model.
+ *
+ * The runtime refresh used to capture once, on the base model, and write a
+ * cache with no `system_prompt_variants` at all. `withBundledFallbacks` then
+ * filled the gap from the bundle — which is the right failure mode but not a
+ * mirror: the bundle's variants are SCRUBBED, so they carry no `# Environment`
+ * section, and they are as old as the last bake. Every model-specific line
+ * that could only come from a capture under that model — the knowledge cutoff
+ * above all, opus-5's real answer being May 2026 where the base says January —
+ * was unavailable, and the request path could only drop it.
+ *
+ * Costs one `claude --print` per family against the loopback MITM, which bills
+ * nothing: the sandbox never reaches Anthropic. It runs in the background
+ * refresh, not on any request path.
+ *
+ * A family is stored only when its prompt DIFFERS from the base, mirroring
+ * `capture-and-bake.mjs` — an identical capture is a measured "no variant",
+ * and writing it would bloat the cache and hide the shared-prompt fact. A
+ * family whose capture fails is simply absent, so `withBundledFallbacks`
+ * supplies the bundle's as before.
+ */
+async function captureVariantPromptsAsync(
+  base: string,
+  timeoutMs: number,
+  log: (msg: string) => void,
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const failed: string[] = [];
+  const sharedBase: string[] = [];
+  for (const family of VARIANT_FAMILIES) {
+    let captured: TemplateData | null = null;
+    try {
+      captured = await captureLiveTemplateAsync(timeoutMs, family.captureModel);
+    } catch {
+      captured = null;
+    }
+    if (!captured || typeof captured.system_prompt !== 'string' || captured.system_prompt.length === 0) {
+      failed.push(family.key);
+      continue;
+    }
+    if (captured.system_prompt === base) {
+      sharedBase.push(family.key);
+      continue;
+    }
+    out[family.key] = captured.system_prompt;
+  }
+  const parts: string[] = [];
+  if (Object.keys(out).length > 0) parts.push(`captured ${Object.keys(out).join(', ')}`);
+  if (sharedBase.length > 0) parts.push(`${sharedBase.join(', ')} match the base`);
+  if (failed.length > 0) parts.push(`${failed.join(', ')} failed — keeping the bundle's`);
+  if (parts.length > 0) log(`live prompt variants: ${parts.join('; ')}`);
+  return out;
 }
 
 function loadBundledTemplate(options?: { silent?: boolean }): TemplateData {
@@ -656,10 +738,17 @@ export function isOwnCaptureRequest(url: string | undefined, nonce: string): boo
  * ANTHROPIC_BASE_URL pointed at it, wait for one request, respond with a
  * minimal valid SSE stream, and return the captured request.
  *
+ * `model` pins what CC is asked to serve, which decides which system prompt
+ * it composes. Omitted, the capture falls back to ANTHROPIC_MODEL and then to
+ * TEMPLATE_BASE_MODEL, so an unpinned call still captures the shared base.
+ *
  * Returns null on timeout or spawn failure. Does not throw.
  */
-export async function captureLiveTemplateAsync(timeoutMs: number = 10_000): Promise<TemplateData | null> {
-  const captured = await runCapture(timeoutMs);
+export async function captureLiveTemplateAsync(
+  timeoutMs: number = 10_000,
+  model?: string,
+): Promise<TemplateData | null> {
+  const captured = await runCapture(timeoutMs, model);
   if (!captured) return null;
   return extractTemplate(captured);
 }
@@ -764,7 +853,65 @@ function releaseCaptureHome(home: string): void {
   PENDING_CAPTURE_HOMES.delete(home);
 }
 
-async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
+/**
+ * Make the capture sandbox a git repository, so CC composes the `gitStatus:`
+ * block it appends to every prompt it sends from inside a working tree.
+ *
+ * Without this the sandbox is a bare `/tmp` directory, CC reports
+ * `Is a git repository: false` and appends nothing — measured, and the reason
+ * `environment-block.ts` had no captured gitStatus shape to rewrite. The block
+ * cannot be written from scratch under this codebase's rewrite-never-invent
+ * rule; it has to come from CC. So the sandbox is given the smallest repo that
+ * makes CC emit one, and the request path substitutes the serving host's own
+ * branch, user, status and commits into that captured shape.
+ *
+ * The repo is seeded CLEAN and committed, which is deliberate: CC renders a
+ * clean tree as the literal `(clean)`, and that literal is what the rewrite
+ * falls back to when the serving repo has nothing modified. A sandbox left
+ * dirty would put its own junk where that word belongs.
+ *
+ * Fully isolated from the operator's git configuration — a global
+ * `init.templateDir`, a `core.hooksPath`, or a signing key would otherwise run
+ * their own code inside the capture. Best-effort throughout: no git, a git too
+ * old for `-b`, a failed commit all leave a plain directory behind, which is
+ * exactly the pre-existing behaviour.
+ */
+function seedCaptureRepo(home: string): void {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+  };
+  const git = (...args: string[]): void => {
+    execFileSync('git', ['-C', home, ...args], {
+      env,
+      stdio: 'ignore',
+      timeout: 5_000,
+    });
+  };
+  try {
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.name', 'dario');
+    git('config', 'user.email', 'capture@dario.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', join(home, '.git', 'no-hooks'));
+    writeFileSync(join(home, 'README.md'), 'dario fingerprint capture sandbox\n');
+    git('add', 'README.md');
+    git('commit', '-q', '-m', 'capture sandbox');
+  } catch {
+    // No git, or a git that refused one of these. The capture still runs; it
+    // just produces the same no-gitStatus prompt it produced before.
+  }
+}
+
+/** Test-only surface for `seedCaptureRepo`. Production code calls it from `runCapture`. */
+export function _seedCaptureRepoForTest(home: string): void {
+  seedCaptureRepo(home);
+}
+
+async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRequest | null> {
   const managed = managedSettingsBaseUrlOverride();
   if (managed) {
     console.log(
@@ -987,6 +1134,7 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
         // entries were overriding the same way.
         captureHome = mkdtempSync(join(tmpdir(), 'dario-capture-'));
         trackCaptureHome(captureHome);
+        seedCaptureRepo(captureHome);
         const env: NodeJS.ProcessEnv = {
           ...process.env,
           CLAUDE_CONFIG_DIR: captureHome,
@@ -994,8 +1142,10 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
           ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'sk-dario-fingerprint-capture',
           // Pin the base-prompt model. An unpinned `claude --print` uses the
           // user's DEFAULT model, which made the captured base machine-specific.
-          // A caller-supplied value wins: capture-and-bake sets this per variant.
-          ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? TEMPLATE_BASE_MODEL,
+          // The `model` argument wins, then the environment: the runtime variant
+          // sweep passes the family's model directly, capture-and-bake sets
+          // ANTHROPIC_MODEL around each of its own captures.
+          ANTHROPIC_MODEL: model ?? process.env.ANTHROPIC_MODEL ?? TEMPLATE_BASE_MODEL,
           // Prevent CC from launching its own interactive UI or OAuth flow.
           CLAUDE_NONINTERACTIVE: '1',
         };

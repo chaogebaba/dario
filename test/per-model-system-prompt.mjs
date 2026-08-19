@@ -107,13 +107,25 @@ header('VARIANT_FAMILIES is the single source of truth (dario#lock-step)');
   // list from, so this asserts the loaded template actually carries what
   // the table promises rather than falling back to the base.
   for (const f of VARIANT_FAMILIES) {
+    if (f.awaitingFirstBake) {
+      // No bundled text to route to yet, so the base IS the correct answer
+      // here — the same fallback any family gets when its variant is absent.
+      check(`${f.key}: awaiting its first bake, so the capture model falls back to the base`,
+        systemPromptForModel(f.captureModel) === CC_SYSTEM_PROMPT);
+      continue;
+    }
     check(`${f.key}: capture model routes to a non-base variant`,
       systemPromptForModel(f.captureModel) !== CC_SYSTEM_PROMPT);
   }
   check('matcher precedence: fable is first (never falls into the -5 arms)',
     VARIANT_FAMILIES[0]?.key === 'fable');
+  // `missingVariantFamilies` deliberately does NOT know about
+  // awaitingFirstBake: the doctor row it feeds must keep telling the operator
+  // that the family is being served the base prompt, because it is.
   const missing = missingVariantFamilies(CC_TEMPLATE);
-  check('loaded template misses no family', missing.length === 0,
+  const licensed = new Set(VARIANT_FAMILIES.filter((f) => f.awaitingFirstBake).map((f) => f.key));
+  check('loaded template misses no family it has been baked for',
+    missing.every((k) => licensed.has(k)),
     missing.length > 0 ? `missing: ${missing.join(', ')}` : undefined);
 }
 
