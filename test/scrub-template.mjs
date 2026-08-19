@@ -104,6 +104,41 @@ check(
   scrubText('~/.claude/projects/-tmp-dario-verify/memory/') ===
     '~/.claude/projects/project/memory/',
 );
+
+// ────────────────────────────────────────────────────────────────────
+header('3c. scrubText — the capture sandbox\'s own config root');
+
+// `runCapture` relocates CLAUDE_CONFIG_DIR into a random `dario-capture-XXXXXX`
+// temp dir, so CC composes its memory path under THAT and not under
+// `~/.claude` — a root with no username in it, which the identity rules never
+// touch and the rule above cannot match. Random per capture, so left alone it
+// is #854 again: every bake writes a different byte string, every check calls
+// it drift, and the published bundle carries a path from the bake host's /tmp.
+check(
+  'a Linux sandbox memory path collapses to the canonical form',
+  scrubText('/tmp/dario-capture-sWKHN4/projects/-tmp-dario-capture-sWKHN4/memory/') ===
+    '/home/user/.claude/projects/project/memory/',
+);
+check(
+  'the macOS temp root collapses too',
+  scrubText('/var/folders/mp/xk_2t/T/dario-capture-Ab12/projects/-var-folders-x/memory/') ===
+    '/home/user/.claude/projects/project/memory/',
+);
+check(
+  'two captures with different sandbox names produce the SAME bytes',
+  scrubText('/tmp/dario-capture-aaaaaa/projects/-tmp-dario-capture-aaaaaa/memory/') ===
+    scrubText('/tmp/dario-capture-zzzzzz/projects/-tmp-dario-capture-zzzzzz/memory/'),
+);
+check(
+  'and the same bytes a real ~/.claude install produces, so the bundle does not move',
+  scrubText('/tmp/dario-capture-sWKHN4/projects/-tmp-dario-capture-sWKHN4/memory/') ===
+    scrubText('/home/alice/.claude/projects/-home-alice-proj/memory/'),
+);
+check(
+  'a sandbox path with no projects segment is left alone',
+  scrubText('/tmp/dario-capture-sWKHN4/settings.json') === '/tmp/dario-capture-sWKHN4/settings.json',
+);
+
 check(
   'idempotent on the canonical form',
   scrubText('/home/user/.claude/projects/project/memory/') ===

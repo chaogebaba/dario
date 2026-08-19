@@ -91,8 +91,34 @@ const CANONICAL_PROJECT_DIR = '/home/user/.claude/projects/project';
 const CLAUDE_PROJECT_PATH =
   /(?:[A-Za-z]:[\\/]Users[\\/]user|\/root|\/home\/user|\/Users\/user)[\\/]\.claude[\\/]projects[\\/][^\s`'")\]]*/g;
 
+/**
+ * The same path as produced INSIDE the capture sandbox.
+ *
+ * `runCapture` relocates CLAUDE_CONFIG_DIR to a fresh `dario-capture-XXXXXX`
+ * temp dir, so CC composes its memory path under that instead of under
+ * `~/.claude` — a root the rule above cannot match and the identity rules
+ * never see, because a temp dir carries no username. Left alone it is #854
+ * again in a new shape: the sandbox name is random per capture, so every bake
+ * writes a different byte string, every check reports content drift against
+ * it, and the auto-rebake loop that #854 closed reopens — this time shipping a
+ * path from the bake host's `/tmp` in the published bundle.
+ *
+ * Not yet observed in a bundle only because the sandbox landed (72adbac) after
+ * the last bake. Canonicalizing it to the same placeholder restores the
+ * byte-identical-anywhere property the constant above exists for.
+ */
+const CAPTURE_SANDBOX_PROJECT_PATH =
+  /[^\s`'")\]]*[\\/]dario-capture-[A-Za-z0-9]+[\\/]projects[\\/][^\s`'")\]]*/g;
+
 function canonicalizeClaudeProjectPaths(text: string): string {
-  return text.replace(CLAUDE_PROJECT_PATH, (match) => {
+  return canonicalizeProjectPath(
+    canonicalizeProjectPath(text, CLAUDE_PROJECT_PATH),
+    CAPTURE_SANDBOX_PROJECT_PATH,
+  );
+}
+
+function canonicalizeProjectPath(text: string, pattern: RegExp): string {
+  return text.replace(pattern, (match) => {
     const tail = match.split(/[\\/]projects[\\/]/)[1] ?? '';
     // drop the project slug, keep whatever addressed dir followed it
     const segments = tail.split(/[\\/]/).filter((s) => s.length > 0).slice(1);
