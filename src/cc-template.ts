@@ -1831,7 +1831,7 @@ export function buildCCRequest(
   cacheControl: CacheControl,
   identity: { deviceId: string; accountUuid: string; sessionId: string },
   opts: { preserveTools?: boolean; hybridTools?: boolean; mergeTools?: boolean; noAutoDetect?: boolean; effort?: EffortValue; maxTokens?: number | 'client'; systemPrompt?: string; skipFields?: ReadonlySet<string>; honorClientThinking?: boolean; preserveOutputFormat?: boolean } = {},
-): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[]; detectedClient?: string; genuineCC?: boolean } {
+): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[]; unreachableTools: string[]; detectedClient?: string; genuineCC?: boolean } {
 
   const model = clientBody.model as string || 'claude-sonnet-5';
   const isHaiku = model.toLowerCase().includes('haiku');
@@ -1889,7 +1889,7 @@ export function buildCCRequest(
         session_id: identity.sessionId,
       }),
     };
-    return { body, toolMap: new Map<string, ToolMapping>(), unmappedTools: [], genuineCC: true };
+    return { body, toolMap: new Map<string, ToolMapping>(), unmappedTools: [], unreachableTools: [], genuineCC: true };
   }
 
   // ── Detect text-tool-protocol clients up-front ──
@@ -1968,6 +1968,10 @@ export function buildCCRequest(
   // the fingerprint risk on their own account.
   const activeToolMap = new Map<string, ToolMapping>();
   const unmappedTools: string[] = [];
+  // Client tool -> the CC slot round-robin gave it. Reconciled against the
+  // advertise array once that is assembled, because whether the slot is
+  // reachable at all depends on which advertise branch runs.
+  const fallbackAssignments = new Map<string, string>();
 
   if (clientTools && !effectivePreserveTools && !effectiveMergeTools) {
     // Two passes so the unmapped-tool distributor can avoid colliding with
@@ -2040,9 +2044,41 @@ export function buildCCRequest(
       // already uses so we never create a two-client-names-to-one-CC-tool
       // collision. If every fallback is claimed (rare: client already uses 6+
       // CC tools), fall back to the full pool and accept the ambiguity.
+      //
+      // Be clear about what this buys, because the collision filter and the
+      // advertise filter want opposite things from the same slot. This picks a
+      // slot the client did NOT claim; the advertise path emits only tools the
+      // client DID declare. On the ordinary client those are complements, so
+      // the slot chosen here is not advertised. The arm does its job only on
+      // the paths that send the whole template (no client declaration, merge
+      // mode, fable's pinned array), where every slot is advertised.
+      //
+      // The two halves fail differently, and the second is the worse one:
+      //
+      //  - New calls: the model is never offered the slot, so it never emits
+      //    a tool_use for it. The client's tool is absent, not substituted.
+      //
+      //  - History: the remap below runs over message history regardless of
+      //    what is advertised, so a past tool_use for the client's tool IS
+      //    renamed onto the unadvertised slot AND its input is replaced by
+      //    `translateArgs`. Verified: a client declaring Read/Bash/memory_get
+      //    advertises ["Bash","Read"], routes memory_get onto Grep, and
+      //    rewrites a history block from {key:"user_prefs"} to
+      //    {pattern:".",path:"."} — the argument is gone, and the model reads
+      //    a transcript in which it called a tool absent from its own tool
+      //    list. Real CC never sends that shape.
+      //
+      // Left as-is deliberately. Advertising the chosen slot would make the
+      // rename land, but it re-advertises a CC tool the client never declared,
+      // which is the exact failure e409f52 exists to prevent — the harness
+      // rejects it with "<Tool> exists but is not enabled in this context".
+      // One code path, two client classes, opposite requirements. The
+      // reconciliation before the return reports the drop instead of hiding
+      // it.
       const pool = CC_FALLBACK_TOOLS.filter(t => !claimedCC.has(t));
       const fallbackPool = pool.length > 0 ? pool : CC_FALLBACK_TOOLS;
       const fallbackTool = fallbackPool[(unmappedTools.length - 1) % fallbackPool.length];
+      fallbackAssignments.set(tool.name as string, fallbackTool);
       activeToolMap.set(tool.name as string, {
         ccTool: fallbackTool,
         translateArgs: (a) => {
@@ -2385,7 +2421,31 @@ export function buildCCRequest(
   // picked up by the next live refresh without a dario release.
   const orderedBody = orderBodyForOutbound(ccRequest);
 
-  return { body: orderedBody, toolMap: activeToolMap, unmappedTools, detectedClient };
+  // Which round-robin slots the model will actually be offered.
+  //
+  // The collision-avoidance filter above picks a slot the client did NOT
+  // claim, and the advertise branch emits only tools the client DID declare.
+  // For a client whose declared CC tools are exactly its claimed ones — the
+  // ordinary case — those sets are complements, so the slot is not in the
+  // outgoing array and the model is never offered it. Two consequences, both
+  // silent until now: the client's tool cannot be called at all, and any
+  // history tool_use for it still gets renamed onto that unadvertised slot
+  // with its arguments replaced. Reported so neither is invisible.
+  //
+  // Not universally dead, which is why this is computed against the finalized
+  // array rather than asserted: the no-declaration fallback, merge mode, and
+  // fable's pinned array all send the full template, where every slot is
+  // advertised and the mapping works as documented.
+  const advertisedNames = new Set(
+    ((orderedBody.tools as Array<{ name?: string }> | undefined) ?? [])
+      .map((t) => t.name)
+      .filter((n): n is string => Boolean(n)),
+  );
+  const unreachableTools = [...fallbackAssignments]
+    .filter(([, ccTool]) => !advertisedNames.has(ccTool))
+    .map(([clientTool]) => clientTool);
+
+  return { body: orderedBody, toolMap: activeToolMap, unmappedTools, unreachableTools, detectedClient };
 }
 
 /**

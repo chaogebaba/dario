@@ -3312,7 +3312,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
             // resolved just above so body and header agree.
             const idSource = poolAccount ? poolAccount.identity : identity;
             const bodyIdentity = { deviceId: idSource.deviceId, accountUuid: idSource.accountUuid, sessionId: preBodySessionId };
-            const { body: ccBody, toolMap, detectedClient, unmappedTools, genuineCC } = buildCCRequest(
+            const { body: ccBody, toolMap, detectedClient, unmappedTools, unreachableTools, genuineCC } = buildCCRequest(
               r, billingTag, CACHE_EPHEMERAL,
               bodyIdentity,
               {
@@ -3388,6 +3388,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
               const sample = unmappedTools.slice(0, 5).join(', ');
               const more = unmappedTools.length > 5 ? `, +${unmappedTools.length - 5} more` : '';
               console.log(`[dario] tool substitution: ${unmappedTools.length}/${totalTools} client tool${unmappedTools.length === 1 ? '' : 's'} not in TOOL_MAP — remapped onto CC fallback slots (${sample}${more}). Pass --preserve-tools to forward your schemas verbatim instead.`);
+              // "remapped" is only true for slots that get advertised. The
+              // collision filter picks a slot the client did not claim and the
+              // advertise filter emits only slots it did, so on an ordinary
+              // client the two are complements and the slot never reaches the
+              // wire. Two distinct losses follow, and the line above implies
+              // neither: the tool cannot be called, and history referring to
+              // it is rewritten onto the absent slot with substituted args.
+              if (unreachableTools.length > 0) {
+                const uSample = unreachableTools.slice(0, 5).join(', ');
+                const uMore = unreachableTools.length > 5 ? `, +${unreachableTools.length - 5} more` : '';
+                console.log(`[dario]   …of which ${unreachableTools.length} cannot actually be called (${uSample}${uMore}): the assigned fallback slot is absent from the advertised tool array, so the model is never offered it. Any history tool_use for these is still renamed onto that slot with substituted arguments. Use --preserve-tools to forward the schemas verbatim, or --hybrid-tools to drop them outright.`);
+              }
             }
 
             // MCP tools (mcp__<server>__<tool>) forward verbatim in default
