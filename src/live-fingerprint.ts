@@ -597,14 +597,31 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
       if (settled) return;
       settled = true;
       try { server.close(); } catch { /* noop */ }
-      try { child?.kill('SIGTERM'); } catch { /* noop */ }
       // The throwaway config dir is CC's HOME for this spawn, so CC writes a
       // session transcript and config into it. Removing it keeps capture from
       // littering the operator's real ~/.claude/projects with one junk
       // `hi` session per proxy start.
-      if (captureHome) {
-        try { rmSync(captureHome, { recursive: true, force: true }); } catch { /* noop */ }
+      //
+      // Do not race the child for it. SIGTERM is not synchronous and CC keeps
+      // rebuilding its config skeleton for tens of seconds after being asked to
+      // stop — measured at ~20s, which left three stale dirs per proxy start
+      // behind a sweep that fired at 2s. The capture is a throwaway probe with
+      // nothing to flush, so SIGKILL it (which it cannot ignore, so it cannot
+      // write again) and sweep once it is actually gone.
+      const home = captureHome;
+      const sweep = () => {
+        if (!home) return;
+        try { rmSync(home, { recursive: true, force: true }); } catch { /* noop */ }
+      };
+      if (child && child.exitCode === null && child.signalCode === null) {
+        child.once('exit', sweep);
+        // Backstop for a child that never reports exit at all. unref'd so a
+        // pending sweep can never hold the proxy open on shutdown.
+        const backstop = setTimeout(sweep, 30_000);
+        if (typeof backstop.unref === 'function') backstop.unref();
       }
+      try { child?.kill('SIGKILL'); } catch { /* noop */ }
+      if (!child) sweep();
       resolve(result);
     };
 

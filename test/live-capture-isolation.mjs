@@ -75,7 +75,22 @@ check(
 // ~/.claude/projects filled with junk `hi` sessions.
 check(
   'the throwaway config dir is removed when the capture settles',
-  /rmSync\(captureHome,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/.test(src),
+  /rmSync\(home,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/.test(src),
+);
+
+// CC keeps rebuilding its config skeleton for ~20s after SIGTERM, so any
+// timed sweep loses. Kill uncatchably and sweep on the exit event instead.
+check(
+  'the capture child is SIGKILLed so it cannot write again',
+  /child\?\.kill\('SIGKILL'\)/.test(src) && !/kill\('SIGTERM'\)/.test(src),
+);
+check(
+  'cleanup is driven by the child exit event, not a timer race',
+  /child\.once\('exit', sweep\)/.test(src),
+);
+check(
+  'a backstop sweep exists and is unref\'d so it cannot delay shutdown',
+  /setTimeout\(sweep, 30_000\)/.test(src) && /backstop\.unref\(\)/.test(src),
 );
 
 // The MITM must never become a forwarding proxy: it answers locally.
