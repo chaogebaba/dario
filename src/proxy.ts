@@ -1463,7 +1463,68 @@ export function formatPoolStartupLine(
   return `Pool: ${accountCount} accounts — ${strategy}, ${affinity}`;
 }
 
-export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
+/**
+ * A bound proxy. Returned by `startProxy` once the socket is actually
+ * listening.
+ *
+ * `port` is the port the kernel gave us, which is only the same as
+ * `opts.port` when a non-zero one was asked for. Passing 0 and reading this
+ * back is how a caller gets a port nothing else can already hold — the fix
+ * for suites that hardcoded one and flaked against each other and against a
+ * running dario.
+ */
+export interface ProxyHandle {
+  readonly port: number;
+  readonly host: string;
+  /** Base URL a client on this machine would use to reach the proxy. */
+  readonly url: string;
+  /** Stop listening. Does not exit the process. */
+  close(): Promise<void>;
+}
+
+/**
+ * Thrown when the listening socket cannot be bound.
+ *
+ * This used to be a `process.exit` inside `startProxy`'s error handler.
+ * Exiting on the caller's behalf made the failure unobservable to the one
+ * caller that most needed to observe it: the test runner scores a suite on
+ * its exit code, and the EADDRINUSE branch exited *0* whenever the occupant
+ * answered /health as a healthy dario. So a suite whose port was held by the
+ * developer's own running dario bound nothing, asserted nothing, and was
+ * counted as passed. Eight suites were reachable that way.
+ *
+ * `darioAlreadyRunning` preserves the distinction the old code drew with exit
+ * status — a human running `dario proxy` twice, versus a genuine conflict —
+ * and `existing` carries the fields the old banner printed. cli.ts rebuilds
+ * that exact UX from them, so the interactive behaviour is unchanged; a test
+ * can now catch this instead of dying.
+ */
+export class ProxyBindError extends Error {
+  readonly code: string;
+  readonly port: number;
+  readonly host: string;
+  readonly darioAlreadyRunning: boolean;
+  readonly existing: { oauth: string; requests: number } | null;
+
+  constructor(opts: {
+    message: string;
+    code: string;
+    port: number;
+    host: string;
+    darioAlreadyRunning?: boolean;
+    existing?: { oauth: string; requests: number } | null;
+  }) {
+    super(opts.message);
+    this.name = 'ProxyBindError';
+    this.code = opts.code;
+    this.port = opts.port;
+    this.host = opts.host;
+    this.darioAlreadyRunning = opts.darioAlreadyRunning ?? false;
+    this.existing = opts.existing ?? null;
+  }
+}
+
+export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> {
   const port = opts.port ?? DEFAULT_PORT;
   const host = opts.host ?? process.env.DARIO_HOST ?? DEFAULT_HOST;
   const verbose = opts.verbose ?? false;
@@ -4648,46 +4709,58 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     }
   });
 
-  server.on('error', async (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE') {
-      // Before erroring, check whether dario itself is already running on this
-      // port. If it is, the user just ran `dario login` or `dario proxy` twice
-      // — treat it as a no-op rather than a crash.
-      try {
-        const displayHost = isLoopbackHost(host) ? 'localhost' : host;
-        const res = await fetch(`http://${displayHost}:${port}/health`);
-        const body = await res.json() as Record<string, unknown>;
-        if (body && (body.status === 'ok' || body.status === 'degraded')) {
-          // The /health endpoint's `oauth` field is a status enum
-          // ('healthy' | 'expired' | 'broken' | 'none') — not a token
-          // and not any kind of credential. CodeQL's clear-text-logging
-          // heuristic flags any logged field whose key contains "oauth",
-          // so we whitelist by allow-list rather than disable the rule.
-          const allowedOauthStatuses = new Set(['healthy', 'expired', 'broken', 'none', 'degraded']);
-          const rawOauth = typeof body.oauth === 'string' ? body.oauth : '';
-          const oauthStatusLabel = allowedOauthStatuses.has(rawOauth) ? rawOauth : 'unknown';
-          const requestsServed = typeof body.requests === 'number' ? body.requests : 0;
-          console.log('');
-          console.log(`  dario — already running on http://${displayHost}:${port}`);
-          console.log('');
-          console.log(`  OAuth: ${oauthStatusLabel}  |  requests served: ${requestsServed}`);
-          console.log('');
-          console.log('  Usage:');
-          console.log(`    ANTHROPIC_BASE_URL=http://${displayHost}:${port}`);
-          console.log('    ANTHROPIC_API_KEY=dario');
-          console.log('');
-          process.exit(0);
-        }
-      } catch {
-        // Not dario — fall through to the generic error.
-      }
-      console.error(`[dario] Port ${port} is already in use by another process.`);
-      console.error(`[dario] Free it with: kill $(lsof -ti:${port}) or change the port with --port <n>`);
-    } else {
-      console.error(`[dario] Server error: ${err.message}`);
+  /**
+   * Classify a bind failure without acting on it.
+   *
+   * The /health probe distinguishes "the operator already has dario on this
+   * port" from "something else has it" — the same question the old handler
+   * asked, minus the `process.exit` it answered with. Deciding what a bind
+   * failure *means* is the caller's business: the CLI treats an existing
+   * dario as a benign no-op, a test treats it as the conflict it is.
+   */
+  const classifyBindError = async (err: NodeJS.ErrnoException): Promise<ProxyBindError> => {
+    if (err.code !== 'EADDRINUSE') {
+      return new ProxyBindError({
+        message: `Server error: ${err.message}`,
+        code: err.code ?? 'UNKNOWN',
+        port: port,
+        host,
+      });
     }
-    process.exit(1);
-  });
+    try {
+      const displayHost = isLoopbackHost(host) ? 'localhost' : host;
+      const res = await fetch(`http://${displayHost}:${port}/health`);
+      const body = await res.json() as Record<string, unknown>;
+      if (body && (body.status === 'ok' || body.status === 'degraded')) {
+        // The /health endpoint's `oauth` field is a status enum
+        // ('healthy' | 'expired' | 'broken' | 'none') — not a token
+        // and not any kind of credential. CodeQL's clear-text-logging
+        // heuristic flags any logged field whose key contains "oauth",
+        // so we whitelist by allow-list rather than disable the rule.
+        const allowedOauthStatuses = new Set(['healthy', 'expired', 'broken', 'none', 'degraded']);
+        const rawOauth = typeof body.oauth === 'string' ? body.oauth : '';
+        return new ProxyBindError({
+          message: `dario is already running on http://${displayHost}:${port}`,
+          code: 'EADDRINUSE',
+          port: port,
+          host,
+          darioAlreadyRunning: true,
+          existing: {
+            oauth: allowedOauthStatuses.has(rawOauth) ? rawOauth : 'unknown',
+            requests: typeof body.requests === 'number' ? body.requests : 0,
+          },
+        });
+      }
+    } catch {
+      // Not dario — fall through to the generic conflict.
+    }
+    return new ProxyBindError({
+      message: `Port ${port} is already in use by another process.`,
+      code: 'EADDRINUSE',
+      port: port,
+      host,
+    });
+  };
 
   // One-line template summary so users can tell at a glance whether they
   // booted on a fresh live capture or a stale bundled fallback.
@@ -4754,7 +4827,40 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     console.log('[dario] --no-live-capture: background live fingerprint refresh skipped; using bundled template.');
   }
 
-  server.listen(port, host, () => {
+  /**
+   * Bind, and turn the outcome into a value rather than an exit status.
+   *
+   * `listen` reports failure on the 'error' event, not by throwing, so the
+   * two outcomes are raced here into one awaited result. The handler is
+   * one-shot: once listening, 'error' means a *runtime* fault, which is a
+   * different thing and keeps the old fatal treatment.
+   */
+  const bound = await new Promise<{ port: number }>((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      server.off('listening', onListening);
+      void classifyBindError(err).then(reject, reject);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      const addr = server.address();
+      resolve({ port: typeof addr === 'object' && addr !== null ? addr.port : port });
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
+
+  const boundPort = bound.port;
+
+  // Past the bind, an 'error' is a runtime server fault with no caller in a
+  // position to do anything useful about it. That keeps its original fatal
+  // handling.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    console.error(`[dario] Server error: ${err.message}`);
+    process.exit(1);
+  });
+
+  {
     const modeLine = passthrough
       ? 'Mode: passthrough (OAuth swap only, no injection)'
       : status.authenticated
@@ -4773,12 +4879,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // actually use to reach the proxy.
     const displayHost = isLoopbackHost(host) ? 'localhost' : host;
     console.log('');
-    console.log(`  dario — http://${displayHost}:${port}`);
+    console.log(`  dario — http://${displayHost}:${boundPort}`);
     console.log('');
     console.log('  Your Claude subscription is now an API.');
     console.log('');
     console.log('  Usage:');
-    console.log(`    ANTHROPIC_BASE_URL=http://${displayHost}:${port}`);
+    console.log(`    ANTHROPIC_BASE_URL=http://${displayHost}:${boundPort}`);
     console.log('    ANTHROPIC_API_KEY=dario');
     console.log('');
     console.log(`  ${modeLine}`);
@@ -4797,7 +4903,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       }
     }
     console.log('');
-  });
+  }
 
   // Session presence heartbeat — keeps the OAuth session marked active
   // (matches the ~5s cadence of a real Claude Code session).
@@ -4892,4 +4998,20 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // The handle. `close` releases the socket and the two timers without
+  // touching process lifetime — a caller that started a proxy to make three
+  // requests against it should not have to kill its own process to stop it,
+  // which until now was the only way.
+  const handleHost = isLoopbackHost(host) ? 'localhost' : host;
+  return {
+    port: boundPort,
+    host,
+    url: `http://${handleHost}:${boundPort}`,
+    close: () => new Promise<void>((resolve) => {
+      clearInterval(presenceInterval);
+      clearInterval(refreshInterval);
+      server.close(() => resolve());
+    }),
+  };
 }

@@ -29,6 +29,8 @@
 
 import { spawn } from 'node:child_process';
 import { readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readTally } from './lib/read-tally.mjs';
+import { jsSuites, shellSuites } from './lib/suites.mjs';
 import { cpus } from 'node:os';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -36,34 +38,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Files the driver itself should skip:
-//   - all.test.mjs — self-reference would recurse
-//   - e2e.mjs, compat.mjs, stealth-test.mjs — live-integration tests that
-//     expect a running proxy / real Anthropic key / real subscription; they
-//     have their own `npm run e2e`, `npm run compat` entry points and are
-//     intentionally excluded from the default test script
-const EXCLUDED = new Set([
-  'all.test.mjs',
-  'e2e.mjs',
-  'stress.mjs',
-  'infra-probe.mjs',
-  'compat.mjs',
-  'stealth-test.mjs',
-  // Live in-process e2e — patches global fetch and starts a real proxy.
-  // Run manually with: node test/overage-guard-e2e-live.mjs (dario#288).
-  'overage-guard-e2e-live.mjs',
-]);
-
-const files = readdirSync(__dirname)
-  .filter(f => f.endsWith('.mjs') && !EXCLUDED.has(f))
-  .sort();
-
-// Shell-level suites (packaging/installer). Run through bash rather than
-// the JS runtime, but reported alongside everything else so a broken
-// installer fails `npm test` like any other regression.
-const shellFiles = readdirSync(__dirname)
-  .filter(f => f.endsWith('.test.sh') && !EXCLUDED.has(f))
-  .sort();
+const files = jsSuites(__dirname);
+const shellFiles = shellSuites(__dirname);
 
 // Every child gets the live-template cache pointed at a path that does not
 // exist, so loadTemplate falls back to the BUNDLED snapshot and the suite is
@@ -177,6 +153,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   });
 }
 
+
 /** Run one suite file to completion. Resolves with its outcome. */
 function runSuite(file, argv) {
   const started = Date.now();
@@ -206,11 +183,15 @@ function runSuite(file, argv) {
       clearTimeout(drainTimer);
       live.delete(proc);
       const failed = timedOut || code !== 0;
+      // Read the tally before the output is dropped. A passing suite still
+      // keeps no text, so peak memory is unchanged.
+      const text = buf.value();
       resolve({
         file,
         // A SIGKILLed child reports code null; that must not read as pass.
         code: timedOut ? 'timeout' : (code ?? 'signal'),
-        out: failed ? `${extra ?? ''}${buf.value()}` : '',
+        out: failed ? `${extra ?? ''}${text}` : '',
+        tally: readTally(text),
         ms: Date.now() - started,
       });
     };
@@ -261,6 +242,16 @@ async function worker() {
   while (cursor < jobs.length) {
     const job = jobs[cursor++];
     const r = await runSuite(job.file, job.argv);
+    // Exit 0 with a tally of zero assertions is a suite that did not run.
+    // It is scored as a failure, not silently as a pass.
+    if (r.code === 0 && r.tally && r.tally.pass === 0 && r.tally.fail === 0) {
+      r.code = 'no-assertions';
+      r.out = `suite exited 0 but reported 0 assertions\n${r.out}`;
+    }
+    if (r.code === 0 && r.tally === null) {
+      r.code = 'no-tally';
+      r.out = `suite exited 0 but printed no assertion tally this runner can read.\nAdd a summary line — "N pass, M fail" is the majority spelling — so a suite\nthat exits without running cannot be scored as a pass.\n${r.out}`;
+    }
     if (r.code === 0) passed++;
     // Retain full records only for failures; a passing suite keeps just
     // its timing, so peak memory doesn't scale with suite count.

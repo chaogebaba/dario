@@ -6,24 +6,15 @@
 
 import { rmSync } from 'node:fs';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// startProxy takes a fixed port and exits(1) on EADDRINUSE, so the test cannot
-// catch a clash and retry. The hardcoded 39874/39875 failed on back-to-back
-// runs against ports `ss` reported free — a stale bind, not a real conflict.
-// Ask the kernel for one instead, and hold it only long enough to read it back.
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
+// The hardcoded 39874/39875 failed on back-to-back runs against ports `ss`
+// reported free — a stale bind, not a real conflict. This used to bind a probe
+// server just to read a port off it and close it again, which narrowed the
+// window without closing it: between the probe's close and startProxy's bind,
+// the port is anyone's. startProxy now takes 0 and reports back what the
+// kernel actually gave it, so there is no window at all.
 
 let pass = 0;
 let fail = 0;
@@ -105,10 +96,8 @@ const fakeFetch = async (url, init) => {
 globalThis.fetch = fakeFetch;
 
 const { startProxy } = await import('../dist/proxy.js');
-const PORT = await freePort();
-const BASE = `http://127.0.0.1:${PORT}`;
-await startProxy({
-  port: PORT,
+const proxy = await startProxy({
+  port: 0,
   host: '127.0.0.1',
   fetchImpl: fakeFetch,
   poolStrategy: 'round-robin',
@@ -119,6 +108,8 @@ await startProxy({
   noLiveCapture: true,
   overageGuardEnabled: false,
 });
+const PORT = proxy.port;
+const BASE = `http://127.0.0.1:${PORT}`;
 for (let i = 0; i < 50; i++) {
   try { await realFetch(`${BASE}/health`); break; } catch { await new Promise((resolve) => setTimeout(resolve, 50)); }
 }
@@ -158,10 +149,8 @@ check('repeat is an affinity hit while fresh sessions are new bindings',
   events.filter((event) => event.affinity.result === 'new').length === 2
     && events.filter((event) => event.affinity.result === 'hit').length === 1);
 
-const HEADROOM_PORT = await freePort();
-const HEADROOM_BASE = `http://127.0.0.1:${HEADROOM_PORT}`;
-await startProxy({
-  port: HEADROOM_PORT,
+const headroomProxy = await startProxy({
+  port: 0,
   host: '127.0.0.1',
   fetchImpl: fakeFetch,
   poolStrategy: 'headroom',
@@ -172,6 +161,8 @@ await startProxy({
   noLiveCapture: true,
   overageGuardEnabled: false,
 });
+const HEADROOM_PORT = headroomProxy.port;
+const HEADROOM_BASE = `http://127.0.0.1:${HEADROOM_PORT}`;
 for (let i = 0; i < 50; i++) {
   try { await realFetch(`${HEADROOM_BASE}/health`); break; } catch { await new Promise((resolve) => setTimeout(resolve, 50)); }
 }

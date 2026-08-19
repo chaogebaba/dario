@@ -28,9 +28,13 @@ const check = (name, cond, detail) => {
 const header = (n) => console.log(`\n=== ${n} ===`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Stay clear of dario's 3456-3460 range and other test files' ports.
-const PORT = 38773;
-const BASE = `http://127.0.0.1:${PORT}`;
+// Port 0: the kernel picks one that is provably free and `startProxy` reports
+// it back. A hardcoded port could collide with a parallel suite, with a stale
+// bind, or with the developer's own running dario — and that last case used to
+// be scored as a pass, because startProxy exited 0 when the occupant answered
+// /health as dario.
+let PORT;
+let BASE;
 const UPSTREAM_TIMEOUT_MS = 3_000;
 
 // ---------------------------------------------------------------------------
@@ -70,8 +74,8 @@ const fakeFetch = async (url, init) => {
   return new Response(JSON.stringify(OK_BODY), { status: 200, headers: { 'content-type': 'application/json' } });
 };
 
-await startProxy({
-  port: PORT,
+const proxy = await startProxy({
+  port: 0,
   host: '127.0.0.1',
   upstreamApiKey: 'sk-ant-test-not-a-real-key',
   noClaudeAuth: true,
@@ -81,6 +85,8 @@ await startProxy({
   upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
   noLiveCapture: true,    // else startup spawns a real `claude` capture and strands its /tmp home
 });
+PORT = proxy.port;
+BASE = `http://127.0.0.1:${PORT}`;
 for (let i = 0; i < 50; i++) {
   try { await fetch(`${BASE}/health`); break; } catch { await sleep(100); }
 }

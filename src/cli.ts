@@ -23,7 +23,7 @@ import { join, dirname } from 'node:path';
 
 import { pathToFileURL } from 'node:url';
 import { startAutoOAuthFlow, startManualOAuthFlow, detectHeadlessEnvironment, getStatus, refreshTokens, loadCredentials } from './oauth.js';
-import { startProxy, sanitizeError, parseModelAliasSpecs } from './proxy.js';
+import { startProxy, ProxyBindError, sanitizeError, parseModelAliasSpecs } from './proxy.js';
 import { VALID_EFFORT_VALUES, type EffortValue } from './cc-template.js';
 import { listAccountAliases, loadAllAccounts, addAccountViaOAuth, addAccountViaManualOAuth, addAccountFromKeychain, KeychainImportError, removeAccount, ensureLoginCredentialsInPool, resyncLoginFromCredentialsIfStale, MIGRATED_LOGIN_ALIAS, isValidAccountAlias } from './accounts.js';
 import { listBackends, saveBackend, removeBackend, type BackendCredentials } from './openai-backend.js';
@@ -786,7 +786,36 @@ async function proxy() {
     process.exit(1);
   }
 
-  await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, sessionAffinity, sessionAffinityTtlMs, sessionAffinityClaudeSource, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat });
+  // startProxy hands the bind failure back rather than exiting on our behalf,
+  // so the "you already have one running" courtesy — and its exit 0 — live
+  // here, where a human is the audience. A test importing startProxy gets the
+  // error instead, which is the whole point: exiting 0 for an occupied port
+  // made an entire suite score green having run nothing.
+  try {
+    await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, sessionAffinity, sessionAffinityTtlMs, sessionAffinityClaudeSource, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat });
+  } catch (err) {
+    if (!(err instanceof ProxyBindError)) throw err;
+    if (err.darioAlreadyRunning) {
+      const displayHost = err.host === '127.0.0.1' || err.host === '::1' || err.host === 'localhost'
+        ? 'localhost'
+        : err.host;
+      console.log('');
+      console.log(`  dario — already running on http://${displayHost}:${err.port}`);
+      console.log('');
+      console.log(`  OAuth: ${err.existing?.oauth ?? 'unknown'}  |  requests served: ${err.existing?.requests ?? 0}`);
+      console.log('');
+      console.log('  Usage:');
+      console.log(`    ANTHROPIC_BASE_URL=http://${displayHost}:${err.port}`);
+      console.log('    ANTHROPIC_API_KEY=dario');
+      console.log('');
+      process.exit(0);
+    }
+    console.error(`[dario] ${err.message}`);
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[dario] Free it with: kill $(lsof -ti:${err.port}) or change the port with --port <n>`);
+    }
+    process.exit(1);
+  }
 }
 
 /**

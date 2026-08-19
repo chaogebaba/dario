@@ -29,8 +29,13 @@ const check = (name, cond, detail) => {
 const header = (n) => console.log(`\n=== ${n} ===`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PORT = 38781;
-const BASE = `http://127.0.0.1:${PORT}`;
+// Port 0: the kernel picks one that is provably free and `startProxy` reports
+// it back. A hardcoded port could collide with a parallel suite, with a stale
+// bind, or with the developer's own running dario — and that last case used to
+// be scored as a pass, because startProxy exited 0 when the occupant answered
+// /health as dario.
+let PORT;
+let BASE;
 
 // Every probe the proxy sends, in order. A probe is the only POST to
 // /v1/messages this test ever provokes — it never sends a client request.
@@ -52,14 +57,16 @@ const fakeFetch = async (url, init) => {
   });
 };
 
-await startProxy({
-  port: PORT,
+const proxy = await startProxy({
+  port: 0,
   host: '127.0.0.1',
   upstreamApiKey: 'sk-ant-test-not-a-real-key',
   noClaudeAuth: true,
   fetchImpl: fakeFetch,
   noLiveCapture: true, // else startup spawns a real `claude` capture and strands its /tmp home
 });
+PORT = proxy.port;
+BASE = `http://127.0.0.1:${PORT}`;
 for (let i = 0; i < 50; i++) {
   try { await fetch(`${BASE}/health`); break; } catch { await sleep(100); }
 }

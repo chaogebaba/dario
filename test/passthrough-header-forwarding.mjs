@@ -94,8 +94,8 @@ header('3. value handling');
 // ─────────────────────────────────────────────────────────────
 header('4. live request through the real proxy (the layer that caught the bug)');
 {
-  const PORT = 39873;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  // Port 0 — the kernel picks a free one and startProxy reports it back, so
+  // this cannot collide with a parallel suite or with a running dario.
   let upstream = null;
 
   const fakeFetch = async (url, init) => {
@@ -113,13 +113,15 @@ header('4. live request through the real proxy (the layer that caught the bug)')
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
 
-  await startProxy({
-    port: PORT, host: '127.0.0.1',
+  const proxy = await startProxy({
+    port: 0, host: '127.0.0.1',
     upstreamApiKey: 'sk-ant-test-not-a-real-key',
     noClaudeAuth: true,
     fetchImpl: fakeFetch,
     noLiveCapture: true, // else startup spawns a real `claude` capture and strands its /tmp home
   });
+  const PORT = proxy.port;
+  const BASE = `http://127.0.0.1:${PORT}`;
   for (let i = 0; i < 50; i++) {
     try { await fetch(`${BASE}/health`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
