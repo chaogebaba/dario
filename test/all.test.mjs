@@ -28,7 +28,7 @@
 // Zero runtime dependencies. Stays true to the package's dep-hygiene invariant.
 
 import { spawn } from 'node:child_process';
-import { readdirSync, mkdtempSync } from 'node:fs';
+import { readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -83,9 +83,12 @@ const shellFiles = readdirSync(__dirname)
 //
 // Files that genuinely exercise the live-cache path (test/live-fingerprint.mjs)
 // assign their own override in-process, which wins over this inherited value.
-const suiteTemplateCache = join(
-  mkdtempSync(join(tmpdir(), 'dario-suite-template-')), 'cc-template.live.json',
-);
+const suiteTemplateDir = mkdtempSync(join(tmpdir(), 'dario-suite-template-'));
+const suiteTemplateCache = join(suiteTemplateDir, 'cc-template.live.json');
+// The dir has to outlive every child, and the driver exits from four places
+// (bad TEST_CONCURRENCY, SIGINT, dropped-job bug, normal finish). An exit hook
+// is the one placement that covers all of them.
+process.on('exit', () => rmSync(suiteTemplateDir, { recursive: true, force: true }));
 const childEnv = { ...process.env, DARIO_LIVE_TEMPLATE_CACHE: suiteTemplateCache };
 
 // ── Runner ───────────────────────────────────────────────────────────

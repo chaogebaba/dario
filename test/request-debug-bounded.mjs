@@ -17,6 +17,7 @@
 //    SUCCESSFUL rewrite, so a failing one leaves the store above the threshold
 //    permanently. The store spent the most CPU exactly when I/O was broken.
 
+import { rmSync } from 'node:fs';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -29,6 +30,9 @@ function check(name, condition) {
 }
 
 const dir = await mkdtemp(join(tmpdir(), 'dario-debug-bounded-'));
+// On exit, not after the last assertion: a failing check exits(1) below, which
+// is exactly when the stranded dir is most likely.
+process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
 const entry = (i) => ({
   ts: new Date(1_700_000_000_000 + i).toISOString(), req: i, method: 'POST', path: '/v1/messages',
   model: 'claude-opus-5', account: 'seat', status: 200, latencyMs: 1,

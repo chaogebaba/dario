@@ -6,7 +6,7 @@
 // integration (key routing, lifecycle, async data) needs a TTY and
 // is covered by manual smoke tests + M5+M6 e2e.
 
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,7 +21,12 @@ import { join } from 'node:path';
 // config-file.js is first evaluated, and ESM hoists static imports above
 // all statements. So HOME has to be redirected before the dist modules
 // are pulled in, which means importing them dynamically here.
-process.env.HOME = mkdtempSync(join(tmpdir(), 'dario-tui-home-'));
+const tuiHome = mkdtempSync(join(tmpdir(), 'dario-tui-home-'));
+process.env.HOME = tuiHome;
+// The Config tab writes into this HOME, so it has to survive every assertion.
+// On exit, not after the last one: a failing check exits(1) below, which is
+// exactly when the stranded dir is most likely.
+process.on('exit', () => rmSync(tuiHome, { recursive: true, force: true }));
 
 const { StatusTab } = await import('../dist/tui/tabs/status.js');
 const { ConfigTab } = await import('../dist/tui/tabs/config.js');

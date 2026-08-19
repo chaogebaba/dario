@@ -58,6 +58,7 @@ await startProxy({
   upstreamApiKey: 'sk-ant-test-not-a-real-key',
   noClaudeAuth: true,
   fetchImpl: fakeFetch,
+  noLiveCapture: true, // else startup spawns a real `claude` capture and strands its /tmp home
 });
 for (let i = 0; i < 50; i++) {
   try { await fetch(`${BASE}/health`); break; } catch { await sleep(100); }

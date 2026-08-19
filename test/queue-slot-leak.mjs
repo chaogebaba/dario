@@ -79,6 +79,7 @@ await startProxy({
   maxConcurrent: 1,       // one leaked slot = total wedge, so the leak is directly observable
   queueTimeoutMs: 1_500,  // a wedged queue surfaces as a fast 504, not a hung test
   upstreamTimeoutMs: UPSTREAM_TIMEOUT_MS,
+  noLiveCapture: true,    // else startup spawns a real `claude` capture and strands its /tmp home
 });
 for (let i = 0; i < 50; i++) {
   try { await fetch(`${BASE}/health`); break; } catch { await sleep(100); }

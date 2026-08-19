@@ -9,6 +9,7 @@
 // straight back into routing with no sign anything happened. The merge lives
 // inside the alias lock so a concurrent toggle can't be clobbered.
 
+import { rmSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +21,9 @@ function check(label, condition) {
 }
 
 const home = await mkdtemp(join(tmpdir(), 'dario-account-enabled-'));
+// On exit, not after the last assertion: a failing check exits(1) below, which
+// is exactly when the stranded dir is most likely.
+process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 process.env.HOME = home;
 process.env.USERPROFILE = home;
 process.env.DARIO_IGNORE_CC_CREDENTIALS = '1';

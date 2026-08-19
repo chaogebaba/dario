@@ -14,6 +14,7 @@
 // auth-cooldown is a reason `ineligibleReason` agrees with.
 
 import { createServer } from 'node:http';
+import { rmSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +26,9 @@ function check(label, condition) {
 }
 
 const home = await mkdtemp(join(tmpdir(), 'dario-refresh-error-'));
+// On exit, not after the last assertion: a failing check exits(1) below, which
+// is exactly when the stranded dir is most likely.
+process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 process.env.HOME = home;
 process.env.USERPROFILE = home;
 process.env.DARIO_IGNORE_CC_CREDENTIALS = '1';

@@ -4,9 +4,26 @@
 // the proxy commits a pool selection. This catches timing regressions that
 // extraction and AccountPool unit tests cannot observe independently.
 
+import { rmSync } from 'node:fs';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// startProxy takes a fixed port and exits(1) on EADDRINUSE, so the test cannot
+// catch a clash and retry. The hardcoded 39874/39875 failed on back-to-back
+// runs against ports `ss` reported free — a stale bind, not a real conflict.
+// Ask the kernel for one instead, and hold it only long enough to read it back.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
 
 let pass = 0;
 let fail = 0;
@@ -16,6 +33,9 @@ function check(label, condition) {
 }
 
 const home = await mkdtemp(join(tmpdir(), 'dario-affinity-proxy-'));
+// On exit, not after the last assertion: a failing check exits(1) below, which
+// is exactly when the stranded dir is most likely.
+process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 process.env.HOME = home;
 process.env.DARIO_IGNORE_CC_CREDENTIALS = '1';
 const accountsDir = join(home, '.dario', 'accounts');
@@ -85,7 +105,7 @@ const fakeFetch = async (url, init) => {
 globalThis.fetch = fakeFetch;
 
 const { startProxy } = await import('../dist/proxy.js');
-const PORT = 39874;
+const PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 await startProxy({
   port: PORT,
@@ -138,7 +158,7 @@ check('repeat is an affinity hit while fresh sessions are new bindings',
   events.filter((event) => event.affinity.result === 'new').length === 2
     && events.filter((event) => event.affinity.result === 'hit').length === 1);
 
-const HEADROOM_PORT = 39875;
+const HEADROOM_PORT = await freePort();
 const HEADROOM_BASE = `http://127.0.0.1:${HEADROOM_PORT}`;
 await startProxy({
   port: HEADROOM_PORT,

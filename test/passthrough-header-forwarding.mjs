@@ -118,6 +118,7 @@ header('4. live request through the real proxy (the layer that caught the bug)')
     upstreamApiKey: 'sk-ant-test-not-a-real-key',
     noClaudeAuth: true,
     fetchImpl: fakeFetch,
+    noLiveCapture: true, // else startup spawns a real `claude` capture and strands its /tmp home
   });
   for (let i = 0; i < 50; i++) {
     try { await fetch(`${BASE}/health`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }

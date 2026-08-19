@@ -78,6 +78,7 @@ await startProxy({
   upstreamApiKey: 'sk-ant-test-not-a-real-key', // API-key mode: x-api-key upstream
   noClaudeAuth: true, // don't read or refresh the real OAuth pool for a unit test
   fetchImpl: fakeFetch,
+  noLiveCapture: true, // else startup spawns a real `claude` capture and strands its /tmp home
 });
 // give the listener a moment to bind
 for (let i = 0; i < 50; i++) {

@@ -1,3 +1,4 @@
+import { rmSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -11,6 +12,9 @@ function check(name, condition) {
 }
 
 const dir = await mkdtemp(join(tmpdir(), 'dario-debug-'));
+// On exit, not after the last assertion: a failing check exits(1) below, which
+// is exactly when the stranded dir is most likely.
+process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
 const file = join(dir, 'requests.ndjson');
 const store = new RequestDebugStore({ maxEntries: 3, filePath: file });
 await store.load();
