@@ -23,6 +23,10 @@ checklist.
 
 - **Interrupted Claude tool calls recover without corrupting the transcript.** A request whose history ended with a complete client `tool_use` but no immediately following `tool_result` used to hit Anthropic's persistent 400 pairing error; preserving the assistant tail to avoid the older runaway-loop regression was necessary but insufficient. Dario now repairs both trailing and persisted mid-history orphans at the outbound request boundary by inserting one adjacent `is_error: true` result per tool ID. The synthetic result states that execution was interrupted and its outcome is unknown, so Claude can continue without Dario rerunning a possibly side-effecting tool or claiming it failed. Existing results remain authoritative, parallel calls retain order, and text-only assistant tails on models without prefill support still receive the separate continuation user turn. Deliberate non-goals are trailing `server_tool_use` blocks, whose results are generated server-side, and malformed client `tool_use` blocks with missing/non-string IDs or incomplete name/input; fabricating client results for either can create `unexpected tool_use_id` errors. The normalization intentionally mutates the outbound message history in place; request-body diagnostics after the build therefore observe the repaired wire shape.
 
+## [5.5.22] - 2026-08-19
+
+- **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.235` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.235 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.5.21] - 2026-08-18
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.234` → `2.1.235` for CC v2.1.235. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
