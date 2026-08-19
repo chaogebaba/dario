@@ -40,6 +40,7 @@ import {
   saveAccount,
   saveAccountWhileLocked,
   toggleAccountEnabled,
+  isAccountCredentials,
   type AccountCredentials,
 } from './account-store.js';
 
@@ -185,13 +186,34 @@ async function doRefreshAccountTokenDistributed(creds: AccountCredentials, alias
     }
     if (res.credentials) {
       // Another instance already refreshed more recently than what we're
-      // holding — adopt it, no Anthropic call needed at all. When this runs
-      // inside refreshAccountToken's per-alias operation lock it must use
-      // the re-entrant save: plain `saveAccount` would re-take the same
-      // non-reentrant alias lock and deadlock against itself.
-      if (aliasLocked) await saveAccountWhileLocked(res.credentials);
-      else await saveAccount(res.credentials);
-      return res.credentials;
+      // holding — adopt it, no Anthropic call needed at all.
+      //
+      // Adopt the token triple ONLY. `enabled`, `deviceId`, `scopes` and
+      // `accountUuid` are local state; the lock service's copy of them is
+      // whatever some other instance last wrote, so taking the record whole
+      // resurrected a disabled account and swapped this install's device
+      // identity. `doRefreshAccountToken` spreads over the local record for
+      // the same reason.
+      //
+      // The alias is checked because it names the file about to be written:
+      // a wrong one clobbers an unrelated account. A response that fails the
+      // guard is a lock-service fault, so fail open and refresh for real,
+      // exactly as an unreachable lock does above.
+      if (!isAccountCredentials(res.credentials, creds.alias)) {
+        return doRefreshAccountToken(creds);
+      }
+      const adopted: AccountCredentials = {
+        ...creds,
+        accessToken: res.credentials.accessToken,
+        refreshToken: res.credentials.refreshToken,
+        expiresAt: res.credentials.expiresAt,
+      };
+      // When this runs inside refreshAccountToken's per-alias operation lock
+      // it must use the re-entrant save: plain `saveAccount` would re-take
+      // the same non-reentrant alias lock and deadlock against itself.
+      if (aliasLocked) await saveAccountWhileLocked(adopted);
+      else await saveAccount(adopted);
+      return adopted;
     }
     if (res.acquired) {
       try {
