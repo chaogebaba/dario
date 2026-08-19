@@ -57,6 +57,13 @@ check(
   'the spawn builds its environment through captureChildEnv',
   /const env = captureChildEnv\(process\.env, \{/.test(spawnBlock),
 );
+// Building it is not using it. Dropping `env` from the spawn options hands
+// the child the parent's environment whole — the original bug, restored, with
+// every assertion above still green.
+check(
+  'and hands it to the spawn',
+  /spawn\(claudeBin, \['--print', '-p', 'hi'\], \{\s*\n\s*env,/.test(spawnBlock),
+);
 check(
   'nothing re-spreads process.env into the child environment',
   // comments stripped: the block explains what it replaced, in prose that
