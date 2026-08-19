@@ -105,7 +105,7 @@ export async function refreshAccountToken(creds: AccountCredentials): Promise<Ac
     // the removed alias with a second copy of the same refresh-token family.
     const current = await loadAccount(creds.alias);
     if (!current) throw new Error(`Account ${creds.alias} was removed or renamed before refresh`);
-    return doRefreshAccountTokenDistributed(current);
+    return doRefreshAccountTokenDistributed(current, true);
   }).finally(() => {
     // Clear only if nobody else has replaced it in the meantime (belt-and-
     // suspenders; current code paths never overlap).
@@ -166,7 +166,7 @@ async function lockCall<T>(path: string, body: unknown, env = process.env): Prom
   }
 }
 
-async function doRefreshAccountTokenDistributed(creds: AccountCredentials): Promise<AccountCredentials> {
+async function doRefreshAccountTokenDistributed(creds: AccountCredentials, aliasLocked = false): Promise<AccountCredentials> {
   if (!refreshLockUrl()) return doRefreshAccountToken(creds);
 
   const holder = randomUUID();
@@ -185,8 +185,12 @@ async function doRefreshAccountTokenDistributed(creds: AccountCredentials): Prom
     }
     if (res.credentials) {
       // Another instance already refreshed more recently than what we're
-      // holding — adopt it, no Anthropic call needed at all.
-      await saveAccount(res.credentials);
+      // holding — adopt it, no Anthropic call needed at all. When this runs
+      // inside refreshAccountToken's per-alias operation lock it must use
+      // the re-entrant save: plain `saveAccount` would re-take the same
+      // non-reentrant alias lock and deadlock against itself.
+      if (aliasLocked) await saveAccountWhileLocked(res.credentials);
+      else await saveAccount(res.credentials);
       return res.credentials;
     }
     if (res.acquired) {

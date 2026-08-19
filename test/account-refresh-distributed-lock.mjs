@@ -5,7 +5,7 @@
 // the real OAuth refresh call (URL contains "/oauth/token") so each test
 // can assert exactly which path fired.
 
-import { refreshAccountToken, removeAccount } from '../dist/accounts.js';
+import { refreshAccountToken, removeAccount, saveAccount } from '../dist/accounts.js';
 
 let pass = 0, fail = 0;
 function check(label, cond) {
@@ -43,6 +43,7 @@ header('unset DARIO_REFRESH_LOCK_URL — no lock traffic at all, refreshes direc
     return new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r', expires_in: 100 }),
       { status: 200, headers: { 'content-type': 'application/json' } });
   };
+  await saveAccount(fixture);
   const updated = await refreshAccountToken(fixture);
   check('exactly one fetch (the real refresh, no lock calls)', calls.length === 1);
   check('that one fetch went to the oauth token endpoint', calls[0].includes('/oauth/token'));
@@ -68,6 +69,7 @@ header('lock acquired — real refresh happens, release carries the new credenti
     return new Response(JSON.stringify({ access_token: 'new-a', refresh_token: 'new-r', expires_in: 100 }),
       { status: 200, headers: { 'content-type': 'application/json' } });
   };
+  await saveAccount(fixture);
   const updated = await refreshAccountToken(fixture);
   check('three calls: acquire, real refresh, release', calls.length === 3);
   check('first call is acquire', calls[0].url.includes('/acquire'));
@@ -93,6 +95,7 @@ header('lock lost, but fresher credentials came back — adopts them, zero refre
     if (u.includes('/acquire')) return new Response(JSON.stringify({ acquired: false, credentials: winnerCreds }), { status: 200 });
     throw new Error(`unexpected call to ${u} — should have adopted cached credentials instead`);
   };
+  await saveAccount(fixture);
   const updated = await refreshAccountToken(fixture);
   check('exactly one call (acquire) — no refresh, no release', calls.length === 1);
   check('adopted the WINNER credentials, not a fresh refresh of our own', updated.accessToken === 'winner-access');
@@ -113,6 +116,7 @@ header('lock service network error — fails open, refreshes exactly as if uncon
     return new Response(JSON.stringify({ access_token: 'fallback-a', refresh_token: 'fallback-r', expires_in: 100 }),
       { status: 200, headers: { 'content-type': 'application/json' } });
   };
+  await saveAccount(fixture);
   const updated = await refreshAccountToken(fixture);
   check('attempted acquire, then fell back to a real refresh (2 calls)', calls.length === 2);
   check('the fallback refresh actually completed', updated.accessToken === 'fallback-a');
@@ -139,6 +143,7 @@ header('acquired, but refresh fails — release happens with no credentials, err
   };
   let threw = false;
   try {
+    await saveAccount(fixture);
     await refreshAccountToken(fixture);
   } catch {
     threw = true;
