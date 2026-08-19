@@ -4816,7 +4816,14 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       // same lineage and trip Anthropic's refresh-token reuse-detection (the
       // 2026-06-23 fleet outage, dario#641-audit). Empty in api-key mode (no
       // pool account); presence is an OAuth-session concept and is skipped there.
-      const token = pool.all()[0]?.accessToken ?? '';
+      //
+      // `find`, not `[0]`: a disabled account is still in `all()`, and the pool
+      // is not ordered by eligibility — index 0 is whichever account reconcile
+      // happened to add first. Pulsing a disabled seat's session is the one
+      // request an operator disabled it to stop. Every other `pool.all()` loop
+      // in this file already filters on `enabled`; this was the only one that
+      // did not, and it stayed correct here only by the order accounts load in.
+      const token = pool.all().find((account) => account.enabled)?.accessToken ?? '';
       if (!token) return;
       const presenceUrl = `${ANTHROPIC_API}/v1/code/sessions/${SESSION_ID}/client/presence`;
       await upstreamFetch(presenceUrl, {
