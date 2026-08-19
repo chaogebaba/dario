@@ -47,12 +47,22 @@ export interface RequestDebugStoreOptions {
 
 export const DEFAULT_MAX_ENTRIES = 4096;
 // Preview-bearing entries are intentionally bounded in both count and worst
-// case file size (about 64 MiB at the largest permitted configuration).
+// case file size. The file is compacted at COMPACT_FACTOR x maxEntries lines
+// and every line is capped at MAX_LINE_BYTES, so the on-disk worst case is
+// COMPACT_FACTOR * maxEntries * MAX_LINE_BYTES (1 GiB at the largest permitted
+// configuration, ~256 MiB at the default; typical lines are ~1 KiB, two orders
+// of magnitude under the cap).
 const MAX_ENTRIES_CAP = 16_384;
 const MAX_MODEL_LENGTH = 128;
 const MAX_ERROR_LENGTH = 256;
 const MAX_PREVIEW_LENGTH = 8_192;
 const MAX_LINE_BYTES = 32_768;
+// The file is allowed to carry up to COMPACT_FACTOR x maxEntries lines before
+// it is compacted back down to the live window. Appends are O(1); the O(n)
+// rewrite happens once per maxEntries requests instead of once per request,
+// which is what keeps the steady state off the event loop. `load()` already
+// keeps only the last maxEntries lines, so the surplus is read-tolerant.
+const COMPACT_FACTOR = 2;
 const AFFINITY_RESULTS = new Set(['hit', 'new', 'rebind', 'none', 'disabled']);
 const OUTCOMES = new Set(['complete', 'stream-error', 'timeout', 'network-error', 'client-closed']);
 
@@ -70,7 +80,7 @@ function normalizeEntry(value: unknown): RequestDebugEntry | null {
   const raw = value as Record<string, unknown>;
   if (typeof raw.ts !== 'string' || typeof raw.req !== 'number') return null;
   const reasons = Array.isArray(raw.retryReasons)
-    ? raw.retryReasons.filter((r): r is string => typeof r === 'string').slice(0, 16)
+    ? raw.retryReasons.filter((r): r is string => typeof r === 'string').slice(0, 16).map((r) => r.slice(0, 120))
     : [];
   const signals = Array.isArray(raw.affinitySignals)
     ? raw.affinitySignals.flatMap((s) => {
@@ -116,6 +126,23 @@ function normalizeEntry(value: unknown): RequestDebugEntry | null {
 }
 
 /**
+ * One NDJSON line, guaranteed to fit MAX_LINE_BYTES. `load()` sizes its read
+ * window as `maxEntries * MAX_LINE_BYTES`, so a line that overruns the bound
+ * silently pushes older entries out of that window. The bound has to be
+ * enforced on the *encoded* form: JSON escaping inflates a preview by up to
+ * 6x (`\uXXXX` per source char), so the per-field character caps applied in
+ * `normalizeEntry` do not by themselves bound the line. Previews are the only
+ * unbounded-by-design fields, so dropping them is the fallback; everything
+ * that survives is length-capped and comfortably fits.
+ */
+function serializeEntry(entry: RequestDebugEntry): string {
+  const line = JSON.stringify(entry);
+  if (Buffer.byteLength(line) <= MAX_LINE_BYTES) return line;
+  const { inputPreview: _in, outputPreview: _out, ...rest } = entry;
+  return JSON.stringify({ ...rest, inputTruncated: true, outputTruncated: true });
+}
+
+/**
  * A small FIFO ring with optional JSON-ND persistence. The file is metadata
  * plus bounded semantic previews. Files are mode 0600 and writes are
  * serialized so concurrent requests cannot reorder or truncate the window.
@@ -124,10 +151,12 @@ export class RequestDebugStore {
   readonly maxEntries: number;
   readonly filePath: string | null;
   private entries: RequestDebugEntry[] = [];
+  /** Added but not yet on disk. Drained by `schedulePersist`. */
+  private pending: RequestDebugEntry[] = [];
+  /** Lines currently in the file — may exceed `maxEntries` until compaction. */
   private persistedLines = 0;
   private writeChain: Promise<void> = Promise.resolve();
   private persistScheduled = false;
-  private persistNeeded = false;
   private readonly salt = randomBytes(16);
 
   constructor(options: RequestDebugStoreOptions = {}) {
@@ -178,7 +207,7 @@ export class RequestDebugStore {
     this.entries.push(normalized);
     if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
     if (!this.filePath) return;
-    this.persistNeeded = true;
+    this.pending.push(normalized);
     this.schedulePersist();
   }
 
@@ -201,18 +230,23 @@ export class RequestDebugStore {
     if (!this.filePath || this.persistScheduled) return;
     this.persistScheduled = true;
     this.writeChain = this.writeChain.then(async () => {
-      while (this.persistNeeded) {
-        this.persistNeeded = false;
+      await mkdir(dirname(this.filePath!), { recursive: true });
+      while (this.pending.length) {
+        const batch = this.pending;
+        this.pending = [];
         await chmod(this.filePath!, 0o600).catch(() => {});
-        // A single append is cheap; concurrent additions are coalesced into
-        // one bounded rewrite instead of one rewrite per request.
-        if (this.persistedLines < this.maxEntries && this.entries.length === this.persistedLines + 1) {
-          await mkdir(dirname(this.filePath!), { recursive: true });
-          await appendFile(this.filePath!, `${JSON.stringify(this.entries.at(-1))}\n`, { mode: 0o600 });
-          this.persistedLines++;
-        } else {
+        // Steady state is an append, not a rewrite. The ring being full says
+        // nothing about the file — surplus lines are allowed to accumulate and
+        // are compacted away in one pass every maxEntries requests, so the O(n)
+        // serialization cost is amortized instead of paid on every request.
+        // Compacting also covers `batch`: those entries are already in
+        // `this.entries`, which is what `rewrite()` writes.
+        if (this.persistedLines + batch.length > this.maxEntries * COMPACT_FACTOR) {
           await this.rewrite();
+          continue;
         }
+        await appendFile(this.filePath!, `${batch.map(serializeEntry).join('\n')}\n`, { mode: 0o600 });
+        this.persistedLines += batch.length;
       }
       this.persistScheduled = false;
     }).catch((error) => {
@@ -225,7 +259,7 @@ export class RequestDebugStore {
     if (!this.filePath) return;
     await mkdir(dirname(this.filePath), { recursive: true });
     const tmp = `${this.filePath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-    await writeFile(tmp, this.entries.map((entry) => JSON.stringify(entry)).join('\n') + (this.entries.length ? '\n' : ''), { mode: 0o600 });
+    await writeFile(tmp, this.entries.map(serializeEntry).join('\n') + (this.entries.length ? '\n' : ''), { mode: 0o600 });
     await rename(tmp, this.filePath);
     this.persistedLines = this.entries.length;
   }
