@@ -333,6 +333,11 @@ export class ProxyClient {
     try { return await this.postJson<{ ok: boolean }>(`/accounts/${encodeURIComponent(oldAlias)}/rename`, { newAlias }); }
     catch { return null; }
   }
+
+  async toggleAccount(alias: string): Promise<{ ok: boolean; enabled?: boolean } | null> {
+    try { return await this.postJson<{ ok: boolean; enabled?: boolean }>(`/accounts/${encodeURIComponent(alias)}/toggle`, {}); }
+    catch { return null; }
+  }
 }
 
 export interface OverageGuardStatus {

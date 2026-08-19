@@ -91,6 +91,8 @@ export interface PoolAccount {
   identity: AccountIdentity;
   rateLimit: RateLimitSnapshot;
   requestCount: number;
+  enabled: boolean;
+  refreshError?: string;
   /** Subscription plan: 'Max' | 'Pro' | 'Team' | 'Free' | null (unknown). */
   plan?: string | null;
   /**
@@ -158,13 +160,14 @@ export function isInAuthCooldown(account: PoolAccount, now: number = Date.now())
  * cause an operator can act on, and it is upstream of the auth cool-down that
  * the first doomed request provokes, so it is reported in preference to it.
  */
-export type IneligibleReason = 'expired' | 'auth-cooldown' | 'rate-limited';
+export type IneligibleReason = 'disabled' | 'expired' | 'auth-cooldown' | 'rate-limited';
 
 export function ineligibleReason(
   account: PoolAccount,
   now: number = Date.now(),
   family?: string | null,
 ): IneligibleReason | null {
+  if (account.enabled === false) return 'disabled';
   if (account.expiresAt <= now + 30_000) return 'expired';
   if (isInAuthCooldown(account, now)) return 'auth-cooldown';
   if (isInRateLimitCooldown(account, family, now)) return 'rate-limited';
@@ -535,6 +538,7 @@ export class AccountPool {
     expiresAt: number;
     deviceId: string;
     accountUuid: string;
+    enabled?: boolean;
   }): void {
     const existing = this.accounts.get(alias);
     const identityChanged = existing !== undefined && (
@@ -560,6 +564,8 @@ export class AccountPool {
       rateLimit: preserved?.rateLimit ?? { ...EMPTY_SNAPSHOT },
       plan: preserved?.plan ?? null,
       requestCount: preserved?.requestCount ?? 0,
+      enabled: opts.enabled !== false,
+      refreshError: preserved?.refreshError,
       lastAuthFailureAt: preserved?.lastAuthFailureAt,
       consecutiveAuthFailures: preserved?.consecutiveAuthFailures ?? 0,
       authFailureEpoch: preserved?.authFailureEpoch ?? 0,
@@ -1064,6 +1070,12 @@ export class AccountPool {
     account.accessToken = accessToken;
     account.refreshToken = refreshToken;
     account.expiresAt = expiresAt;
+    account.refreshError = undefined;
+  }
+
+  setRefreshError(alias: string, error: string): void {
+    const account = this.accounts.get(alias);
+    if (account) account.refreshError = error.slice(0, 200);
   }
 
   /** Update the cached plan for an account (from quota probe / profile). */
@@ -1089,7 +1101,7 @@ export class AccountPool {
     // Status is a pool-wide aggregate; family-agnostic. Per-model
     // headroom is request-context-specific and only meaningful at
     // select() time.
-    const headrooms = all.map(a => computeHeadroom(a.rateLimit));
+    const headrooms = all.filter((a) => a.enabled !== false).map(a => computeHeadroom(a.rateLimit));
     const avgHeadroom = headrooms.length > 0 ? headrooms.reduce((a, b) => a + b, 0) / headrooms.length : 0;
     // Status is observational. Consuming a round-robin turn here made every
     // Accounts-tab refresh change which seat served the next real request.
@@ -1181,6 +1193,7 @@ export interface ReconcilableAccount {
   expiresAt: number;
   deviceId: string;
   accountUuid: string;
+  enabled?: boolean;
 }
 
 /**
@@ -1204,6 +1217,7 @@ export function reconcilePoolAccounts(pool: AccountPool, accounts: ReconcilableA
       expiresAt: a.expiresAt,
       deviceId: a.deviceId,
       accountUuid: a.accountUuid,
+      enabled: a.enabled,
     });
   }
   for (const existing of pool.all()) {

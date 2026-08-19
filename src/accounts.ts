@@ -39,6 +39,7 @@ import {
   replaceAccount,
   saveAccount,
   saveAccountWhileLocked,
+  toggleAccountEnabled,
   type AccountCredentials,
 } from './account-store.js';
 
@@ -54,6 +55,7 @@ export {
   renameAccount,
   renameAccountWithResult,
   saveAccount,
+  toggleAccountEnabled,
 } from './account-store.js';
 export type { AccountCredentials, RenameAccountResult } from './account-store.js';
 
@@ -232,16 +234,21 @@ async function doRefreshAccountToken(creds: AccountCredentials): Promise<Account
   }
 
   const data = await res.json() as {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
   };
+
+  if (!data.access_token || !Number.isFinite(data.expires_in) || (data.expires_in ?? 0) <= 0) {
+    throw new Error(`Refresh failed for ${creds.alias}: token response was missing access_token or expires_in`);
+  }
+  const expiresIn = data.expires_in as number;
 
   const updated: AccountCredentials = {
     ...creds,
     accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
+    refreshToken: data.refresh_token || creds.refreshToken,
+    expiresAt: Date.now() + expiresIn * 1000,
   };
   await saveAccountWhileLocked(updated);
   return updated;
@@ -814,6 +821,7 @@ export async function resyncLoginFromCredentialsIfStale(): Promise<
     scopes: tok.scopes ?? loginAcc.scopes ?? [],
     deviceId: loginAcc.deviceId,
     accountUuid: loginAcc.accountUuid,
+    enabled: loginAcc.enabled,
   });
   return 'resynced';
 }

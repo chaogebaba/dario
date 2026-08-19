@@ -12,6 +12,7 @@ export interface AccountCredentials {
   scopes: string[];
   deviceId: string;
   accountUuid: string;
+  enabled?: boolean;
 }
 
 export type RenameAccountResult = 'renamed' | 'not-found' | 'conflict' | 'invalid' | 'internal';
@@ -71,10 +72,23 @@ export async function loadAccount(alias: string): Promise<AccountCredentials | n
   if (!path) return null;
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf-8'));
-    return isAccountCredentials(parsed, alias) ? parsed : null;
+    if (!isAccountCredentials(parsed, alias)) return null;
+    return { ...parsed, enabled: parsed.enabled !== false };
   } catch {
     return null;
   }
+}
+
+export async function toggleAccountEnabled(alias: string): Promise<AccountCredentials | null> {
+  const path = accountFilePath(alias);
+  if (!path) return null;
+  return withAccountLocks([alias], async () => {
+    const current = await loadAccount(alias);
+    if (!current) return null;
+    const updated = { ...current, enabled: current.enabled === false };
+    await saveAccountWhileLocked(updated, path);
+    return updated;
+  });
 }
 
 export async function loadAllAccounts(): Promise<AccountCredentials[]> {

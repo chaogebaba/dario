@@ -15,6 +15,8 @@ export interface AccountRow {
   util5h?: number;
   util7d?: number;
   status?: string;
+  enabled?: boolean;
+  refreshError?: string;
   measuredAt?: number;
   quota?: AccountQuota;
 }
@@ -32,7 +34,8 @@ export type AccountsAction =
   | { type: 'add'; alias: string }
   | { type: 'cancel-add' }
   | { type: 'delete'; alias: string; selectedIdx: number }
-  | { type: 'rename'; oldAlias: string; newAlias: string };
+  | { type: 'rename'; oldAlias: string; newAlias: string }
+  | { type: 'toggle'; alias: string; selectedIdx: number };
 
 export interface AccountsState {
   loading: boolean;
@@ -141,6 +144,16 @@ export function reduceAccountsKey(state: AccountsState, key: Key): AccountsState
     const alias = state.accounts[state.selectedIdx]?.alias;
     if (!alias) return undefined;
     return { ...state, mode: 'edit-alias', editBuffer: alias, message: null, messageKind: null };
+  }
+  if (key.name === 'printable' && key.ch?.toLowerCase() === 't' && !key.ctrl) {
+    const alias = state.accounts[state.selectedIdx]?.alias;
+    if (!alias) return undefined;
+    return {
+      ...state,
+      message: 'Updating account…',
+      messageKind: 'info',
+      pendingAction: { type: 'toggle', alias, selectedIdx: state.selectedIdx },
+    };
   }
   return undefined;
 }

@@ -45,7 +45,7 @@ export function renderAccounts(state: AccountsState, viewport: { cols: number; r
 
   push('');
   const hints = !state.mode || state.mode === 'normal'
-    ? ` ${fg('cyan', 'n')} add  ${fg('cyan', 'd')} delete  ${fg('cyan', 'e')} rename  ${fg('cyan', 'r')} refresh quota`
+    ? ` ${fg('cyan', 'n')} add  ${fg('cyan', 'd')} delete  ${fg('cyan', 'e')} rename  ${fg('cyan', 't')} toggle  ${fg('cyan', 'r')} refresh quota`
     : '';
   push(dim(hints));
   return lines.join('\n');
@@ -134,6 +134,9 @@ function renderQuotaCards(state: AccountsState, push: (line: string) => void, wi
     const account = state.accounts[index]!;
     push('');
     push('  ' + accountHeader(account, index === state.selectedIdx, account.quota?.plan));
+    if (account.refreshError) {
+      push('    ' + fg('yellow', 'token refresh failed: ') + dim(terminalText(account.refreshError)));
+    }
     const windows = account.quota?.windows ?? [];
     if (account.quota?.error) {
       push('    ' + fg('yellow', 'quota unavailable: ') + dim(terminalText(account.quota.error)));
@@ -174,6 +177,9 @@ function renderUtilTable(
     const account = state.accounts[index]!;
     push('');
     push('  ' + accountHeader(account, index === state.selectedIdx, account.quota?.plan));
+    if (account.refreshError) {
+      push('    ' + fg('yellow', 'token refresh failed: ') + dim(terminalText(account.refreshError)));
+    }
     if (!hasUtil || !isMeasured(account)) {
       push(!hasUtil
         ? '    ' + dim('~/.dario/accounts/' + terminalText(account.alias) + '.json')
@@ -238,11 +244,12 @@ function accountWindow(
 }
 
 function accountRowCost(account: AccountRow, hasQuota: boolean, hasUtil: boolean): number {
-  if (!hasQuota) return 2 + (!hasUtil || !isMeasured(account) ? 1 : 4);
-  if (account.quota?.error) return 3 + (isMeasured(account) ? 4 : 0);
+  const refreshErrorRows = account.refreshError ? 1 : 0;
+  if (!hasQuota) return 2 + refreshErrorRows + (!hasUtil || !isMeasured(account) ? 1 : 4);
+  if (account.quota?.error) return 3 + refreshErrorRows + (isMeasured(account) ? 4 : 0);
   const windows = account.quota?.windows ?? [];
-  if (windows.length > 0) return 2 + windows.length * 2;
-  return 2 + (isMeasured(account) ? 4 : 1);
+  if (windows.length > 0) return 2 + refreshErrorRows + windows.length * 2;
+  return 2 + refreshErrorRows + (isMeasured(account) ? 4 : 1);
 }
 
 function accountHeader(account: AccountRow, selected: boolean, plan?: string | null): string {
@@ -250,13 +257,14 @@ function accountHeader(account: AccountRow, selected: boolean, plan?: string | n
   const safeEmail = terminalText(account.quota?.email ?? '');
   const email = safeEmail ? `  ${dim('email ')}${safeEmail}` : '';
   const status = account.status && account.status !== 'unknown'
-    ? '   ' + (account.status.includes('cooldown') || account.status === 'rejected'
+    ? '   ' + (account.status.includes('cooldown') || account.status === 'rejected' || account.status === 'refresh-failed'
       ? fg('yellow', terminalText(account.status))
       : dim(terminalText(account.status)))
     : '';
   const planText = plan ? '   ' + dim('Plan ') + bold(terminalText(plan)) : '';
   const alias = terminalText(account.alias);
-  return `${marker} ${selected ? bold(alias) : alias}${email}  ${dim('token ')}${formatExpiry(account.expiresAt)}${planText}${status}`;
+  const enabled = account.enabled !== false;
+  return `${marker} ${selected ? bold(alias) : alias}${email}  ${dim('token ')}${enabled ? formatExpiry(account.expiresAt) : dim('off')}${planText}${status}`;
 }
 
 function terminalText(value: string): string {

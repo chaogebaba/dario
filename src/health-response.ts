@@ -123,6 +123,7 @@ export interface HealthResponse {
 export interface PoolAccountStatusLike {
   expiresAt: number;
   inAuthCooldown: boolean;
+  enabled?: boolean;
 }
 
 export interface PoolDerivedStatus {
@@ -159,7 +160,7 @@ export function derivePoolStatus(
         : 'no accounts yet — run `dario accounts add <alias>`',
     };
   }
-  const usable = accounts.filter((a) => !a.inAuthCooldown);
+  const usable = accounts.filter((a) => a.enabled !== false && !a.inAuthCooldown);
   if (usable.length === 0) {
     // Every account is routing-excluded after upstream auth failures — the
     // next request will fail, which is the deadness /health exists to signal.
@@ -169,7 +170,9 @@ export function derivePoolStatus(
       mode: 'pool',
       accounts: accounts.length,
       expiresAt: Math.min(...accounts.map((a) => a.expiresAt)),
-      expiresIn: 'all accounts in auth-cooldown',
+      expiresIn: accounts.some((a) => a.enabled !== false)
+        ? 'all accounts in auth-cooldown'
+        : 'all accounts disabled',
     };
   }
   // Earliest expiry among USABLE accounts — the pool's background refresh

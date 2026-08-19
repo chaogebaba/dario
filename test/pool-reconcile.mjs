@@ -98,6 +98,10 @@ header('Reconcile: existing account gets fresh tokens, keeps its state');
   check('auth cool-down preserved across reconcile', isInAuthCooldown(after));
   check('failure counter preserved (not reset by re-add)', after.consecutiveAuthFailures >= 1);
   check('learned subscription plan preserved across reconcile', after.plan === 'Max');
+
+  reconcilePoolAccounts(pool, [{ ...mkAcc('keep', 'new-token'), enabled: false }]);
+  check('disabled account remains visible but is not selectable',
+    pool.get('keep')?.enabled === false && pool.select() === null);
 }
 
 header('Reconcile: same alias with a different identity resets learned state');

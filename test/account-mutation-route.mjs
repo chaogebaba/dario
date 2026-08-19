@@ -24,6 +24,8 @@ check('delete accepts exactly one encoded alias segment',
   JSON.stringify(parseAccountMutationPath('/accounts/name%20one')) === JSON.stringify({ action: 'delete', alias: 'name one' }));
 check('rename accepts the exact action suffix',
   JSON.stringify(parseAccountMutationPath('/accounts/alpha/rename')) === JSON.stringify({ action: 'rename', alias: 'alpha' }));
+check('toggle accepts the exact action suffix',
+  JSON.stringify(parseAccountMutationPath('/accounts/alpha/toggle')) === JSON.stringify({ action: 'toggle', alias: 'alpha' }));
 check('malformed delete encoding is captured instead of thrown',
   parseAccountMutationPath('/accounts/%')?.alias === null);
 check('malformed rename encoding is captured instead of thrown',
@@ -114,6 +116,30 @@ try {
   check('POST rename maps success and reconciles the pool',
     renameRes.status === 200 && renameBody.ok === true && pool.get('renamed') && !pool.get('alpha'));
   check('successful rename schedules plan discovery', probes === 1);
+
+  const disableRes = await fetch(`${base}/accounts/renamed/toggle`, { method: 'POST' });
+  const disableBody = await disableRes.json();
+  check('POST toggle disables and reconciles the account',
+    disableRes.status === 200 && disableBody.ok === true && disableBody.enabled === false
+      && pool.get('renamed')?.enabled === false && pool.select() === null);
+  const disabledStatus = await (await fetch(`${base}/accounts`)).json();
+  check('GET /accounts marks disabled accounts explicitly', disabledStatus.accounts?.[0]?.status === 'disabled');
+  const quotaCallsBeforeDisabled = quotaFetches;
+  const disabledQuota = await (await fetch(`${base}/quota?refresh=1`)).json();
+  check('disabled accounts do not trigger quota fetches',
+    quotaFetches === quotaCallsBeforeDisabled && disabledQuota.accounts?.[0]?.error === 'account disabled');
+
+  const enableRes = await fetch(`${base}/accounts/renamed/toggle`, { method: 'POST' });
+  const enableBody = await enableRes.json();
+  check('POST toggle enables the account again',
+    enableRes.status === 200 && enableBody.enabled === true && pool.get('renamed')?.enabled === true);
+
+  const [toggleA, toggleB] = await Promise.all([
+    fetch(`${base}/accounts/renamed/toggle`, { method: 'POST' }),
+    fetch(`${base}/accounts/renamed/toggle`, { method: 'POST' }),
+  ]);
+  await Promise.all([toggleA.text(), toggleB.text()]);
+  check('concurrent toggles are atomic', (await (await fetch(`${base}/accounts`)).json()).accounts?.[0]?.enabled === true);
 
   const invalidRes = await fetch(`${base}/accounts/renamed/rename`, {
     method: 'POST',

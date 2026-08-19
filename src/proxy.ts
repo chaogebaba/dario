@@ -31,7 +31,7 @@ import { RequestQueue, QueueFullError, QueueTimeoutError, DEFAULT_MAX_CONCURRENT
 import { redactSecrets } from './redact.js';
 import { BAKED_BASE_MODELS, withLongContextVariants, buildOpenAIModelsList, getModelCatalog, getCachedBases, resolveAliasAgainst, prewarmModelCatalog, retryModelCatalogNow, isSuspendedModel, type CatalogDeps } from './model-catalog.js';
 import { homeDir } from './home-dir.js';
-import { RequestDebugStore, type RequestDebugEntry } from './request-debug.js';
+import { RequestDebugStore, DEFAULT_MAX_ENTRIES, type RequestDebugEntry } from './request-debug.js';
 import { boundPreview, extractRequestPreview, extractResponsePreview, redactPreviewText, StreamingTextPreview, type TextPreview } from './request-preview.js';
 
 const ANTHROPIC_API = 'https://api.anthropic.com';
@@ -1719,9 +1719,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   // per-request visibility is useful for a pool of one too.
   const analytics = new Analytics();
   const debugLogDisabled = process.env.DARIO_DEBUG_LOG === '0';
-  const debugLimitRaw = Number(process.env.DARIO_DEBUG_LOG_LIMIT ?? 512);
+  const debugLimitRaw = Number(process.env.DARIO_DEBUG_LOG_LIMIT ?? DEFAULT_MAX_ENTRIES);
   const debugStore = new RequestDebugStore({
-    maxEntries: Number.isFinite(debugLimitRaw) ? debugLimitRaw : 512,
+    maxEntries: Number.isFinite(debugLimitRaw) ? debugLimitRaw : DEFAULT_MAX_ENTRIES,
     filePath: debugLogDisabled
       ? null
       : (process.env.DARIO_DEBUG_LOG_FILE || null),
@@ -1778,6 +1778,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
         expiresAt: acc.expiresAt,
         deviceId: acc.deviceId,
         accountUuid: acc.accountUuid,
+        enabled: acc.enabled,
       });
     }
     // Startup self-heal (dario#790): eagerly refresh any account whose access
@@ -1791,7 +1792,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
     // token (invalid_grant) just logs and leaves the account expired; the auth
     // gate below then surfaces it. Skipped in --no-claude-auth mode.
     if (!opts.noClaudeAuth) {
-      await Promise.all(pool.all().map(async (acc) => {
+      await Promise.all(pool.all().filter((acc) => acc.enabled).map(async (acc) => {
         if (acc.expiresAt >= Date.now() + 45 * 60 * 1000) return;
         try {
           const saved = await loadAccount(acc.alias);
@@ -1803,8 +1804,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           await mirrorLoginToCredentials(refreshed).catch((err) => {
             console.error(`[dario] login→credentials.json mirror failed (startup) for ${acc.alias}: ${err instanceof Error ? err.message : err}`);
           });
+          pool.setRefreshError(acc.alias, '');
           console.error(`[dario] Startup refresh recovered account ${acc.alias} (was expired/expiring).`);
         } catch (err) {
+          pool.setRefreshError(acc.alias, err instanceof Error ? err.message : String(err));
           console.error(`[dario] Startup refresh failed for ${acc.alias}: ${err instanceof Error ? err.message : err}. Account left as-is; auth gate will surface it.`);
         }
       }));
@@ -1813,7 +1816,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
 
   const probePoolPlans = async (): Promise<void> => {
     if (opts.noClaudeAuth) return;
-    await Promise.all(pool.all().map(async (acc) => {
+    await Promise.all(pool.all().filter((acc) => acc.enabled).map(async (acc) => {
       try {
         const plan = await fetchPlan(acc.accessToken);
         // Reconciliation can replace an alias while this upstream request is
@@ -1837,10 +1840,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   }
 
   // Background refresh — keep every account's token fresh without blocking requests
+  const refreshRetry = new Map<string, { attempts: number; nextAt: number }>();
+  const refreshRetryDelayMs = (attempts: number): number =>
+    Math.min(30 * 60 * 1000, 60 * 1000 * 2 ** Math.max(0, attempts - 1));
   const refreshInterval = setInterval(async () => {
     if (opts.noClaudeAuth) return; // never touch the Claude token in OpenAI-only mode
-    for (const acc of pool.all()) {
-      if (acc.expiresAt < Date.now() + 45 * 60 * 1000) {
+    for (const acc of pool.all().filter((account) => account.enabled)) {
+      const now = Date.now();
+      const retry = refreshRetry.get(acc.alias);
+      if (retry && retry.nextAt > now) continue;
+      if (acc.expiresAt < now + 45 * 60 * 1000) {
         try {
           const saved = await loadAccount(acc.alias);
           if (!saved) continue;
@@ -1851,12 +1860,17 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
           await mirrorLoginToCredentials(refreshed).catch((err) => {
             console.error(`[dario] login→credentials.json mirror failed (background) for ${acc.alias}: ${err instanceof Error ? err.message : err}`);
           });
+          pool.setRefreshError(acc.alias, '');
+          refreshRetry.delete(acc.alias);
         } catch (err) {
+          const attempts = (refreshRetry.get(acc.alias)?.attempts ?? 0) + 1;
+          refreshRetry.set(acc.alias, { attempts, nextAt: Date.now() + refreshRetryDelayMs(attempts) });
+          pool.setRefreshError(acc.alias, err instanceof Error ? err.message : String(err));
           console.error(`[dario] Background refresh failed for ${acc.alias}: ${err instanceof Error ? err.message : err}`);
         }
       }
     }
-  }, 15 * 60 * 1000);
+  }, 60 * 1000);
   refreshInterval.unref();
 
   // Auth gate. The pool is the one credential model, so "authenticated" means
@@ -2208,7 +2222,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   async function currentStatus() {
     const now = Date.now();
     return derivePoolStatus(
-      pool.all().map((a) => ({ expiresAt: a.expiresAt, inAuthCooldown: isInAuthCooldown(a, now) })),
+      pool.all().map((a) => ({ expiresAt: a.expiresAt, inAuthCooldown: isInAuthCooldown(a, now), enabled: a.enabled })),
       now,
       adminEnabled,
     );
@@ -2233,8 +2247,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
             : 'pool has no accounts yet — run `dario login` (or `dario accounts add <alias>`)',
         );
       }
-      const usable = accounts.filter((a) => !isInAuthCooldown(a, now) && a.expiresAt > now);
-      return (usable[0] ?? accounts[0]).accessToken;
+      const enabled = accounts.filter((a) => a.enabled);
+      if (enabled.length === 0) throw new Error('no enabled accounts available');
+      const usable = enabled.filter((a) => !isInAuthCooldown(a, now) && a.expiresAt > now);
+      return (usable[0] ?? enabled[0]).accessToken;
     },
     log: verbose ? (m: string) => console.log(m) : undefined,
   };
@@ -2537,6 +2553,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
       reconcile: async () => reconcilePoolAccounts(pool, await loadAllAccounts()),
       retryModelCatalog: () => retryModelCatalogNow(catalogDeps),
       probePlans: () => { void probePoolPlans(); },
+      accountToggled: (alias, enabled) => {
+        if (enabled) refreshRetry.delete(alias);
+      },
       verbose,
       log: console.log,
     })) return;
@@ -4831,7 +4850,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
   const flushPoolTokens = async (): Promise<void> => {
     if (flushingTokens || opts.noClaudeAuth) return;
     flushingTokens = true;
-    await Promise.all(pool.all().map(async (acc) => {
+    await Promise.all(pool.all().filter((account) => account.enabled).map(async (acc) => {
       try {
         const disk = await loadAccount(acc.alias);
         // Nothing on disk to merge scopes/identity from, or disk is already

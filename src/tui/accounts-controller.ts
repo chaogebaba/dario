@@ -13,6 +13,8 @@ interface AccountsEndpoint {
     util5h?: number;
     util7d?: number;
     status?: string;
+    enabled?: boolean;
+    refreshError?: string;
     measuredAt?: number;
   }>;
 }
@@ -81,7 +83,34 @@ export class AccountsController {
       void this.performDelete(ctx, action.alias, action.selectedIdx);
       return;
     }
+    if (action.type === 'toggle') {
+      void this.performToggle(ctx, action.alias, action.selectedIdx);
+      return;
+    }
     void this.performRename(ctx, action.oldAlias, action.newAlias);
+  }
+
+  private async performToggle(ctx: TabContext<AccountsState>, alias: string, selectedIdx: number): Promise<void> {
+    try {
+      const result = await ctx.client.toggleAccount(alias);
+      if (!result?.ok) {
+        ctx.setState({ message: `Failed to update "${alias}".`, messageKind: 'error', mode: 'normal' });
+        return;
+      }
+      const next = await loadAccounts(ctx, false, this.quota);
+      const nextSelectedIdx = Math.min(
+        next.accounts.findIndex((account) => account.alias === alias),
+        Math.max(0, next.accounts.length - 1),
+      );
+      ctx.setState({
+        ...next,
+        selectedIdx: nextSelectedIdx >= 0 ? nextSelectedIdx : Math.min(selectedIdx, Math.max(0, next.accounts.length - 1)),
+        message: `Account "${alias}" ${result.enabled ? 'enabled' : 'disabled'}.`,
+        messageKind: 'success',
+      });
+    } catch (error) {
+      ctx.setState({ message: `Update failed: ${(error as Error).message}`, messageKind: 'error', mode: 'normal' });
+    }
   }
 
   private async performAdd(ctx: TabContext<AccountsState>, inputAlias: string): Promise<void> {
@@ -289,6 +318,8 @@ async function loadAccounts(
           util5h: account.util5h,
           util7d: account.util7d,
           status: account.status,
+          enabled: account.enabled !== false,
+          refreshError: account.refreshError,
           measuredAt: account.measuredAt,
           ...(quota.entries.has(account.alias) ? { quota: quota.entries.get(account.alias)! } : {}),
         })),
@@ -312,7 +343,7 @@ async function diskFallback(): Promise<AccountsState> {
       ...initialAccountsState(),
       loading: false,
       source: 'disk',
-      accounts: accounts.map((account) => ({ alias: account.alias, expiresAt: account.expiresAt })),
+      accounts: accounts.map((account) => ({ alias: account.alias, expiresAt: account.expiresAt, enabled: account.enabled !== false })),
     };
   } catch (error) {
     return {

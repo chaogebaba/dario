@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { isValidAccountAlias } from './account-alias.js';
-import { removeAccount, renameAccountWithResult, type RenameAccountResult } from './account-store.js';
+import { removeAccount, renameAccountWithResult, toggleAccountEnabled, type RenameAccountResult } from './account-store.js';
 import { authCooldownMs, isInAuthCooldown, type AccountPool } from './pool.js';
 import { fetchQuota, type QuotaSnapshot } from './quota.js';
 
@@ -24,13 +24,14 @@ export interface AccountRouteDependencies {
   reconcile(): Promise<number>;
   retryModelCatalog(): void;
   probePlans(): void;
+  accountToggled?: (alias: string, enabled: boolean) => void;
   verbose?: boolean;
   log?: (message: string) => void;
   fetchQuota?: typeof fetchQuota;
 }
 
 type AccountMutation = {
-  action: 'delete' | 'rename';
+  action: 'delete' | 'rename' | 'toggle';
   alias: string | null;
 };
 
@@ -136,12 +137,18 @@ function accountStatus(pool: AccountPool): Record<string, unknown> {
       util5h: account.rateLimit.util5h,
       util7d: account.rateLimit.util7d,
       claim: account.rateLimit.claim,
-      status: inCooldown
+      status: !account.enabled
+        ? 'disabled'
+        : account.refreshError
+        ? 'refresh-failed'
+        : inCooldown
         ? 'auth-cooldown'
         : quotaCooldowns.length > 0 ? 'quota-cooldown' : account.rateLimit.status,
       requestCount: account.requestCount,
       expiresInMs: Math.max(0, account.expiresAt - now),
       expiresAt: account.expiresAt,
+      enabled: account.enabled,
+      ...(account.refreshError ? { refreshError: account.refreshError } : {}),
       measuredAt: account.rateLimit.updatedAt,
       ...(inCooldown || quotaCooldowns.length > 0
         ? {
@@ -173,6 +180,21 @@ async function quotaStatus(
   const fetchAccountQuota = deps.fetchQuota ?? fetchQuota;
   const accounts = await Promise.all(deps.pool.all().map(async (account) => {
     const cached = deps.quotaCache.get(account.alias);
+    if (account.enabled === false) {
+      return {
+        alias: account.alias,
+        ...(cached?.snapshot ?? {
+          windows: [],
+          plan: account.plan ?? null,
+          email: null,
+          extraUsage: null,
+          fetchedAt: Date.now(),
+        }),
+        cached: Boolean(cached),
+        enabled: false,
+        error: 'account disabled',
+      };
+    }
     if (!force && cached && Date.now() - cached.at < deps.quotaCacheMs) {
       return { alias: account.alias, ...cached.snapshot, cached: true };
     }
@@ -313,6 +335,33 @@ export async function handleAccountRoute(
     return true;
   }
 
+  if (mutation?.action === 'toggle' && req.method === 'POST') {
+    if (!requireLoopback(req, res, deps, 'account mutations are loopback-only')) return true;
+    if (!isValidAccountAlias(mutation.alias)) {
+      sendJson(res, 400, deps.jsonHeaders, { ok: false, error: 'invalid account alias' });
+      return true;
+    }
+    try {
+      const updated = await toggleAccountEnabled(mutation.alias);
+      if (!updated) {
+        sendJson(res, 404, deps.jsonHeaders, { ok: false, alias: mutation.alias });
+        return true;
+      }
+      await deps.reconcile();
+      deps.quotaCache.delete(mutation.alias);
+      deps.accountToggled?.(mutation.alias, updated.enabled === true);
+      deps.probePlans();
+      if (deps.verbose) deps.log?.(`[dario] account "${mutation.alias}" ${updated.enabled ? 'enabled' : 'disabled'} via TUI`);
+      sendJson(res, 200, deps.jsonHeaders, { ok: true, alias: mutation.alias, enabled: updated.enabled });
+    } catch (error) {
+      sendJson(res, 500, deps.jsonHeaders, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return true;
+  }
+
   if (urlPath === '/accounts' && req.method === 'GET') {
     sendJson(res, 200, deps.jsonHeaders, accountStatus(deps.pool));
     return true;
@@ -328,12 +377,13 @@ export async function handleAccountRoute(
 
 export function parseAccountMutationPath(path: string): AccountMutation | null {
   const rename = /^\/accounts\/([^/]+)\/rename$/.exec(path);
-  const remove = rename ? null : /^\/accounts\/([^/]+)$/.exec(path);
-  const encoded = rename?.[1] ?? remove?.[1];
+  const toggle = rename ? null : /^(?:\/accounts\/([^/]+)\/toggle)$/.exec(path);
+  const remove = rename || toggle ? null : /^\/accounts\/([^/]+)$/.exec(path);
+  const encoded = rename?.[1] ?? toggle?.[1] ?? remove?.[1];
   if (encoded === undefined) return null;
   try {
-    return { action: rename ? 'rename' : 'delete', alias: decodeURIComponent(encoded) || null };
+    return { action: rename ? 'rename' : toggle ? 'toggle' : 'delete', alias: decodeURIComponent(encoded) || null };
   } catch {
-    return { action: rename ? 'rename' : 'delete', alias: null };
+    return { action: rename ? 'rename' : toggle ? 'toggle' : 'delete', alias: null };
   }
 }

@@ -952,7 +952,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
     } else {
       const loaded = await loadAllAccounts();
       const now = Date.now();
-      const expired = loaded.filter((a) => a.expiresAt <= now).length;
+      const expired = loaded.filter((a) => a.enabled !== false && a.expiresAt <= now).length;
       checks.push({
         status: expired > 0 ? 'warn' : 'ok',
         label: 'Pool',
@@ -982,6 +982,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
               expiresAt: acc.expiresAt,
               deviceId: acc.deviceId,
               accountUuid: acc.accountUuid,
+              enabled: acc.enabled,
             });
           }
           const next = pool.select();
@@ -1002,11 +1003,13 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
           } else {
             const why = {
               expired: 'its token has expired',
+              disabled: 'it is disabled',
               'auth-cooldown': 'upstream rejected its token and it is cooling down',
               'rate-limited': 'its rate-limit window has not reset yet',
             };
             const fix = {
               expired: ' Run `dario login`.',
+              disabled: ' Enable it from the Accounts tab.',
               'auth-cooldown': ' Run `dario login` if it persists.',
               'rate-limited': '',
             };
