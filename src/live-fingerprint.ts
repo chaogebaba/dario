@@ -754,6 +754,115 @@ export async function captureLiveTemplateAsync(
 }
 
 /**
+ * The environment the capture child is allowed to see.
+ *
+ * This used to be `{...process.env}` with four `delete`s on top. A denylist
+ * cannot work here: CC reads more redirect variables than any list we write
+ * will name, and each one has the same silent symptom — the child goes
+ * somewhere other than the MITM, bills the operator, and capture reports the
+ * indistinguishable "no request arrived". Measured against the installed
+ * 2.1.235 binary, everything below reached a real spawned child on top of the
+ * four that were deleted: five more `CLAUDE_CODE_USE_*` platform switches,
+ * their matching `ANTHROPIC_*_BASE_URL` pairs, `ANTHROPIC_API_HOST`,
+ * `ANTHROPIC_UNIX_SOCKET` (which bypasses the base URL entirely),
+ * `ANTHROPIC_CUSTOM_HEADERS` (which also pollutes the captured header order),
+ * `CLAUDE_ENV_FILE` (CC reads that file and applies it as the session
+ * environment, so it re-opens the original bug verbatim), and all six proxy
+ * variables — the MITM is plain `http://127.0.0.1:PORT`, so on a host with
+ * `HTTP_PROXY` set and no loopback entry in `NO_PROXY` the capture request is
+ * handed to that proxy, a population that overlaps heavily with the router
+ * operators this sandbox exists for.
+ *
+ * So the child gets an allowlist: enough to find and run a binary, and
+ * nothing that can decide where its request goes. Verified by capture, not by
+ * reading — a child spawned with exactly this set produced a system prompt
+ * byte-identical to one spawned with the full 104-variable inherited
+ * environment, on every family in VARIANT_FAMILIES.
+ *
+ * The tradeoff is a real one: a host that needs an inherited variable to run
+ * CC at all (a wrapper script reading something exotic) now fails to capture
+ * and serves the bundled template. That is the safe direction — the bundle is
+ * always correct-ish, and a hijacked capture is silently wrong forever.
+ */
+const CAPTURE_ENV_ALLOW_POSIX: readonly string[] = [
+  'PATH',      // find the binary, and the `git`/`rg` CC shells out to
+  'HOME',      // not needed by the capture itself (measured), but a wrapper
+               // script or version manager may resolve itself against it
+  'SHELL', 'USER', 'LOGNAME',
+  'TMPDIR',
+  'LANG', 'LANGUAGE', 'TZ', 'TERM',   // plus LC_*, by prefix
+];
+
+/**
+ * Windows equivalents. Node's `process.env` is case-insensitive on win32 but
+ * the object's keys keep their original case, so the match is folded.
+ */
+const CAPTURE_ENV_ALLOW_WIN32: readonly string[] = [
+  'PATH', 'PATHEXT', 'ComSpec',
+  'SystemRoot', 'SystemDrive', 'windir',
+  'TEMP', 'TMP',
+  'USERPROFILE', 'USERNAME', 'HOMEDRIVE', 'HOMEPATH',
+  'APPDATA', 'LOCALAPPDATA', 'ProgramData',
+  'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+  'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS', 'COMPUTERNAME', 'TZ',
+];
+
+/**
+ * Build the capture child's environment: `base` filtered to the allowlist,
+ * then `pinned` applied on top so nothing inherited can shadow the sandbox.
+ *
+ * Exported for the isolation suite, which asserts the behaviour — feed it a
+ * poisoned environment and check what survives — rather than the spelling of
+ * a `delete` line. Nine of these were added by reading the binary; the tenth
+ * kind is the one nobody has enumerated yet, and only an allowlist covers it.
+ */
+export function captureChildEnv(
+  base: NodeJS.ProcessEnv,
+  pinned: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const win = platform === 'win32';
+  const allow = new Set(
+    (win ? CAPTURE_ENV_ALLOW_WIN32 : CAPTURE_ENV_ALLOW_POSIX).map((k) => (win ? k.toLowerCase() : k)),
+  );
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (typeof value !== 'string') continue;
+    if (allow.has(win ? key.toLowerCase() : key) || (!win && key.startsWith('LC_'))) out[key] = value;
+  }
+  return { ...out, ...pinned };
+}
+
+/**
+ * Environment keys a managed policy file can set to move the capture child.
+ *
+ * The same names the allowlist keeps out of the child's inherited
+ * environment — a policy `env` block reaches CC by a route the allowlist
+ * cannot touch, so the two defences need the same list. Read out of the
+ * 2.1.235 binary; `ANTHROPIC_CUSTOM_HEADERS` is here because it can carry
+ * auth to whichever endpoint wins as well as pollute the captured header
+ * order.
+ */
+const MANAGED_HIJACK_ENV_KEYS: readonly string[] = [
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_HOST', 'ANTHROPIC_UNIX_SOCKET',
+  'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL',
+  'ANTHROPIC_AWS_BASE_URL', 'ANTHROPIC_GOOGLE_CLOUD_BASE_URL', 'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GATEWAY', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_ENV_FILE',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+  'CLAUDE_CODE_HTTP_PROXY', 'CLAUDE_CODE_HTTPS_PROXY',
+];
+
+/** Top-level policy keys with the same effect, by a route `env` cannot show. */
+const MANAGED_HIJACK_SETTINGS_KEYS: readonly string[] = [
+  'apiKeyHelper', 'awsAuthRefresh', 'gcpAuthRefresh', 'forceLoginMethod', 'primaryApiKey',
+  'model',
+];
+
+/**
  * Enterprise managed settings that would defeat the capture sandbox.
  *
  * `CLAUDE_CONFIG_DIR` relocates the user's config, which is what stops a
@@ -782,8 +891,25 @@ export async function captureLiveTemplateAsync(
  *
  * `paths` is injectable so this is testable without writing to a real
  * machine-level policy path.
+ *
+ * The check used to look at `env.ANTHROPIC_BASE_URL` and nothing else, which
+ * made it the narrowest of the three defences: exercised against the real
+ * function with injected policy files, it proceeded on all seventeen other
+ * ways a policy file can move the child. `CLAUDE_CODE_USE_BEDROCK` and
+ * `_VERTEX` were the sharpest — the spawn deleted both from the inherited
+ * environment because it knew they were billing routes, and named them in its
+ * own warning text, while this guard ignored them. `apiKeyHelper` matters
+ * more than it looks: the binary maps it to `["ANTHROPIC_BASE_URL",
+ * "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"]`, so it sets the very variable
+ * the guard checked, by a route the guard could not see.
+ *
+ * `model` is in the list for a different reason. It does not bill anything;
+ * it overrides the `ANTHROPIC_MODEL` pin, so every family in the variant
+ * sweep would capture the same wrong prompt and dario would serve it to the
+ * others. A capture that is silently the wrong model is worse than no
+ * capture, because the bundle is at least right about which model it is.
  */
-export function managedSettingsBaseUrlOverride(paths?: string[]): string | null {
+export function managedSettingsHijack(paths?: string[]): { path: string; key: string } | null {
   const baseDir = process.platform === 'darwin'
     ? '/Library/Application Support/ClaudeCode'
     : process.platform === 'win32'
@@ -806,9 +932,17 @@ export function managedSettingsBaseUrlOverride(paths?: string[]): string | null 
   for (const path of candidates) {
     try {
       if (!existsSync(path)) continue;
-      const url = (JSON.parse(readFileSync(path, 'utf-8')) as { env?: Record<string, unknown> })
-        ?.env?.ANTHROPIC_BASE_URL;
-      if (typeof url === 'string' && url.length > 0) return path;
+      const settings = JSON.parse(readFileSync(path, 'utf-8')) as {
+        env?: Record<string, unknown>;
+      } & Record<string, unknown>;
+      const set = (v: unknown): boolean =>
+        (typeof v === 'string' && v.length > 0) || v === true || typeof v === 'number';
+      for (const key of MANAGED_HIJACK_ENV_KEYS) {
+        if (set(settings?.env?.[key])) return { path, key: `env.${key}` };
+      }
+      for (const key of MANAGED_HIJACK_SETTINGS_KEYS) {
+        if (set(settings?.[key])) return { path, key };
+      }
     } catch { /* unreadable or malformed — not ours to diagnose */ }
   }
   return null;
@@ -912,11 +1046,12 @@ export function _seedCaptureRepoForTest(home: string): void {
 }
 
 async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRequest | null> {
-  const managed = managedSettingsBaseUrlOverride();
+  const managed = managedSettingsHijack();
   if (managed) {
     console.log(
-      `[dario] live capture skipped: ${managed} sets env.ANTHROPIC_BASE_URL, which outranks `
-      + 'the capture sandbox and would bill a real request. Serving the bundled template.',
+      `[dario] live capture skipped: ${managed.path} sets ${managed.key}, which outranks `
+      + 'the capture sandbox — the probe would be billed upstream, or would record the wrong '
+      + 'model. Serving the bundled template.',
     );
     return null;
   }
@@ -1135,30 +1270,29 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
         captureHome = mkdtempSync(join(tmpdir(), 'dario-capture-'));
         trackCaptureHome(captureHome);
         seedCaptureRepo(captureHome);
-        const env: NodeJS.ProcessEnv = {
-          ...process.env,
+        // Allowlist, not `{...process.env}` minus a denylist: every variable
+        // that can redirect the child is absent because it was never copied.
+        // See CAPTURE_ENV_ALLOW_POSIX for what survives and why.
+        const env = captureChildEnv(process.env, {
           CLAUDE_CONFIG_DIR: captureHome,
           ANTHROPIC_BASE_URL: url,
-          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? 'sk-dario-fingerprint-capture',
+          // Always the placeholder, never the operator's real key. The MITM
+          // authenticates nothing, so inheriting one bought nothing and put a
+          // live credential in a child we are deliberately pointing at a
+          // socket. Captures on hosts with no key set have always used this.
+          ANTHROPIC_API_KEY: 'sk-dario-fingerprint-capture',
           // Pin the base-prompt model. An unpinned `claude --print` uses the
           // user's DEFAULT model, which made the captured base machine-specific.
           // The `model` argument wins, then the environment: the runtime variant
           // sweep passes the family's model directly, capture-and-bake sets
-          // ANTHROPIC_MODEL around each of its own captures.
+          // ANTHROPIC_MODEL around each of its own captures. Read here rather
+          // than inherited, so the allowlist does not have to carry it.
           ANTHROPIC_MODEL: model ?? process.env.ANTHROPIC_MODEL ?? TEMPLATE_BASE_MODEL,
-          // Prevent CC from launching its own interactive UI or OAuth flow.
+          // Belt and braces. `--print` is what actually keeps CC out of its
+          // interactive UI and OAuth flow; this name appears nowhere in the
+          // 2.1.235 binary, so it is inert today and costs nothing to keep.
           CLAUDE_NONINTERACTIVE: '1',
-        };
-        // A router proxy's token would send the child to that router rather
-        // than to us. The MITM authenticates nothing, so drop it.
-        delete env.ANTHROPIC_AUTH_TOKEN;
-        // Same defeat by a different route: either of these sends the child to
-        // Bedrock or Vertex instead of ANTHROPIC_BASE_URL, so the capture is
-        // billed on that platform and reports the identical "no request
-        // arrived". `...process.env` above inherits them from whatever launched
-        // the proxy, so clear them rather than assuming the operator's shell.
-        delete env.CLAUDE_CODE_USE_BEDROCK;
-        delete env.CLAUDE_CODE_USE_VERTEX;
+        });
 
         child = spawn(claudeBin, ['--print', '-p', 'hi'], {
           env,

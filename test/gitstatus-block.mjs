@@ -224,7 +224,15 @@ header('detect — read off a real repository');
     git('commit', '-q', '-m', 'first');
     git('config', '--unset', 'user.name');
   });
+  // The detector reads the environment it is given, so a host whose own
+  // ~/.gitconfig sets user.name would answer for this repo and the assertion
+  // below would pass or fail depending on whose machine ran it. Neutralize
+  // the global config for the length of this one call.
+  const savedGlobal = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = '/dev/null';
   const ni = detectGitStatusFacts(noIdentity);
+  if (savedGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+  else process.env.GIT_CONFIG_GLOBAL = savedGlobal;
   check('an unset user.name does not sink the whole block', ni !== null);
   check('...it reads as null, for the rewrite to drop', ni?.user === null);
   check('...while the branch is still read', ni?.branch === 'main');

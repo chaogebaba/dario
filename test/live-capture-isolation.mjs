@@ -47,33 +47,40 @@ check(
   /mkdtempSync\(join\(tmpdir\(\),\s*'dario-capture-'\)\)/.test(spawnBlock),
 );
 
-// A router proxy's token would route the child to that router instead of us.
+// The child's environment is built, not inherited-and-patched. These two
+// pin the SEAM only — that the spawn goes through the allowlist and hands it
+// the real process environment. What the allowlist keeps out is asserted
+// behaviourally at the bottom of this file, against the exported function,
+// because a denylist of `delete` lines is exactly what could not be trusted:
+// every variable nobody had thought to name still reached the child.
 check(
-  'inherited ANTHROPIC_AUTH_TOKEN is dropped before spawning',
-  /delete env\.ANTHROPIC_AUTH_TOKEN/.test(spawnBlock),
-);
-
-// Same sandbox defeat by a different route: either of these routes the child
-// to Bedrock/Vertex, billing there with the identical "no request arrived".
-check(
-  'inherited CLAUDE_CODE_USE_BEDROCK is dropped before spawning',
-  /delete env\.CLAUDE_CODE_USE_BEDROCK/.test(spawnBlock),
+  'the spawn builds its environment through captureChildEnv',
+  /const env = captureChildEnv\(process\.env, \{/.test(spawnBlock),
 );
 check(
-  'inherited CLAUDE_CODE_USE_VERTEX is dropped before spawning',
-  /delete env\.CLAUDE_CODE_USE_VERTEX/.test(spawnBlock),
+  'nothing re-spreads process.env into the child environment',
+  // comments stripped: the block explains what it replaced, in prose that
+  // contains the very spread this forbids in code
+  !/\.\.\.process\.env/.test(spawnBlock.replace(/^\s*\/\/.*$/gm, '')),
+);
+// The MITM authenticates nothing, so a real key bought nothing and put a live
+// credential in a child we are deliberately pointing at a socket.
+check(
+  'the child gets the placeholder API key, never the operator\'s',
+  /ANTHROPIC_API_KEY: 'sk-dario-fingerprint-capture'/.test(spawnBlock)
+  && !/ANTHROPIC_API_KEY: process\.env\.ANTHROPIC_API_KEY/.test(spawnBlock),
 );
 
 // CLAUDE_CONFIG_DIR cannot relocate the machine-level policy file, whose env
 // block outranks everything. Refuse the spend rather than rediscover the bug.
 check(
   'capture bails when managed settings would override the sandbox',
-  /export function managedSettingsBaseUrlOverride\(paths\?: string\[\]\)/.test(src)
-  && /const managed = managedSettingsBaseUrlOverride\(\);/.test(src),
+  /export function managedSettingsHijack\(paths\?: string\[\]\)/.test(src)
+  && /const managed = managedSettingsHijack\(\);/.test(src),
 );
 check(
-  'the managed-settings bail is a distinct log line, not a silent null',
-  /live capture skipped: \$\{managed\} sets env\.ANTHROPIC_BASE_URL/.test(src),
+  'the managed-settings bail is a distinct log line, and names the key it found',
+  /live capture skipped: \$\{managed\.path\} sets \$\{managed\.key\}/.test(src),
 );
 
 // The base dirs are read out of the CC binary, not inferred from docs. The
@@ -219,9 +226,97 @@ const mitmOk = /res\.writeHead\(200,\s*\{[\s\S]{0,200}text\/event-stream/.test(s
   && !/fetch\(\s*['"`]https:\/\/api\.anthropic\.com/.test(src);
 check('capture MITM answers locally and never forwards upstream', mitmOk);
 
+// --- behavioural: what the child's environment actually contains ---
+//
+// Every name below was measured reaching a real spawned child on the version
+// of this file that deleted four variables by hand. They are not deleted now;
+// they are absent because they were never copied. The list is here as
+// evidence of the failure mode, not as the mechanism — a name nobody thought
+// of is covered by the same allowlist that covers these.
+const { captureChildEnv, managedSettingsHijack } = await import('../dist/live-fingerprint.js');
+
+const HIJACK_VARS = [
+  // the original four
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+  // five more platform switches, each with a matching base-URL variable
+  'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_USE_GATEWAY', 'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  // endpoint overrides; the unix socket bypasses the base URL entirely
+  'ANTHROPIC_API_HOST', 'ANTHROPIC_UNIX_SOCKET', 'ANTHROPIC_BEDROCK_BASE_URL',
+  'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_AWS_BASE_URL',
+  'ANTHROPIC_GOOGLE_CLOUD_BASE_URL', 'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+  // carries auth to whichever endpoint wins, and pollutes the captured header order
+  'ANTHROPIC_CUSTOM_HEADERS',
+  // CC reads this file and applies it as the session environment
+  'CLAUDE_ENV_FILE',
+  // the MITM is plain http on loopback, so a proxy with no NO_PROXY entry takes the call
+  'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+  'CLAUDE_CODE_HTTP_PROXY', 'CLAUDE_CODE_HTTPS_PROXY',
+  // a developer's shell adds these; they make a hand-run capture-and-bake
+  // record a child-session fingerprint
+  'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_EFFORT',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  // arbitrary code into the child
+  'NODE_OPTIONS', 'ANTHROPIC_API_KEY',
+];
+
+const POISONED = { PATH: '/usr/bin', HOME: '/home/op', LC_ALL: 'C', TERM: 'xterm' };
+for (const k of HIJACK_VARS) POISONED[k] = 'poison';
+const PINNED = {
+  CLAUDE_CONFIG_DIR: '/tmp/dario-capture-test',
+  ANTHROPIC_BASE_URL: 'http://127.0.0.1:9/nonce',
+  ANTHROPIC_API_KEY: 'sk-dario-fingerprint-capture',
+  ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001',
+  CLAUDE_NONINTERACTIVE: '1',
+};
+const childEnv = captureChildEnv(POISONED, PINNED, 'linux');
+
+const leaked = HIJACK_VARS.filter((k) => childEnv[k] === 'poison');
+check(
+  `none of the ${HIJACK_VARS.length} known hijack variables reach the child (leaked: ${leaked.join(', ') || 'none'})`,
+  leaked.length === 0,
+);
+// The two the sandbox sets itself must be the sandbox's values, not the
+// operator's — an allowlist that let the base shadow a pinned key would be
+// the original bug with extra steps.
+check(
+  'the pinned base URL wins over a poisoned inherited one',
+  childEnv.ANTHROPIC_BASE_URL === 'http://127.0.0.1:9/nonce',
+);
+check(
+  'the pinned placeholder key wins over an inherited real one',
+  childEnv.ANTHROPIC_API_KEY === 'sk-dario-fingerprint-capture',
+);
+// The two above pass on either merge order, because no pinned key is on the
+// allowlist today — they guard the day someone adds one. This one pins the
+// order itself, on a key that is on both sides.
+check(
+  'a pinned value wins over an allowlisted inherited one of the same name',
+  captureChildEnv({ PATH: '/poison' }, { PATH: '/sandbox' }, 'linux').PATH === '/sandbox',
+);
+// ...and enough survives to actually run a binary.
+check('PATH survives — the child has to find CC, git and rg', childEnv.PATH === '/usr/bin');
+check('HOME survives — a wrapper script may resolve itself against it', childEnv.HOME === '/home/op');
+check('LC_* survives by prefix, not by enumeration', childEnv.LC_ALL === 'C');
+check('an unrecognized variable does not survive', !('FOO_UNKNOWN' in captureChildEnv({ FOO_UNKNOWN: 'x' }, {}, 'linux')));
+check(
+  'the allowlist is small — a large inherited environment collapses',
+  Object.keys(captureChildEnv(POISONED, {}, 'linux')).length === 4,
+);
+// Windows names are conventionally mixed-case and Node's process.env is
+// case-insensitive there, so the match is folded or the child loses its
+// system paths and cannot spawn at all.
+check(
+  'win32 allowlist matches case-insensitively',
+  captureChildEnv({ SYSTEMROOT: 'C:\\Windows', Path: 'C:\\bin' }, {}, 'win32').SYSTEMROOT === 'C:\\Windows',
+);
+check(
+  'win32 does not carry the POSIX-only names',
+  !('SHELL' in captureChildEnv({ SHELL: '/bin/sh' }, {}, 'win32')),
+);
+
 // --- behavioural: the managed-settings guard, against real files ---
 // Injectable paths so this never touches a real machine-level policy path.
-const { managedSettingsBaseUrlOverride } = await import('../dist/live-fingerprint.js');
 const tmp = mkdtempSync(join(tmpdir(), 'dario-managed-test-'));
 const write = (name, obj) => {
   const p = join(tmp, name);
@@ -231,28 +326,76 @@ const write = (name, obj) => {
 
 check(
   'no managed file -> capture proceeds',
-  managedSettingsBaseUrlOverride([join(tmp, 'does-not-exist.json')]) === null,
+  managedSettingsHijack([join(tmp, 'does-not-exist.json')]) === null,
 );
 const hijack = write('hijack.json', { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:15721' } });
 check(
   'managed file pinning ANTHROPIC_BASE_URL -> capture bails, and names the file',
-  managedSettingsBaseUrlOverride([hijack]) === hijack,
+  managedSettingsHijack([hijack])?.path === hijack,
 );
 check(
-  'managed file WITHOUT a base-url override -> capture proceeds',
-  managedSettingsBaseUrlOverride([write('other.json', { env: { FOO: 'bar' } })]) === null,
+  'the bail names the key it found, not just the file',
+  managedSettingsHijack([hijack])?.key === 'env.ANTHROPIC_BASE_URL',
+);
+check(
+  'managed file with no hijacking key -> capture proceeds',
+  managedSettingsHijack([write('other.json', { env: { FOO: 'bar' }, cleanupPeriodDays: 30 })]) === null,
 );
 check(
   'managed file with an empty base url is not treated as an override',
-  managedSettingsBaseUrlOverride([write('empty.json', { env: { ANTHROPIC_BASE_URL: '' } })]) === null,
+  managedSettingsHijack([write('empty.json', { env: { ANTHROPIC_BASE_URL: '' } })]) === null,
 );
 check(
   'malformed managed file does not throw or block capture',
-  managedSettingsBaseUrlOverride([write('bad.json', '{not json')]) === null,
+  managedSettingsHijack([write('bad.json', '{not json')]) === null,
 );
 check(
   'first matching path wins when several are checked',
-  managedSettingsBaseUrlOverride([join(tmp, 'nope.json'), hijack]) === hijack,
+  managedSettingsHijack([join(tmp, 'nope.json'), hijack])?.path === hijack,
+);
+
+// The guard used to check ANTHROPIC_BASE_URL and nothing else: measured
+// against the real function, it proceeded on all seventeen of these. The two
+// platform switches are the sharpest — the spawn deleted both from the
+// child's environment BECAUSE it knew they were billing routes, and named
+// them in its own warning text, while this guard waved them through.
+const OTHER_HIJACKS = [
+  ['env', 'CLAUDE_CODE_USE_BEDROCK', true],
+  ['env', 'CLAUDE_CODE_USE_VERTEX', '1'],
+  ['env', 'CLAUDE_CODE_USE_FOUNDRY', '1'],
+  ['env', 'CLAUDE_CODE_USE_GATEWAY', '1'],
+  ['env', 'CLAUDE_CODE_USE_MANTLE', '1'],
+  ['env', 'ANTHROPIC_API_HOST', 'api.elsewhere'],
+  ['env', 'ANTHROPIC_UNIX_SOCKET', '/run/x.sock'],
+  ['env', 'ANTHROPIC_BEDROCK_BASE_URL', 'https://x'],
+  ['env', 'ANTHROPIC_VERTEX_BASE_URL', 'https://x'],
+  ['env', 'ANTHROPIC_AUTH_TOKEN', 'sk-x'],
+  ['env', 'ANTHROPIC_CUSTOM_HEADERS', 'x: y'],
+  ['env', 'HTTPS_PROXY', 'http://proxy:8080'],
+  ['env', 'CLAUDE_ENV_FILE', '/etc/claude.env'],
+  // apiKeyHelper is the subtle one: the binary maps it to ANTHROPIC_BASE_URL,
+  // so it sets the very variable the old guard checked, by a route it could
+  // not see.
+  ['top', 'apiKeyHelper', '/usr/local/bin/key.sh'],
+  ['top', 'awsAuthRefresh', 'aws sso login'],
+  ['top', 'gcpAuthRefresh', 'gcloud auth login'],
+  ['top', 'forceLoginMethod', 'console'],
+  ['top', 'primaryApiKey', 'sk-x'],
+  // not billing — it defeats the ANTHROPIC_MODEL pin, so every family in the
+  // variant sweep captures the same wrong prompt
+  ['top', 'model', 'claude-opus-4-8'],
+];
+let bailed = 0;
+const proceeded = [];
+for (const [where, key, value] of OTHER_HIJACKS) {
+  const body = where === 'env' ? { env: { [key]: value } } : { [key]: value };
+  const found = managedSettingsHijack([write(`h-${key}.json`, body)]);
+  const want = where === 'env' ? `env.${key}` : key;
+  if (found?.key === want) bailed++; else proceeded.push(key);
+}
+check(
+  `every managed hijack key bails and is named (proceeded: ${proceeded.join(', ') || 'none'})`,
+  bailed === OTHER_HIJACKS.length,
 );
 rmSync(tmp, { recursive: true, force: true });
 
