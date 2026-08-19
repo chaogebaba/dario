@@ -150,6 +150,34 @@ interface LockAcquireResult {
   retryAfterMs?: number;
 }
 
+/**
+ * Runtime guard for an acquire reply crossing the network boundary.
+ *
+ * `as LockAcquireResult` asserted a shape nothing had checked. A 200 whose
+ * body is a bare `null`, an array, or an HTML error page from something
+ * sitting in front of the lock service parses into a value where every field
+ * reads `undefined` — and the caller treated that as a definite "you did not
+ * get the lock". `acquired` is read for truthiness, so a body carrying the
+ * string `"false"` claims the lease; `retryAfterMs` reaches
+ * `Math.min(x, 3_000)`, so a string or a NaN makes `sleep()` return
+ * immediately and burns all 8 attempts in one tick.
+ *
+ * The optional fields are checked only when present, because omitting them is
+ * how the protocol says "no cached credentials" and "no hint". `credentials`
+ * is left to `isAccountCredentials` at the call site, which also pins the
+ * alias.
+ */
+function isLockAcquireResult(value: unknown): value is LockAcquireResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.acquired !== 'boolean') return false;
+  if (candidate.retryAfterMs !== undefined
+    && (typeof candidate.retryAfterMs !== 'number'
+      || !Number.isFinite(candidate.retryAfterMs)
+      || candidate.retryAfterMs < 0)) return false;
+  return true;
+}
+
 async function lockCall<T>(path: string, body: unknown, env = process.env): Promise<T | null> {
   const base = refreshLockUrl(env);
   if (!base) return null;
@@ -161,7 +189,12 @@ async function lockCall<T>(path: string, body: unknown, env = process.env): Prom
       signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) return null; // fail OPEN — lock unavailable, not a hard error
-    return (await res.json()) as T;
+    const parsed: unknown = await res.json();
+    // Every caller distinguishes "no reply" (null) from "a reply". A body that
+    // is not a JSON object cannot answer any question this protocol asks, so
+    // report it as no reply rather than casting it into one.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed as T;
   } catch {
     return null; // network error / CF outage — fail OPEN
   }
@@ -173,15 +206,18 @@ async function doRefreshAccountTokenDistributed(creds: AccountCredentials, alias
   const holder = randomUUID();
   const MAX_ATTEMPTS = 8;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const res = await lockCall<LockAcquireResult>(`/lock/${encodeURIComponent(creds.alias)}/acquire`, {
+    const res = await lockCall<unknown>(`/lock/${encodeURIComponent(creds.alias)}/acquire`, {
       holder,
       ttlMs: 20_000,
       currentExpiresAt: creds.expiresAt,
     });
 
-    if (res === null) {
-      // Lock service unreachable — fail open, refresh directly exactly as
-      // if DARIO_REFRESH_LOCK_URL were unset.
+    if (res === null || !isLockAcquireResult(res)) {
+      // Lock service unreachable, or answering with something that is not an
+      // acquire reply — fail open in both cases, refreshing directly exactly
+      // as if DARIO_REFRESH_LOCK_URL were unset. A malformed reply is a
+      // lock-service fault, and the same fault the credentials guard below
+      // handles; the failure mode to avoid is believing it.
       return doRefreshAccountToken(creds);
     }
     if (res.credentials) {
