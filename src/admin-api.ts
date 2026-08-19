@@ -31,7 +31,9 @@
  * boolean, is deliberate: a single 401 already shows `auth-cooldown` for 60s,
  * indistinguishable from a genuinely dead refresh token by that field alone
  * (verified empirically — see the PR). `consecutiveAuthFailures` is the only
- * signal that actually separates "blip" from "needs a human."
+ * signal that actually separates "blip" from "needs a human." Disabled
+ * accounts are skipped: they serve no traffic, so nothing ever resets their
+ * failure streak, and re-logging one in would silently put it back in routing.
  *
  * `/admin/login/complete` also accepts a **batch** body (`{ items: [...] }`)
  * instead of a single `{ alias, code }` — completes several pending logins in
@@ -106,6 +108,14 @@ export interface AdminAccountLive {
    * only field that does; `/admin/login/start-needed` filters on it.
    */
   consecutiveAuthFailures: number;
+  /**
+   * Whether the account is in routing. A disabled account serves no traffic,
+   * so its `consecutiveAuthFailures` streak is frozen at whatever it was when
+   * the operator benched it — nothing can ever reset it. `start-needed` must
+   * therefore filter on this too, or a deliberately-disabled account is
+   * offered for re-login forever.
+   */
+  enabled: boolean;
 }
 
 /** An audited admin action — see `AdminDeps.audit`. Never carries secrets. */
@@ -445,7 +455,7 @@ export async function handleAdminRequest(
       const live = deps.poolStatus?.() ?? null;
       const candidates = live
         ? [...live.entries()]
-          .filter(([, l]) => l.consecutiveAuthFailures >= threshold)
+          .filter(([, l]) => l.enabled !== false && l.consecutiveAuthFailures >= threshold)
           .map(([alias, l]) => ({ alias, consecutiveAuthFailures: l.consecutiveAuthFailures }))
         : [];
       const started: Array<{ alias: string; authorize_url: string; expires_at: string; consecutive_auth_failures: number }> = [];

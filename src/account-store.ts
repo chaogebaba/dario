@@ -153,10 +153,19 @@ export async function replaceAccount(creds: AccountCredentials): Promise<void> {
     throw storeError('invalid', `invalid credentials for account: ${alias}`);
   }
   await withAccountLocks([creds.alias], async () => {
-    if (!(await loadAccount(creds.alias))) {
+    const existing = await loadAccount(creds.alias);
+    if (!existing) {
       throw storeError('not-found', `account not found: ${creds.alias}`, 'ENOENT');
     }
-    await saveAccountWhileLocked(creds, path);
+    // Replacing an account swaps its token lineage, not its operator state: a
+    // re-login of a disabled account must leave it disabled. The rebuilt
+    // credentials from an OAuth exchange carry no `enabled`, and loadAccount's
+    // `enabled !== false` default would otherwise silently flip it back on —
+    // putting an account the operator deliberately benched back into routing.
+    // Reading `existing` inside the lock keeps this atomic against a
+    // concurrent toggle. Callers that mean to change the state pass it.
+    const merged = creds.enabled === undefined ? { ...creds, enabled: existing.enabled } : creds;
+    await saveAccountWhileLocked(merged, path);
   });
 }
 

@@ -2423,6 +2423,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<void> {
               // genuinely dead refresh token by that field alone. The magnitude
               // is what /admin/login/start-needed filters on (#913).
               consecutiveAuthFailures: a.consecutiveAuthFailures,
+              enabled: a.enabled,
             });
           }
           return snap;

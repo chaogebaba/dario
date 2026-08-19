@@ -285,6 +285,23 @@ header('POST /admin/login/start-needed — threshold filter (#913)');
   check('threshold:1 also includes the 2-failure account', json2.started.some(s => s.alias === 'acct-below'));
   check('threshold:1 still excludes the healthy account', !json2.started.some(s => s.alias === 'acct-healthy'));
 
+  // A disabled account serves no traffic, so nothing ever resets its failure
+  // streak — it stays past the threshold forever. Offering it for re-login
+  // would hand the operator a URL whose completion silently puts the account
+  // back into routing, undoing the disable.
+  _resetAdminStateForTest();
+  const disabledStatus = () => new Map([
+    ['acct-benched', { util5h: 0, util7d: 0, claim: 'x', status: 'auth-cooldown', requestCount: 0, consecutiveAuthFailures: 9, enabled: false }],
+    ['acct-live', { util5h: 0, util7d: 0, claim: 'x', status: 'auth-cooldown', requestCount: 0, consecutiveAuthFailures: 9, enabled: true }],
+  ]);
+  const reqDisabled = mockReq('POST', '/admin/login/start-needed', bearer(TOKEN), {});
+  const resDisabled = mockRes();
+  await handleAdminRequest(reqDisabled, resDisabled, '/admin/login/start-needed', { adminTokenBuf: TOKEN_BUF, poolStatus: disabledStatus });
+  const jsonDisabled = JSON.parse(resDisabled.body);
+  check('disabled account is not offered for re-login', !jsonDisabled.started.some(s => s.alias === 'acct-benched'));
+  check('enabled account past the threshold still is', jsonDisabled.started.some(s => s.alias === 'acct-live'));
+  check('disabled account does not consume a start slot', jsonDisabled.count === 1);
+
   // Each started account is a real pending login — /complete's guard path
   // recognizes the alias instead of 410ing.
   const completeCheck = await call('POST', '/admin/login/complete', { token: TOKEN, body: { alias: 'acct-above', code: '' } });
