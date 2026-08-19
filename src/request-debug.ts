@@ -208,6 +208,20 @@ export class RequestDebugStore {
     if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
     if (!this.filePath) return;
     this.pending.push(normalized);
+    // `entries` is a ring; `pending` was not. A persistence failure raised
+    // before the drain loop — mkdir on a read-only or vanished directory is
+    // the realistic one — leaves `pending` untouched, so it grew without
+    // bound while the ring it mirrors stayed flat.
+    //
+    // The bound is the file's own, not the ring's. Surplus beyond the ring is
+    // deliberate: the file carries up to COMPACT_FACTOR x maxEntries lines so
+    // that appends stay O(1). Past that the drain takes the compaction branch,
+    // which writes `entries` and discards the batch regardless — so nothing
+    // that could have been written is dropped here.
+    const queueCap = this.maxEntries * COMPACT_FACTOR;
+    if (this.pending.length > queueCap) {
+      this.pending.splice(0, this.pending.length - queueCap);
+    }
     this.schedulePersist();
   }
 
@@ -225,6 +239,9 @@ export class RequestDebugStore {
   }
 
   size(): number { return this.entries.length; }
+
+  /** Test-only — the undrained write queue. Production code has no business peeking. */
+  _pendingSizeForTest(): number { return this.pending.length; }
 
   private schedulePersist(): void {
     if (!this.filePath || this.persistScheduled) return;
