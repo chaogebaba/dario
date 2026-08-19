@@ -565,7 +565,13 @@ export class AccountPool {
       plan: preserved?.plan ?? null,
       requestCount: preserved?.requestCount ?? 0,
       enabled: opts.enabled !== false,
-      refreshError: preserved?.refreshError,
+      // A refresh error describes the credentials it was raised against, and
+      // `add` is the path that installs credentials. Reconcile re-adds every
+      // account from disk on each run, so carrying the message across a token
+      // change pinned a failure that the new token disproves — an account
+      // refreshed by another process, or re-authed out of band, reported
+      // refresh-failed forever.
+      refreshError: preserved?.accessToken === opts.accessToken ? preserved?.refreshError : undefined,
       lastAuthFailureAt: preserved?.lastAuthFailureAt,
       consecutiveAuthFailures: preserved?.consecutiveAuthFailures ?? 0,
       authFailureEpoch: preserved?.authFailureEpoch ?? 0,

@@ -139,11 +139,13 @@ function accountStatus(pool: AccountPool): Record<string, unknown> {
       claim: account.rateLimit.claim,
       status: !account.enabled
         ? 'disabled'
-        : account.refreshError
-        ? 'refresh-failed'
         : inCooldown
         ? 'auth-cooldown'
-        : quotaCooldowns.length > 0 ? 'quota-cooldown' : account.rateLimit.status,
+        : quotaCooldowns.length > 0
+        ? 'quota-cooldown'
+        : account.refreshError
+        ? 'refresh-failed'
+        : account.rateLimit.status,
       requestCount: account.requestCount,
       expiresInMs: Math.max(0, account.expiresAt - now),
       expiresAt: account.expiresAt,
