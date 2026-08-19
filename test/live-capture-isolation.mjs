@@ -16,9 +16,10 @@
 // These assertions are about the SHAPE OF THE SPAWN, not about reaching the
 // network, so they run offline and in CI.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(here, '..', 'src', 'live-fingerprint.ts'), 'utf-8');
@@ -50,6 +51,34 @@ check(
 check(
   'inherited ANTHROPIC_AUTH_TOKEN is dropped before spawning',
   /delete env\.ANTHROPIC_AUTH_TOKEN/.test(spawnBlock),
+);
+
+// Same sandbox defeat by a different route: either of these routes the child
+// to Bedrock/Vertex, billing there with the identical "no request arrived".
+check(
+  'inherited CLAUDE_CODE_USE_BEDROCK is dropped before spawning',
+  /delete env\.CLAUDE_CODE_USE_BEDROCK/.test(spawnBlock),
+);
+check(
+  'inherited CLAUDE_CODE_USE_VERTEX is dropped before spawning',
+  /delete env\.CLAUDE_CODE_USE_VERTEX/.test(spawnBlock),
+);
+
+// CLAUDE_CONFIG_DIR cannot relocate the machine-level policy file, whose env
+// block outranks everything. Refuse the spend rather than rediscover the bug.
+check(
+  'capture bails when managed settings would override the sandbox',
+  /export function managedSettingsBaseUrlOverride\(paths\?: string\[\]\)/.test(src)
+  && /const managed = managedSettingsBaseUrlOverride\(\);/.test(src),
+);
+check(
+  'the managed-settings bail is a distinct log line, not a silent null',
+  /live capture skipped: \$\{managed\} sets env\.ANTHROPIC_BASE_URL/.test(src),
+);
+check(
+  'the managed-settings path is checked per-platform',
+  /ProgramData\\\\ClaudeCode\\\\managed-settings\.json/.test(src)
+  && /\/etc\/claude-code\/managed-settings\.json/.test(src),
 );
 
 // Without an explicit cwd the child inherits the unit's WorkingDirectory,
@@ -97,6 +126,43 @@ check(
 const mitmOk = /res\.writeHead\(200,\s*\{[\s\S]{0,200}text\/event-stream/.test(src)
   && !/fetch\(\s*['"`]https:\/\/api\.anthropic\.com/.test(src);
 check('capture MITM answers locally and never forwards upstream', mitmOk);
+
+// --- behavioural: the managed-settings guard, against real files ---
+// Injectable paths so this never touches a real machine-level policy path.
+const { managedSettingsBaseUrlOverride } = await import('../dist/live-fingerprint.js');
+const tmp = mkdtempSync(join(tmpdir(), 'dario-managed-test-'));
+const write = (name, obj) => {
+  const p = join(tmp, name);
+  writeFileSync(p, typeof obj === 'string' ? obj : JSON.stringify(obj));
+  return p;
+};
+
+check(
+  'no managed file -> capture proceeds',
+  managedSettingsBaseUrlOverride([join(tmp, 'does-not-exist.json')]) === null,
+);
+const hijack = write('hijack.json', { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:15721' } });
+check(
+  'managed file pinning ANTHROPIC_BASE_URL -> capture bails, and names the file',
+  managedSettingsBaseUrlOverride([hijack]) === hijack,
+);
+check(
+  'managed file WITHOUT a base-url override -> capture proceeds',
+  managedSettingsBaseUrlOverride([write('other.json', { env: { FOO: 'bar' } })]) === null,
+);
+check(
+  'managed file with an empty base url is not treated as an override',
+  managedSettingsBaseUrlOverride([write('empty.json', { env: { ANTHROPIC_BASE_URL: '' } })]) === null,
+);
+check(
+  'malformed managed file does not throw or block capture',
+  managedSettingsBaseUrlOverride([write('bad.json', '{not json')]) === null,
+);
+check(
+  'first matching path wins when several are checked',
+  managedSettingsBaseUrlOverride([join(tmp, 'nope.json'), hijack]) === hijack,
+);
+rmSync(tmp, { recursive: true, force: true });
 
 console.log(`\n  ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

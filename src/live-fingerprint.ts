@@ -587,7 +587,49 @@ export async function captureLiveTemplateAsync(timeoutMs: number = 10_000): Prom
   return extractTemplate(captured);
 }
 
+/**
+ * Enterprise managed settings that would defeat the capture sandbox.
+ *
+ * `CLAUDE_CONFIG_DIR` relocates the user's config, which is what stops a
+ * personal `settings.json` hijacking the capture. It deliberately does NOT
+ * relocate the machine-level policy file — the whole point of a managed
+ * setting is that a user cannot opt out of it — and a managed `env` block
+ * outranks everything else. So on a managed host the capture would be
+ * redirected upstream and billed, with the same silent `capture returned
+ * null` we can no longer distinguish it by.
+ *
+ * We cannot neutralize the policy file. We can decline to spend the
+ * operator's subscription discovering it, and say why.
+ *
+ * `paths` is injectable so this is testable without writing to a real
+ * machine-level policy path.
+ */
+export function managedSettingsBaseUrlOverride(paths?: string[]): string | null {
+  const candidates = paths ?? (process.platform === 'darwin'
+    ? ['/Library/Application Support/ClaudeCode/managed-settings.json']
+    : process.platform === 'win32'
+      ? ['C:\\ProgramData\\ClaudeCode\\managed-settings.json']
+      : ['/etc/claude-code/managed-settings.json']);
+  for (const path of candidates) {
+    try {
+      if (!existsSync(path)) continue;
+      const url = (JSON.parse(readFileSync(path, 'utf-8')) as { env?: Record<string, unknown> })
+        ?.env?.ANTHROPIC_BASE_URL;
+      if (typeof url === 'string' && url.length > 0) return path;
+    } catch { /* unreadable or malformed — not ours to diagnose */ }
+  }
+  return null;
+}
+
 async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
+  const managed = managedSettingsBaseUrlOverride();
+  if (managed) {
+    console.log(
+      `[dario] live capture skipped: ${managed} sets env.ANTHROPIC_BASE_URL, which outranks `
+      + 'the capture sandbox and would bill a real request. Serving the bundled template.',
+    );
+    return null;
+  }
   const nonce = `dario-capture-${randomBytes(12).toString('hex')}`;
   return new Promise((resolve) => {
     let captured: CapturedRequest | null = null;
@@ -774,6 +816,13 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
         // A router proxy's token would send the child to that router rather
         // than to us. The MITM authenticates nothing, so drop it.
         delete env.ANTHROPIC_AUTH_TOKEN;
+        // Same defeat by a different route: either of these sends the child to
+        // Bedrock or Vertex instead of ANTHROPIC_BASE_URL, so the capture is
+        // billed on that platform and reports the identical "no request
+        // arrived". `...process.env` above inherits them from whatever launched
+        // the proxy, so clear them rather than assuming the operator's shell.
+        delete env.CLAUDE_CODE_USE_BEDROCK;
+        delete env.CLAUDE_CODE_USE_VERTEX;
 
         child = spawn(claudeBin, ['--print', '-p', 'hi'], {
           env,
