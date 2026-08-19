@@ -31,6 +31,7 @@ import { spawn } from 'node:child_process';
 import { readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { readTally } from './lib/read-tally.mjs';
 import { jsSuites, shellSuites } from './lib/suites.mjs';
+import { writeHeadlessLiveCache } from './lib/headless-live-cache.mjs';
 import { cpus } from 'node:os';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -41,26 +42,37 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const files = jsSuites(__dirname);
 const shellFiles = shellSuites(__dirname);
 
-// Every child gets the live-template cache pointed at a path that does not
-// exist, so loadTemplate falls back to the BUNDLED snapshot and the suite is
-// independent of local machine state.
+// Every child gets the live-template cache pointed at a path the driver owns,
+// holding a cache in the shape a real headless capture writes. Two things at
+// once: the suite stays independent of local machine state, AND it runs in the
+// configuration dario actually runs in.
 //
-// Without this, running the proxy (or the bench, or a bake) refreshes
-// ~/.dario/cc-template.live.json with a HEADLESS capture, which omits the
-// interactive-only tools CC never sends from `--print`. Three suites then fail
-// on a machine where dario has recently run and pass everywhere else:
-// tool-advertise-respects-client, template-interactive-tools and
-// issue-29-tool-translation. Observed for real, not hypothesised.
+// It used to point at a path that did not exist, so loadTemplate always fell
+// back to the BUNDLED snapshot. That covered the first half and abandoned the
+// second, and the abandoned half is where the bugs were: a live cache holding
+// a fraction of the bundle's tools is the production configuration on every
+// machine with CC installed, and it is exactly the configuration the tool-union
+// regression survived in. A suite that only ever sees the bundle cannot test
+// how live and bundle combine, because it never combines them.
 //
-// dario#867 closed the write half of this — the tests no longer POISON the
-// operator's cache. This is the read half: they must not DEPEND on it either.
-// A test whose result changes because you happened to start the proxy an hour
-// ago is not measuring the code.
+// The old comment recorded three suites — tool-advertise-respects-client,
+// template-interactive-tools and issue-29-tool-translation — as failing when a
+// real live cache was present, and treated that as a reason to hide the cache.
+// It was a reason to fix them. They pass against this fixture: the read-time
+// union (withBundledFallbacks) restores the interactive tools those suites
+// assert on, which is the behaviour they should have been pinning all along.
+//
+// dario#867 closed the write half of the isolation — the tests no longer
+// POISON the operator's cache. This is the read half: they must not depend on
+// whether you happened to start the proxy an hour ago either. A fixture the
+// driver writes is deterministic in a way both "no cache" and "whatever is in
+// ~/.dario" are not.
 //
 // Files that genuinely exercise the live-cache path (test/live-fingerprint.mjs)
 // assign their own override in-process, which wins over this inherited value.
 const suiteTemplateDir = mkdtempSync(join(tmpdir(), 'dario-suite-template-'));
 const suiteTemplateCache = join(suiteTemplateDir, 'cc-template.live.json');
+writeHeadlessLiveCache(suiteTemplateCache, join(__dirname, '..', 'dist', 'cc-template-data.json'));
 // The dir has to outlive every child, and the driver exits from four places
 // (bad TEST_CONCURRENCY, SIGINT, dropped-job bug, normal finish). An exit hook
 // is the one placement that covers all of them.
