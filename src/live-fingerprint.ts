@@ -263,7 +263,42 @@ export function promptVariantsOf(t: TemplateData): Record<string, string> {
 }
 
 /**
- * Carry the bundle's prompt variants onto a live-captured template.
+ * Rebuild the tool list on the BUNDLE's ordering, preferring live definitions.
+ *
+ * The bundle is deliberately a superset: PLATFORM_ONLY_TOOLS,
+ * INTERACTIVE_ONLY_TOOLS and CONFIG_SCOPED_TOOLS in cc-template.ts each exist
+ * so a headless auto-rebake cannot narrow it, and each records the regression
+ * that motivated it. A live capture is narrower by construction — headless,
+ * one platform, whatever CC's remote config served that minute — so taking its
+ * `tools` verbatim throws all three defenses away.
+ *
+ * Bundle order is the spine rather than live's, because the tools a headless
+ * capture drops sit at INTERIOR positions (AskUserQuestion at index 1,
+ * PowerShell at 17). buildCCRequest writes template order straight onto the
+ * wire in the no-client-declaration path (proxy.ts), so appending the
+ * survivors would emit an order no real CC sends.
+ */
+function unionToolsOnBundleOrder(
+  live: TemplateData['tools'] | undefined,
+  bundled: TemplateData['tools'] | undefined,
+): TemplateData['tools'] | null {
+  if (!Array.isArray(bundled) || bundled.length === 0) return null;
+  if (!Array.isArray(live) || live.length === 0) return bundled;
+  const liveByName = new Map(live.map((t) => [t.name, t]));
+  const bundledNames = new Set(bundled.map((t) => t.name));
+  // Live's definition wins where both carry the tool, matching how the prompt
+  // variants below resolve a collision: a fresher schema supersedes the bake.
+  const out = bundled.map((t) => liveByName.get(t.name) ?? t);
+  // A tool live has and the bundle does not is genuinely new — a CC that
+  // shipped after the last bake. Keeping it is the self-healing the live cache
+  // exists for. There is no known-good position for it, so it goes last.
+  for (const tool of live) if (!bundledNames.has(tool.name)) out.push(tool);
+  return out;
+}
+
+/**
+ * Carry the bundle's prompt variants and tool union onto a live-captured
+ * template.
  *
  * loadTemplate used to return the live cache verbatim, and a live capture
  * carries no variants — so a fresh cache silently reverted every
@@ -272,17 +307,41 @@ export function promptVariantsOf(t: TemplateData): Record<string, string> {
  * CC_SYSTEM_PROMPT_FABLE === CC_SYSTEM_PROMPT with a fresh cache present).
  * Variants the live template already has win, so a future per-model live
  * capture supersedes the bake without another change here.
+ *
+ * `tools` was the same bug one field over, and it outranks the variants one:
+ * the cache on the audit machine held 24 tools against the bundle's 34, and
+ * the missing ten were EXACTLY the three preservation sets, no remainder.
+ * Because cc-template.ts derives CC_NATIVE_NAMES_UNION from whatever
+ * loadTemplate returns, a client that declares one of the dropped tools stops
+ * identity-mapping and falls into the unmapped round-robin with junk args —
+ * the v4.8.93 regression, which the bake defends against and the runtime did
+ * not. Measured: the shared 24 were byte-identical and in the same order, so
+ * the live cache contributed nothing here and cost ten tools.
  */
-export function withBundledVariants(live: TemplateData): TemplateData {
+export function withBundledFallbacks(live: TemplateData): TemplateData {
   let bundled: TemplateData;
   try {
     bundled = loadBundledTemplate({ silent: true });
   } catch {
     return live; // bundle unreadable — better the base prompt than a throw
   }
+  const out: TemplateData = { ...live };
+
   const merged = { ...promptVariantsOf(bundled), ...promptVariantsOf(live) };
-  if (Object.keys(merged).length === 0) return live;
-  return { ...live, system_prompt_variants: merged };
+  if (Object.keys(merged).length > 0) out.system_prompt_variants = merged;
+
+  const tools = unionToolsOnBundleOrder(live.tools, bundled.tools);
+  if (tools) {
+    out.tools = tools;
+    // `tool_names` is a parallel array that every builder DERIVES rather than
+    // maintains (scrub-template.ts, capture-and-bake.mjs). Updating `tools`
+    // and leaving it is the documented divergence class — the shipped bundle
+    // once carried tool_names 30 against tools 33, and a consumer trusting
+    // tool_names as the inventory reads a different template than one reading
+    // tools.
+    out.tool_names = tools.map((tool) => tool.name);
+  }
+  return out;
 }
 
 /**
@@ -328,7 +387,7 @@ export function loadTemplate(_options?: { silent?: boolean }): TemplateData {
   if (cached) {
     const age = Date.now() - new Date(cached._captured).getTime();
     if (age < LIVE_TTL_MS) {
-      return withBundledVariants(cached);
+      return withBundledFallbacks(cached);
     }
     // Stale cache: prefer whichever of the live cache and the bundled
     // snapshot was captured more recently — do NOT blindly keep the cache.
@@ -342,7 +401,7 @@ export function loadTemplate(_options?: { silent?: boolean }): TemplateData {
     const bundled = loadBundledTemplate(_options);
     const cachedAt = new Date(cached._captured).getTime();
     const bundledAt = new Date(bundled._captured).getTime();
-    return Number.isFinite(bundledAt) && bundledAt > cachedAt ? bundled : withBundledVariants(cached);
+    return Number.isFinite(bundledAt) && bundledAt > cachedAt ? bundled : withBundledFallbacks(cached);
   }
   return loadBundledTemplate(_options);
 }

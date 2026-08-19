@@ -10,7 +10,7 @@
 // which is most of them. Verified before the fix: with a fresh cache present,
 // CC_SYSTEM_PROMPT_FABLE === CC_SYSTEM_PROMPT.
 
-import { promptVariantsOf, withBundledVariants, TEMPLATE_BASE_MODEL } from '../dist/live-fingerprint.js';
+import { promptVariantsOf, withBundledFallbacks, TEMPLATE_BASE_MODEL } from '../dist/live-fingerprint.js';
 
 let pass = 0, fail = 0;
 const check = (name, cond) => { if (cond) { console.log(`  OK ${name}`); pass++; } else { console.log(`  FAIL ${name}`); fail++; } };
@@ -48,10 +48,10 @@ header('promptVariantsOf — map plus the legacy single slot');
 }
 
 // ─────────────────────────────────────────────────────────────
-header('withBundledVariants — the live cache must not wipe baked variants');
+header('withBundledFallbacks — the live cache must not wipe baked variants');
 {
   // Reads the REAL bundle, so this also asserts the shipped bundle carries them.
-  const merged = withBundledVariants(liveish());
+  const merged = withBundledFallbacks(liveish());
   const v = promptVariantsOf(merged);
   check('bundle supplies fable to a variant-less live template', typeof v.fable === 'string' && v.fable.length > 0);
   check('bundle supplies opus-5', typeof v['opus-5'] === 'string' && v['opus-5'].length > 0);
@@ -61,7 +61,7 @@ header('withBundledVariants — the live cache must not wipe baked variants');
     Object.values(v).every((p) => p !== 'BASE'));
 
   // A future per-model live capture must supersede the bake without another change.
-  const withOwn = withBundledVariants(liveish({ system_prompt_variants: { 'opus-5': 'LIVE-WINS' } }));
+  const withOwn = withBundledFallbacks(liveish({ system_prompt_variants: { 'opus-5': 'LIVE-WINS' } }));
   check('a variant present on the live template wins over the bundle',
     promptVariantsOf(withOwn)['opus-5'] === 'LIVE-WINS');
   check('the other bundle variants still merge alongside it',
