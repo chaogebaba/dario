@@ -184,6 +184,32 @@ check(
   /child\.once\('exit', sweep\)[\s\S]{0,400}child\.kill\('SIGKILL'\)/.test(src),
 );
 
+// Everything above arms cleanup on the CHILD. All of it is cancelled by the
+// PARENT exiting first: the `exit` event is never delivered, and the 30s
+// backstop is unref'd precisely so it cannot hold the process open. So any
+// dario invocation shorter than its own capture stranded a dir — `doctor`,
+// `--version`, any CLI path that arms the background refresh and returns in
+// milliseconds, and every test that starts a proxy without noLiveCapture.
+// Verified A/B against a stub binary that outlives its parent: with the
+// tracking stubbed out, one dir per run; with it, none.
+check(
+  'the capture dir is registered for sweeping at mkdtemp, not only inside settle',
+  /captureHome = mkdtempSync\(join\(tmpdir\(\), 'dario-capture-'\)\);\s*\n\s*trackCaptureHome\(captureHome\);/.test(src),
+);
+check(
+  'a process-exit hook sweeps any capture dir still pending',
+  /process\.on\('exit',[\s\S]{0,300}rmSync\(dir, \{ recursive: true, force: true \}\)/.test(src),
+);
+check(
+  'the exit hook is armed once, not once per capture',
+  /if \(captureExitHookArmed\) return;\s*\n\s*captureExitHookArmed = true;/.test(src),
+);
+check(
+  'a normal sweep deregisters, so a long-lived proxy does not accumulate dead paths',
+  /releaseCaptureHome\(home\);/.test(src)
+  && /function releaseCaptureHome[\s\S]{0,200}PENDING_CAPTURE_HOMES\.delete\(home\)/.test(src),
+);
+
 // The MITM must never become a forwarding proxy: it answers locally.
 const mitmOk = /res\.writeHead\(200,\s*\{[\s\S]{0,200}text\/event-stream/.test(src)
   && !/fetch\(\s*['"`]https:\/\/api\.anthropic\.com/.test(src);

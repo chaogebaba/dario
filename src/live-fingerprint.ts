@@ -725,6 +725,45 @@ export function managedSettingsBaseUrlOverride(paths?: string[]): string | null 
   return null;
 }
 
+/**
+ * Capture dirs that exist right now, swept if the process exits before their
+ * own sweep runs.
+ *
+ * `settle` arms cleanup on the child's `exit` event with an unref'd 30s
+ * backstop. Both are cancelled by the parent exiting: the event is never
+ * delivered, and the backstop is unref'd precisely so it cannot hold the
+ * process open. So every dario invocation shorter than its own capture leaked
+ * one dir — `doctor`, `--version`, any CLI command that arms the background
+ * refresh and returns in milliseconds, plus every test that starts a proxy
+ * without `noLiveCapture`. Each dir holds a ~32KB .claude.json and a session
+ * transcript.
+ *
+ * Registered at mkdtemp rather than inside `settle`, which is what makes this
+ * cover the whole window: a parent that exits before `settle` ever runs would
+ * otherwise strand the dir with no handler armed at all.
+ *
+ * rmSync is synchronous, so it is legal in an exit handler — an async unlink
+ * would not be.
+ */
+const PENDING_CAPTURE_HOMES = new Set<string>();
+let captureExitHookArmed = false;
+
+function trackCaptureHome(home: string): void {
+  PENDING_CAPTURE_HOMES.add(home);
+  if (captureExitHookArmed) return;
+  captureExitHookArmed = true;
+  process.on('exit', () => {
+    for (const dir of PENDING_CAPTURE_HOMES) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
+    }
+    PENDING_CAPTURE_HOMES.clear();
+  });
+}
+
+function releaseCaptureHome(home: string): void {
+  PENDING_CAPTURE_HOMES.delete(home);
+}
+
 async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
   const managed = managedSettingsBaseUrlOverride();
   if (managed) {
@@ -779,6 +818,9 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
       const sweep = () => {
         if (!home) return;
         try { rmSync(home, { recursive: true, force: true }); } catch { /* noop */ }
+        // Drop it from the exit-hook set so a long-lived proxy does not
+        // accumulate one dead path per capture for the life of the process.
+        releaseCaptureHome(home);
       };
       if (child && child.exitCode === null && child.signalCode === null) {
         child.once('exit', sweep);
@@ -944,6 +986,7 @@ async function runCapture(timeoutMs: number): Promise<CapturedRequest | null> {
         // re-arms ANTHROPIC_MODEL below, which settings' ANTHROPIC_DEFAULT_*
         // entries were overriding the same way.
         captureHome = mkdtempSync(join(tmpdir(), 'dario-capture-'));
+        trackCaptureHome(captureHome);
         const env: NodeJS.ProcessEnv = {
           ...process.env,
           CLAUDE_CONFIG_DIR: captureHome,
