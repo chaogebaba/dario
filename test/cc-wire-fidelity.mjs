@@ -371,8 +371,13 @@ header('live: through the assembled proxy');
 
     // ── dario's own errors, through the real server
     const ERRORS2 = JSON.parse(readFileSync(join(DIR, 'errors.json'), 'utf8'));
+    // A path outside the allowlist answers 404 "Not found", which is what
+    // api.anthropic.com answers (probed 2026-08-20). dario said 403 until
+    // then — truer about what happened, but it told a client dario was not
+    // the API. The allowlist refusal is still on the verbose log.
+    const seenRequestIds = new Set();
     for (const [path, method, want] of [
-      ['/v1/nope', 'GET', 403],
+      ['/v1/nope', 'GET', 404],
       ['/v1/messages', 'GET', 405],
     ]) {
       const r = await fetch(BASE + path, { method });
@@ -381,7 +386,14 @@ header('live: through the assembled proxy');
         r.status === want && j?.type === 'error'
         && j.error?.type === ERRORS2.statusToType[String(want)]
         && typeof j.error?.message === 'string' && j.error.message.length > 0);
+      // The SDK reads the id off the header, never out of the body.
+      check(`${method} ${path} sends a request-id header matching the body`,
+        r.headers.get('request-id') === j?.request_id && typeof j?.request_id === 'string');
+      seenRequestIds.add(j?.request_id);
     }
+    const again = await (await fetch(BASE + '/v1/nope', { method: 'GET' })).json();
+    check('a second error mints a fresh request_id, not a per-process constant',
+      !seenRequestIds.has(again.request_id));
 
     // ── the full compaction capture, replayed
     const hdrs = { ...FULL.request.headers, authorization: 'Bearer sk-ant-oat01-replay' };

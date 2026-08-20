@@ -2493,9 +2493,37 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
   } else {
     prewarmModelCatalog(catalogDeps);
   }
-  const ERR_UNAUTH = anthropicErrorBody(401, 'Invalid or missing API key');
-  const ERR_FORBIDDEN = anthropicErrorBody(403, 'Path not allowed. Supported paths: POST /v1/messages, POST /v1/messages/count_tokens, POST /v1/chat/completions, GET /v1/models');
-  const ERR_METHOD = anthropicErrorBody(405, 'Method Not Allowed');
+  /**
+   * Serve one of dario's own errors the way api.anthropic.com serves one.
+   *
+   * Two things the body alone does not give you, both found by driving the
+   * official SDK at dario rather than by reading the JSON:
+   *
+   *   1. The SDK reads `err.requestID` off the `request-id` RESPONSE HEADER
+   *      (core/error.js: `this.requestID = headers?.get('request-id')`), never
+   *      out of the body. dario put its id in the body only, so every SDK user
+   *      reporting a dario-originated failure had `undefined` to quote.
+   *   2. These bodies used to be built once at startProxy time, so every 401
+   *      a process served carried the same request_id. The real API mints one
+   *      per response; two failures sharing an id cannot be told apart.
+   */
+  function sendError(res: ServerResponse, status: number, message: string, extra?: Record<string, string>): void {
+    const requestId = `req_dario_${randomUUID().replace(/-/g, '')}`;
+    res.writeHead(status, { ...JSON_HEADERS, 'request-id': requestId, ...extra });
+    res.end(anthropicErrorBody(status, message, requestId));
+  }
+  const MSG_UNAUTH = 'Invalid or missing API key';
+  const MSG_METHOD = 'Method Not Allowed';
+  // A path outside the allowlist answers exactly what api.anthropic.com
+  // answers for a path that does not exist — probed 2026-08-20:
+  //   404 {"type":"error","error":{"type":"not_found_error",
+  //        "message":"Not found"},"request_id":"req_…"}
+  // dario used to say 403 "Path not allowed" here, which is the truer account
+  // of what happened (the SSRF allowlist refused) but tells a client dario is
+  // not the API. Nothing CC does reaches this branch — it requests three paths
+  // and all three are allowlisted — so the distinction only ever reached an
+  // operator, and it still does, on the verbose log line below.
+  const MSG_NOT_FOUND = 'Not found';
 
   function checkAuth(req: IncomingMessage): boolean {
     return authenticateRequest(req.headers, apiKeyBuf);
@@ -2679,8 +2707,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         ts: new Date().toISOString(), req: requestCount,
         method: req.method ?? '', path: urlPath, status: 401, reject: 'auth',
       });
-      res.writeHead(401, JSON_HEADERS);
-      res.end(ERR_UNAUTH);
+      sendError(res, 401, MSG_UNAUTH);
       return;
     }
 
@@ -2689,8 +2716,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     // never raw affinity keys, request content, headers, or credentials.
     if (urlPath === '/routing/trace') {
       if (req.method !== 'GET') {
-        res.writeHead(405, JSON_HEADERS);
-        res.end(ERR_METHOD);
+        sendError(res, 405, MSG_METHOD);
         return;
       }
       const discloseRouting = shouldDiscloseHealthInternals({
@@ -2719,8 +2745,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     // includes account aliases and request fingerprints.
     if (urlPath === '/debug/requests') {
       if (req.method !== 'GET') {
-        res.writeHead(405, JSON_HEADERS);
-        res.end(ERR_METHOD);
+        sendError(res, 405, MSG_METHOD);
         return;
       }
       // Unlike /health, this route is never remotely disclosable: the debug
@@ -2935,7 +2960,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     // Allowlisted API paths — only these are proxied (prevents SSRF).
     // count_tokens forwards thin (no template injection) — see resolveProxyTarget.
     const route = resolveProxyTarget(urlPath, isOpenAI);
-    if (!route) { res.writeHead(403, JSON_HEADERS); res.end(ERR_FORBIDDEN); return; }
+    if (!route) {
+      if (verbose) console.error(`[dario] path not in the proxy allowlist, answering 404: ${req.method} ${urlPath}`);
+      sendError(res, 404, MSG_NOT_FOUND);
+      return;
+    }
     const targetBase = route.target;
     const isCountTokens = route.thin;
     // count_tokens never reaches buildCCRequest — it forwards thin, so nothing
@@ -2947,7 +2976,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     // help here (a count_tokens body carries no system block), so the headers
     // answer for themselves.
     const ccIdentityHeaders = hasCCIdentityHeaders(req.headers as Record<string, string | string[] | undefined>);
-    if (req.method !== 'POST') { res.writeHead(405, JSON_HEADERS); res.end(ERR_METHOD); return; }
+    if (req.method !== 'POST') { sendError(res, 405, MSG_METHOD); return; }
     // Monotonic request identity is separate from requestCount, which is a
     // completion counter and therefore repeats under concurrent requests.
     const debugRequestId = ++debugRequestCount;
@@ -3204,8 +3233,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
           totalBytes += buf.length;
           if (totalBytes > MAX_BODY_BYTES) {
             clearTimeout(bodyTimeout);
-            res.writeHead(413, JSON_HEADERS);
-            res.end(anthropicErrorBody(413, `Request exceeds the maximum size of ${MAX_BODY_BYTES / 1024 / 1024}MB`));
+            sendError(res, 413, `Request exceeds the maximum size of ${MAX_BODY_BYTES / 1024 / 1024}MB`);
             return;
           }
           chunks.push(buf);
@@ -4953,8 +4981,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         }
         console.error(`[dario] #${requestCount} upstream timeout after ${upstreamTimeoutMs / 1000}s`);
         if (!res.headersSent) {
-          res.writeHead(504, JSON_HEADERS);
-          res.end(anthropicErrorBody(504, `Anthropic did not respond within ${upstreamTimeoutMs / 1000}s`));
+          sendError(res, 504, `Anthropic did not respond within ${upstreamTimeoutMs / 1000}s`);
         } else if (!res.writableEnded) {
           res.end();
         }
@@ -4968,8 +4995,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         // Log full error server-side, return generic message to client
         console.error('[dario] Proxy error:', sanitizeError(err));
         if (!res.headersSent) {
-          res.writeHead(502, JSON_HEADERS);
-          res.end(anthropicErrorBody(502, 'Failed to reach upstream API'));
+          sendError(res, 502, 'Failed to reach upstream API');
         } else if (!res.writableEnded) {
           res.end();
         }
