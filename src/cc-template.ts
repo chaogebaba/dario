@@ -1939,7 +1939,29 @@ export function buildCCRequest(
   const model = clientBody.model as string || 'claude-sonnet-5';
   const isHaiku = model.toLowerCase().includes('haiku');
   const messages = clientBody.messages as Array<Record<string, unknown>> || [];
-  const clientTools = clientBody.tools as Array<Record<string, unknown>> | undefined;
+  const declaredTools = clientBody.tools as Array<Record<string, unknown>> | undefined;
+  // A tool carrying a `type` field is executed by Anthropic's infrastructure,
+  // not by the client — web_search_20250305, bash_20250124, memory_20250818
+  // and friends. It has no input_schema and there is nothing to map: the
+  // client never sees a tool_use for it, only the server_tool_use and
+  // *_tool_result blocks the API generates.
+  //
+  // The name-based mapper below exists for client-executed tools and keys
+  // TOOL_MAP on the LOWERCASE name, which is exactly the shape a server tool's
+  // name has. Three of the seven collided (recorded 2026-08-20):
+  //
+  //   web_search -> WebSearch, and the advertise array grew 1 -> 33 tools
+  //   web_fetch  -> WebFetch, likewise
+  //   bash       -> Bash
+  //
+  // The other four survived only because their names happen not to appear in
+  // TOOL_MAP. The client's request came back asking IT to run the search.
+  // Split them out before any of that machinery sees them; they are appended
+  // verbatim once the advertise array is assembled.
+  const serverTools = declaredTools?.filter((t) => typeof t.type === 'string') ?? [];
+  const clientTools = serverTools.length > 0
+    ? (declaredTools as Array<Record<string, unknown>>).filter((t) => typeof t.type !== 'string')
+    : declaredTools;
   const stream = clientBody.stream ?? false;
 
   // ── Genuine Claude Code client → byte-faithful passthrough ──
@@ -2425,6 +2447,26 @@ export function buildCCRequest(
     // legacy tool-less shape, which they demonstrably accept.
     ccRequest.tools = CC_TOOL_DEFINITIONS;
     ccRequest.tool_choice = { type: 'none' };
+  }
+
+  // Server-executed tools go out exactly as the client declared them, after
+  // whatever the advertise branch produced. See the split at the top.
+  if (serverTools.length > 0) {
+    const advertised = Array.isArray(ccRequest.tools) ? ccRequest.tools as Array<Record<string, unknown>> : [];
+    // A client whose every tool is server-executed (the computer-use clients
+    // send exactly that: computer + bash + text_editor, all typed) gets its
+    // own array back, not a copy of it. `preserve tools` means the client's
+    // array is left alone, and the suite asserts that by identity.
+    ccRequest.tools = advertised.length === 0 && serverTools.length === declaredTools?.length
+      ? declaredTools
+      : [...advertised, ...serverTools];
+    // A client whose ONLY tools are server tools leaves clientTools empty, so
+    // the fable arm above sees a tool-less request and pins tool_choice:none.
+    // It isn't tool-less, and the pin would stop the search it asked for.
+    if ((ccRequest.tool_choice as { type?: string } | undefined)?.type === 'none'
+      && clientBody.tool_choice === undefined) {
+      delete ccRequest.tool_choice;
+    }
   }
 
   // Metadata

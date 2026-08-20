@@ -1,0 +1,520 @@
+{
+  "name": "web-search-server-tool",
+  "what": "CCs dedicated web-search turn. One SERVER tool (a `type` field, no input_schema), tool_choice, temperature, thinking disabled, no context_management, and a beta list with neither claude-code-20250219 nor extended-cache-ttl.",
+  "request": {
+    "method": "POST",
+    "url": "/v1/messages?beta=true",
+    "headerOrder": [
+      "Accept",
+      "Authorization",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.236 (external, cli)",
+      "x-claude-code-session-id": "00000000-0000-4000-8000-267e5fad08d1",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Linux",
+      "x-stainless-package-version": "0.112.1",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli"
+    },
+    "bodyKeyOrder": [
+      "model",
+      "messages",
+      "system",
+      "tools",
+      "tool_choice",
+      "metadata",
+      "max_tokens",
+      "thinking",
+      "temperature",
+      "stream"
+    ],
+    "billingFields": {
+      "cc_version": "2.1.236.d18",
+      "cc_entrypoint": "cli"
+    },
+    "systemBlocks": [
+      {
+        "type": "text",
+        "chars": 70,
+        "cacheControl": null,
+        "sha256": "43c5139020595fe7"
+      },
+      {
+        "type": "text",
+        "chars": 57,
+        "cacheControl": null,
+        "sha256": "2719b7a469d904b3"
+      },
+      {
+        "type": "text",
+        "chars": 57,
+        "cacheControl": null,
+        "sha256": "756ad293b04e1035"
+      }
+    ],
+    "tools": [
+      {
+        "name": "web_search",
+        "type": "web_search_20250305",
+        "serverExecuted": true,
+        "max_uses": 8,
+        "hasInputSchema": false
+      }
+    ],
+    "toolNames": [
+      "web_search"
+    ],
+    "messageShape": [
+      {
+        "role": "user",
+        "blocks": [
+          {
+            "type": "text",
+            "cacheControl": null
+          }
+        ]
+      }
+    ],
+    "scalars": {
+      "model": "claude-haiku-4-5-20251001",
+      "max_tokens": 32000,
+      "temperature": 1,
+      "stream": true
+    },
+    "nested": {
+      "thinking": {
+        "type": "disabled"
+      },
+      "tool_choice": {
+        "type": "tool",
+        "name": "web_search"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "contentType": "text/event-stream; charset=utf-8",
+    "headerNames": [
+      "anthropic-organization-id",
+      "anthropic-ratelimit-unified-5h-reset",
+      "anthropic-ratelimit-unified-5h-status",
+      "anthropic-ratelimit-unified-5h-utilization",
+      "anthropic-ratelimit-unified-7d-reset",
+      "anthropic-ratelimit-unified-7d-status",
+      "anthropic-ratelimit-unified-7d-utilization",
+      "anthropic-ratelimit-unified-fallback-percentage",
+      "anthropic-ratelimit-unified-overage-disabled-reason",
+      "anthropic-ratelimit-unified-overage-status",
+      "anthropic-ratelimit-unified-representative-claim",
+      "anthropic-ratelimit-unified-reset",
+      "anthropic-ratelimit-unified-status",
+      "anthropic-workspace-id",
+      "cache-control",
+      "cf-cache-status",
+      "cf-ray",
+      "connection",
+      "content-encoding",
+      "content-security-policy",
+      "content-type",
+      "date",
+      "request-id",
+      "server",
+      "strict-transport-security",
+      "traceresponse",
+      "transfer-encoding",
+      "vary",
+      "x-robots-tag"
+    ],
+    "sse": [
+      {
+        "event": "message_start",
+        "dataKeys": [
+          "type",
+          "message"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "ping",
+        "dataKeys": [
+          "type"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": false
+      },
+      {
+        "event": "message_delta",
+        "dataKeys": [
+          "type",
+          "delta",
+          "usage",
+          "context_management"
+        ],
+        "padded": true
+      },
+      {
+        "event": "message_stop",
+        "dataKeys": [
+          "type"
+        ],
+        "padded": true
+      }
+    ],
+    "bodyKeys": null,
+    "body": null
+  }
+}

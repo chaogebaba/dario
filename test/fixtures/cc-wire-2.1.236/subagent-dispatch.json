@@ -1,0 +1,706 @@
+{
+  "name": "subagent-dispatch",
+  "what": "The Explore subagent CC spawns for a Task. Billing block carries a third field, cc_is_subagent=true; system[1] is the Agent-SDK wording, not the plain CLI one; the tool list is a 32-tool subset.",
+  "request": {
+    "method": "POST",
+    "url": "/v1/messages?beta=true",
+    "headerOrder": [
+      "Accept",
+      "Authorization",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-app",
+      "x-claude-code-agent-id",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.236 (external, cli)",
+      "x-claude-code-session-id": "00000000-0000-4000-8000-267e5fad08d1",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Linux",
+      "x-stainless-package-version": "0.112.1",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "x-claude-code-agent-id": "a0dc2c428c8cfb963"
+    },
+    "bodyKeyOrder": [
+      "model",
+      "messages",
+      "system",
+      "tools",
+      "metadata",
+      "max_tokens",
+      "thinking",
+      "context_management",
+      "stream"
+    ],
+    "billingFields": {
+      "cc_version": "2.1.236.9ee",
+      "cc_entrypoint": "cli",
+      "cc_is_subagent": "true"
+    },
+    "systemBlocks": [
+      {
+        "type": "text",
+        "chars": 91,
+        "cacheControl": null,
+        "sha256": "478bf924ac7096a3"
+      },
+      {
+        "type": "text",
+        "chars": 94,
+        "cacheControl": {
+          "type": "ephemeral"
+        },
+        "sha256": "6c1afcd9232947a1"
+      },
+      {
+        "type": "text",
+        "chars": 4219,
+        "cacheControl": {
+          "type": "ephemeral"
+        },
+        "sha256": "0ed1732a8dd3ccfa"
+      }
+    ],
+    "tools": [
+      {
+        "name": "Bash",
+        "hasInputSchema": true
+      },
+      {
+        "name": "EnterWorktree",
+        "hasInputSchema": true
+      },
+      {
+        "name": "ExitWorktree",
+        "hasInputSchema": true
+      },
+      {
+        "name": "Monitor",
+        "hasInputSchema": true
+      },
+      {
+        "name": "Read",
+        "hasInputSchema": true
+      },
+      {
+        "name": "SendMessage",
+        "hasInputSchema": true
+      },
+      {
+        "name": "Skill",
+        "hasInputSchema": true
+      },
+      {
+        "name": "TaskStop",
+        "hasInputSchema": true
+      },
+      {
+        "name": "WebFetch",
+        "hasInputSchema": true
+      },
+      {
+        "name": "WebSearch",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__browser_batch",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__computer",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__file_upload",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__find",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__form_input",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__get_page_text",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__gif_creator",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__javascript_tool",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__list_connected_browsers",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__navigate",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__read_console_messages",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__read_network_requests",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__read_page",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__resize_window",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__select_browser",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__shortcuts_execute",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__shortcuts_list",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__switch_browser",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__tabs_close_mcp",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__tabs_context_mcp",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__tabs_create_mcp",
+        "hasInputSchema": true
+      },
+      {
+        "name": "mcp__claude-in-chrome__upload_image",
+        "hasInputSchema": true
+      }
+    ],
+    "toolNames": [
+      "Bash",
+      "EnterWorktree",
+      "ExitWorktree",
+      "Monitor",
+      "Read",
+      "SendMessage",
+      "Skill",
+      "TaskStop",
+      "WebFetch",
+      "WebSearch",
+      "mcp__claude-in-chrome__browser_batch",
+      "mcp__claude-in-chrome__computer",
+      "mcp__claude-in-chrome__file_upload",
+      "mcp__claude-in-chrome__find",
+      "mcp__claude-in-chrome__form_input",
+      "mcp__claude-in-chrome__get_page_text",
+      "mcp__claude-in-chrome__gif_creator",
+      "mcp__claude-in-chrome__javascript_tool",
+      "mcp__claude-in-chrome__list_connected_browsers",
+      "mcp__claude-in-chrome__navigate",
+      "mcp__claude-in-chrome__read_console_messages",
+      "mcp__claude-in-chrome__read_network_requests",
+      "mcp__claude-in-chrome__read_page",
+      "mcp__claude-in-chrome__resize_window",
+      "mcp__claude-in-chrome__select_browser",
+      "mcp__claude-in-chrome__shortcuts_execute",
+      "mcp__claude-in-chrome__shortcuts_list",
+      "mcp__claude-in-chrome__switch_browser",
+      "mcp__claude-in-chrome__tabs_close_mcp",
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "mcp__claude-in-chrome__tabs_create_mcp",
+      "mcp__claude-in-chrome__upload_image"
+    ],
+    "messageShape": [
+      {
+        "role": "user",
+        "blocks": [
+          {
+            "type": "text",
+            "cacheControl": null
+          },
+          {
+            "type": "text",
+            "cacheControl": null
+          },
+          {
+            "type": "text",
+            "cacheControl": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "scalars": {
+      "model": "claude-haiku-4-5-20251001",
+      "max_tokens": 32000,
+      "stream": true
+    },
+    "nested": {
+      "thinking": {
+        "budget_tokens": 31999,
+        "type": "enabled"
+      },
+      "context_management": {
+        "edits": [
+          {
+            "type": "clear_thinking_20251015",
+            "keep": "all"
+          }
+        ]
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "contentType": "text/event-stream; charset=utf-8",
+    "headerNames": [
+      "anthropic-organization-id",
+      "anthropic-ratelimit-unified-5h-reset",
+      "anthropic-ratelimit-unified-5h-status",
+      "anthropic-ratelimit-unified-5h-utilization",
+      "anthropic-ratelimit-unified-7d-reset",
+      "anthropic-ratelimit-unified-7d-status",
+      "anthropic-ratelimit-unified-7d-utilization",
+      "anthropic-ratelimit-unified-fallback-percentage",
+      "anthropic-ratelimit-unified-overage-disabled-reason",
+      "anthropic-ratelimit-unified-overage-status",
+      "anthropic-ratelimit-unified-representative-claim",
+      "anthropic-ratelimit-unified-reset",
+      "anthropic-ratelimit-unified-status",
+      "anthropic-workspace-id",
+      "cache-control",
+      "cf-cache-status",
+      "cf-ray",
+      "connection",
+      "content-encoding",
+      "content-security-policy",
+      "content-type",
+      "date",
+      "request-id",
+      "server",
+      "strict-transport-security",
+      "traceresponse",
+      "transfer-encoding",
+      "vary",
+      "x-robots-tag"
+    ],
+    "sse": [
+      {
+        "event": "message_start",
+        "dataKeys": [
+          "type",
+          "message"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "ping",
+        "dataKeys": [
+          "type"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_start",
+        "dataKeys": [
+          "type",
+          "index",
+          "content_block"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": false
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_delta",
+        "dataKeys": [
+          "type",
+          "index",
+          "delta"
+        ],
+        "padded": true
+      },
+      {
+        "event": "content_block_stop",
+        "dataKeys": [
+          "type",
+          "index"
+        ],
+        "padded": true
+      },
+      {
+        "event": "message_delta",
+        "dataKeys": [
+          "type",
+          "delta",
+          "usage",
+          "context_management"
+        ],
+        "padded": true
+      },
+      {
+        "event": "message_stop",
+        "dataKeys": [
+          "type"
+        ],
+        "padded": true
+      }
+    ],
+    "bodyKeys": null,
+    "body": null
+  }
+}

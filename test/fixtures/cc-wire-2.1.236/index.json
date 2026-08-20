@@ -30,7 +30,7 @@
     },
     {
       "name": "count-tokens",
-      "what": "POST /v1/messages/count_tokens \u2014 model, messages, tools only; no system, no metadata.",
+      "what": "POST /v1/messages/count_tokens — model, messages, tools only; no system, no metadata.",
       "file": "count-tokens.json",
       "method": "POST",
       "url": "/v1/messages/count_tokens?beta=true",
@@ -47,7 +47,7 @@
     },
     {
       "name": "api-hello-get",
-      "what": "api.anthropic.com's answer to GET /api/hello. The request here was issued by curl, not by CC \u2014 the fixture exists for the RESPONSE, which is what dario has to match.",
+      "what": "api.anthropic.com's answer to GET /api/hello. The request here was issued by curl, not by CC — the fixture exists for the RESPONSE, which is what dario has to match.",
       "file": "api-hello-get.json",
       "method": "GET",
       "url": "/api/hello",
@@ -76,13 +76,48 @@
       "method": "POST",
       "url": "/v1/messages?beta=true",
       "status": 200
+    },
+    {
+      "name": "image-tool-result",
+      "what": "Interactive CC after Read on a .png. The image arrives as an `image` block NESTED inside a tool_result content array, and CC puts a cache breakpoint on the tool_result carrying it.",
+      "file": "image-tool-result.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "subagent-dispatch",
+      "what": "The Explore subagent CC spawns for a Task. Billing block carries a third field, cc_is_subagent=true; system[1] is the Agent-SDK wording, not the plain CLI one; the tool list is a 32-tool subset.",
+      "file": "subagent-dispatch.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "web-search-server-tool",
+      "what": "CCs dedicated web-search turn. One SERVER tool (a `type` field, no input_schema), tool_choice, temperature, thinking disabled, no context_management, and a beta list with neither claude-code-20250219 nor extended-cache-ttl.",
+      "file": "web-search-server-tool.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200,
+      "full": "web-search-server-tool.full.json"
+    },
+    {
+      "name": "thinking-turn",
+      "what": "A main-loop turn whose assistant history carries thinking blocks, with thinking enabled at budget 31999 and context_management clearing them.",
+      "file": "thinking-turn.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
     }
   ],
   "probes": [
     {
       "name": "errors",
       "file": "errors.json",
-      "what": "api.anthropic.com's error envelopes, probed directly rather than provoked through CC \u2014 the statuses and the status-to-error.type table, cross-checked against docs.claude.com/en/api/errors."
+      "what": "api.anthropic.com's error envelopes, probed directly rather than provoked through CC — the statuses and the status-to-error.type table, cross-checked against docs.claude.com/en/api/errors."
     }
-  ]
+  ],
+  "matrixRecordedAt": "2026-08-20",
+  "matrixHow": "Second pass, same CC 2.1.236 and same method, aimed at request kinds the first pass never produced: an image, a subagent dispatch, a server-tool web search, and a turn carrying thinking blocks."
 }
