@@ -28,7 +28,7 @@
 // Zero runtime dependencies. Stays true to the package's dep-hygiene invariant.
 
 import { spawn } from 'node:child_process';
-import { readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readdirSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { readTally } from './lib/read-tally.mjs';
 import { jsSuites, shellSuites } from './lib/suites.mjs';
 import { writeHeadlessLiveCache } from './lib/headless-live-cache.mjs';
@@ -78,6 +78,43 @@ writeHeadlessLiveCache(suiteTemplateCache, join(__dirname, '..', 'dist', 'cc-tem
 // is the one placement that covers all of them.
 process.on('exit', () => rmSync(suiteTemplateDir, { recursive: true, force: true }));
 const childEnv = { ...process.env, DARIO_LIVE_TEMPLATE_CACHE: suiteTemplateCache };
+
+// Every child gets its own HOME, and the operator's is never one of them.
+// 165 of the 175 suites set no home override of their own, so they inherited
+// the real one. Measured by running the whole suite with this root kept
+// rather than swept, ten of them write into `~/.dario`:
+//
+//   accounts/login.json        health-probe-e2e, passthrough-header-forwarding,
+//                              proxy-400-recovery, proxy-bind-contract,
+//                              queue-slot-leak
+//   cc-oauth-cache-v6.json     account-refresh-distributed-lock,
+//                              account-refresh-singleflight, admin-api,
+//                              lock-reply-validation, oauth-detector
+//
+// The credentials are synthetic — checked against the real store by hash, no
+// match on token or device id — so this was never a leak. It is the other
+// direction that matters: `accounts/login.json` is a routable seat, written
+// into the operator's live pool with a token that cannot authenticate, and
+// `cc-oauth-cache-v6.json` is their actual CC OAuth cache, overwritten on
+// every test run. Both are cleaned up on the happy path and only there; a
+// crash or a failing assertion leaves them, and reconcile does not care that
+// a test wrote them.
+//
+// One override at the driver covers every suite at once, which is the only
+// version of this fix that stays true as suites are added — patching the ten
+// leaves the 165th suite free to become the eleventh.
+//
+// Per suite rather than one shared dir: 3 to 8 of these run at a time and the
+// account store is keyed by alias, so a shared HOME would have them writing
+// each other's credential files. A suite that wants the real home still has
+// `process.env.HOME` before it spawns anything — nothing here stops it.
+const suiteHomeRoot = mkdtempSync(join(tmpdir(), 'dario-suite-homes-'));
+process.on('exit', () => rmSync(suiteHomeRoot, { recursive: true, force: true }));
+function sandboxHome(file) {
+  const dir = join(suiteHomeRoot, file.replace(/[^\w.-]/g, '_'));
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 // ── Runner ───────────────────────────────────────────────────────────
 // Concurrency defaults to half the cores, capped at 8. Each child is a
@@ -170,10 +207,13 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 function runSuite(file, argv) {
   const started = Date.now();
   return new Promise((resolve) => {
+    const home = sandboxHome(file);
     const proc = spawn(argv[0], argv.slice(1), {
       stdio: ['ignore', 'pipe', 'pipe'],
-      // Inherited env plus the pinned template cache (see above).
-      env: childEnv,
+      // Inherited env, the pinned template cache, and a HOME of this suite's
+      // own (see above). USERPROFILE too — `os.homedir()` reads that on win32
+      // and some of this tree's path building goes through it directly.
+      env: { ...childEnv, HOME: home, USERPROFILE: home },
       detached: true,
     });
     live.add(proc);
