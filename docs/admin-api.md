@@ -97,10 +97,22 @@ All endpoints accept the token as `authorization: Bearer <token>` or
 `GET /admin/accounts` is the monitoring surface: each entry carries the
 persisted metadata (`alias`, `scopes`, `expires_in_ms`) **plus live pool
 status whenever pool mode is active** — `util5h` / `util7d` utilization,
-representative `claim` (e.g. `five_hour`), routing `status`,
-`request_count`, and `consecutive_auth_failures`. It's the admin-token-gated
-equivalent of the proxy-key-gated `GET /accounts` pool view; a headless
-operator needs only the admin token to watch headroom.
+representative `claim` (e.g. `five_hour`), routing `status`, `serving`,
+`enabled`, `request_count`, and `consecutive_auth_failures`. It's the
+admin-token-gated equivalent of the proxy-key-gated `GET /accounts` pool
+view; a headless operator needs only the admin token to watch headroom.
+
+`serving` is the field to monitor on, not `status`. It is the router's own
+answer to whether the next unconstrained request would go to this account,
+so it cannot drift from routing behaviour the way a display string can —
+this surface used to report `unknown` for accounts the router was refusing
+to use, and had no way at all to say an account was switched off. `status`
+names the condition in the router's precedence when `serving` is false
+(`disabled`, `expired`, `auth-cooldown`, `quota-cooldown`) and otherwise
+carries `refresh-failed` — a live account whose renewal is broken — or
+whatever upstream last said about quota. A cool-down scoped to a single
+model family leaves `serving` true, because the account still serves every
+other model; `GET /accounts` names the blocked family in `cooldownScopes`.
 
 Read `measured_at` before you trust `util5h` / `util7d`. dario learns
 utilization only from the rate-limit headers on responses it proxies, so an
