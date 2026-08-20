@@ -1,0 +1,46 @@
+{
+  "name": "api-hello-get",
+  "what": "api.anthropic.com's answer to GET /api/hello. The request here was issued by curl, not by CC \u2014 the fixture exists for the RESPONSE, which is what dario has to match.",
+  "request": {
+    "method": "GET",
+    "url": "/api/hello",
+    "headerOrder": [
+      "Host",
+      "User-Agent",
+      "Accept"
+    ],
+    "headers": {
+      "user-agent": "curl/8.18.0",
+      "accept": "*/*"
+    },
+    "bodyKeyOrder": null,
+    "systemBlocks": "absent",
+    "toolNames": null,
+    "messageShape": null,
+    "scalars": {},
+    "nested": {}
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "headerNames": [
+      "cf-cache-status",
+      "cf-ray",
+      "connection",
+      "content-length",
+      "content-security-policy",
+      "content-type",
+      "date",
+      "server",
+      "server-timing",
+      "x-robots-tag"
+    ],
+    "sse": null,
+    "bodyKeys": [
+      "message"
+    ],
+    "body": {
+      "message": "hello"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "api-hello-head",
+  "what": "CC's voice-connectivity probe: HEAD /api/hello, a bare fetch under the embedded runtime's default user-agent with no CC identity headers.",
+  "request": {
+    "method": "HEAD",
+    "url": "/api/hello",
+    "headerOrder": [
+      "Connection",
+      "User-Agent",
+      "Accept",
+      "Host",
+      "Accept-Encoding"
+    ],
+    "headers": {
+      "user-agent": "Bun/1.4.0",
+      "accept": "*/*"
+    },
+    "bodyKeyOrder": null,
+    "systemBlocks": "absent",
+    "toolNames": null,
+    "messageShape": null,
+    "scalars": {},
+    "nested": {}
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "headerNames": [
+      "cf-cache-status",
+      "cf-ray",
+      "connection",
+      "content-length",
+      "content-security-policy",
+      "content-type",
+      "date",
+      "server",
+      "server-timing",
+      "x-robots-tag"
+    ],
+    "sse": null,
+    "bodyKeys": null,
+    "body": null
+  }
+}

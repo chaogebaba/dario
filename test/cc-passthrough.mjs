@@ -169,7 +169,7 @@ header('passthrough — sub-agent body forwarded verbatim (#678 remote re-test)'
   check('client tool defs kept (no template substitution)', body.tools[0].description === 'SUBAGENT-CLIENT Read def');
 }
 
-header('passthrough — system verbatim, dario billing tag, deterministic stamps');
+header('passthrough — system verbatim, including the block dario used to overwrite');
 {
   const { body, toolMap, unmappedTools, genuineCC } = buildCCRequest(ccClientBody(), billingTag, cache, identity, {});
   check('genuineCC flag set', genuineCC === true);
@@ -177,7 +177,15 @@ header('passthrough — system verbatim, dario billing tag, deterministic stamps
   check('no unmapped tools (nothing round-robined)', unmappedTools.length === 0);
   const sys = body.system;
   check('system block count preserved', Array.isArray(sys) && sys.length === 3);
-  check('system[0] = dario billing tag (client tag replaced)', sys[0].text === billingTag && !sys[0].cache_control);
+  // dario used to stamp its own billingTag here. That tag is derived from the
+  // template capture, which is taken with `claude -p`, so a real interactive
+  // session went upstream claiming `cc_entrypoint=sdk-cli` while the same
+  // request forwarded the client's `user-agent: … (external, cli)`. Recorded
+  // off CC 2.1.236: client sends `…236.ce1; cc_entrypoint=cli;`, dario sent
+  // `…236.43f; cc_entrypoint=sdk-cli;`. The client's block is the true one.
+  check('system[0] = the CLIENT\'s billing tag, verbatim',
+    sys[0].text === ccClientBody().system[0].text && sys[0].text !== billingTag);
+  check('system[0] carries no breakpoint (client sent none)', !sys[0].cache_control);
   check('system[1] text VERBATIM client identity', sys[1].text === CLIENT_IDENTITY);
   check('system[2] text VERBATIM client prompt (no template prepend)', sys[2].text === CLIENT_PROMPT);
   check('template prompt NOT present anywhere', !JSON.stringify(sys).includes(CC_SYSTEM_PROMPT.slice(0, 60)));
@@ -199,7 +207,13 @@ header('passthrough — tools + messages verbatim');
   check('40KB tool_result NOT truncated', result.content.length === BIG_RESULT.length);
   check('client-specific tool_result fields kept', result.extra_client_field === 1);
   check('message text NOT scrubbed (Continue/Cline survive)', body.messages[0].content[0].text.includes('Continue') && body.messages[0].content[0].text.includes('Cline'));
-  check('client message cache_control stripped', body.messages[0].content[1].cache_control === undefined);
+  // CC plans its own cache layout across the turn; dario does not know which
+  // prefix CC intends to reuse. It used to strip every client breakpoint and
+  // re-place its own, which on a recorded /compact moved the one conversation
+  // breakpoint off messages[1] and onto messages[0] and messages[2] — 3
+  // breakpoints became 4.
+  check('client message cache_control kept where the client put it',
+    body.messages[0].content[1].cache_control?.type === 'ephemeral');
 }
 
 header('passthrough — top-level fields are the client\'s, identity is dario\'s');
@@ -226,18 +240,37 @@ header('passthrough outranks tool-mode flags (they exist for NON-CC clients)');
   check('mergeTools ignored for genuine CC', merged.genuineCC === true && merged.body.tools.length === 3);
 }
 
-header('passthrough + applyCcPromptCaching — 4-breakpoint budget holds');
+header('passthrough — the client\'s breakpoint layout survives intact');
 {
-  const { body } = buildCCRequest(ccClientBody(), billingTag, cache, identity, {});
-  applyCcPromptCaching(body, cache);
+  // The proxy no longer runs applyCcPromptCaching over a genuine-CC body (that
+  // helper is for clients dario dresses up as CC). What CC sent is what goes
+  // out, count and position both.
+  const client = ccClientBody();
+  const { body } = buildCCRequest(client, billingTag, cache, identity, {});
   const hasCC = (o) => !!(o && o.cache_control);
-  const sysBp = body.system.filter(hasCC).length;
-  const toolBp = body.tools.filter(hasCC).length;
-  const msgBp = body.messages.flatMap((m) => Array.isArray(m.content) ? m.content : []).filter(hasCC).length;
-  check('2 system breakpoints', sysBp === 2);
-  check('0 tool breakpoints', toolBp === 0);
-  check('2 conversation breakpoints (rolling + anchor)', msgBp === 2);
-  check('total = 4 (Anthropic max)', sysBp + toolBp + msgBp === 4);
+  const blocks = (b) => b.messages.flatMap((m) => Array.isArray(m.content) ? m.content : []);
+  const positions = (b) => [
+    ...b.system.map((s, i) => hasCC(s) ? `sys${i}` : null),
+    ...blocks(b).map((c, i) => hasCC(c) ? `msg${i}` : null),
+  ].filter(Boolean).join(',');
+
+  check('breakpoint positions identical to the client\'s',
+    positions(body) === positions(client));
+  check('breakpoint count identical to the client\'s',
+    body.system.filter(hasCC).length + blocks(body).filter(hasCC).length
+      === client.system.filter(hasCC).length + blocks(client).filter(hasCC).length);
+  check('no tool breakpoints invented', body.tools.filter(hasCC).length === 0);
+  check('still inside the Anthropic 4-breakpoint budget',
+    body.system.filter(hasCC).length + blocks(body).filter(hasCC).length <= 4);
+
+  // The one thing dario still rewrites: the TTL, when the operator forces one.
+  // Position is untouched — a forced TTL changes what a breakpoint means, not
+  // where it is.
+  const forced = buildCCRequest(ccClientBody(), billingTag, { type: 'ephemeral', ttl: '1h' }, identity, {});
+  check('forced ttl applied to the client\'s own breakpoints',
+    forced.body.system[1].cache_control.ttl === '1h');
+  check('forced ttl does not add or move breakpoints',
+    positions(forced.body) === positions(client));
 }
 
 header('non-CC clients keep the template pipeline');

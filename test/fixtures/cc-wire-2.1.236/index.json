@@ -1,0 +1,73 @@
+{
+  "ccVersion": "2.1.236",
+  "recordedAt": "2026-08-20",
+  "how": "MITM reverse proxy on ANTHROPIC_BASE_URL, real credentials, sandboxed HOME + CLAUDE_CONFIG_DIR; interactive session driven under tmux. See test/cc-wire-fidelity.mjs.",
+  "scrubbed": "device_id, account_uuid, session ids, absolute paths, email. A 900-line synthetic filler file used as bulk is collapsed to <<<FILLER x900>>>.",
+  "captures": [
+    {
+      "name": "quota-probe",
+      "what": "CC quota probe: 1-token non-streaming POST /v1/messages with no system block, fired to read the anthropic-ratelimit-* response headers.",
+      "file": "quota-probe.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "session-title",
+      "what": "Session title generator: structured-outputs request with output_config and temperature.",
+      "file": "session-title.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "main-loop",
+      "what": "Interactive main loop, first turn: 55 tools, 3 system blocks, streaming.",
+      "file": "main-loop.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "count-tokens",
+      "what": "POST /v1/messages/count_tokens \u2014 model, messages, tools only; no system, no metadata.",
+      "file": "count-tokens.json",
+      "method": "POST",
+      "url": "/v1/messages/count_tokens?beta=true",
+      "status": 200
+    },
+    {
+      "name": "compaction",
+      "what": "A real /compact. Ordinary main-loop system prompt; the summariser instruction is the LAST USER MESSAGE, not a separate system block.",
+      "file": "compaction.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200,
+      "full": "compaction.full.json"
+    },
+    {
+      "name": "api-hello-get",
+      "what": "api.anthropic.com's answer to GET /api/hello. The request here was issued by curl, not by CC \u2014 the fixture exists for the RESPONSE, which is what dario has to match.",
+      "file": "api-hello-get.json",
+      "method": "GET",
+      "url": "/api/hello",
+      "status": 200
+    },
+    {
+      "name": "api-hello-head",
+      "what": "CC's voice-connectivity probe: HEAD /api/hello, a bare fetch under the embedded runtime's default user-agent with no CC identity headers.",
+      "file": "api-hello-head.json",
+      "method": "HEAD",
+      "url": "/api/hello",
+      "status": 200
+    },
+    {
+      "name": "headless-sdk",
+      "what": "Headless claude -p: entrypoint sdk-cli, Claude Agent SDK identity at system[1].",
+      "file": "headless-sdk.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
+    }
+  ]
+}

@@ -10,10 +10,14 @@
 // paths CC actually requests and with the headers CC actually parses.
 //
 // The regression this pins: the detector used to require system[1] to start
-// with one of five hard-coded openers. CC v2.1.236 ships 20+ system prompts.
-// Eleven of the ones below failed that list — including the summariser behind
-// every `/compact`, which meant the transcript being summarised was scrubbed
-// of the very reminders it was supposed to preserve.
+// with one of five hard-coded openers. CC v2.1.236 ships 20+ system prompts,
+// and eleven of the ones below failed that list.
+//
+// Not `/compact`, though — an earlier version of this comment said so. A
+// recording of a real compaction (test/fixtures/cc-wire-2.1.236/) shows it
+// sends the ordinary main-loop system array with the summariser instruction as
+// the last user message, so the opener list matched it. That suite is the one
+// that argues from measurement; this one argues from the bundle.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';

@@ -1760,35 +1760,62 @@ export function dedupeToolsByName<T extends { name?: unknown }>(tools: T[]): T[]
 }
 
 /**
+ * Claude Code's own identity headers, as recorded off the wire from CC
+ * v2.1.236: `claude-cli/<version> (external, <entrypoint>)` plus `x-app: cli`.
+ * Both together — the user-agent alone is a one-line forgery, and `x-app` on
+ * its own is generic.
+ *
+ * This is the fallback signal for the one CC request that carries no system
+ * block at all, so `isGenuineCCClient`'s body test cannot see it.
+ */
+export function hasCCIdentityHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): boolean {
+  const get = (k: string): string => {
+    const v = headers[k] ?? headers[k.toLowerCase()];
+    return Array.isArray(v) ? String(v[0] ?? '') : String(v ?? '');
+  };
+  return /^claude-cli\/\d+\.\d+\.\d+ \(external, [^)]+\)$/.test(get('user-agent'))
+    && get('x-app') === 'cli';
+}
+
+/**
  * Does this request come from Claude Code itself?
  *
- * Two signals, in that order. `system[0]` must carry the
- * `x-anthropic-billing-header` block: CC emits it on every request and nothing
- * else generates one, so it is the positive test on its own.
+ * The positive signal is `system[0]` carrying the `x-anthropic-billing-header`
+ * block: CC emits it on every request that has a system prompt at all, and
+ * nothing else generates one.
  *
  * It used to also require `system[1]` to start with one of five known openers.
- * That coupled the predicate to a CC release. CC ships far more than five
- * system prompts — the v2.1.236 bundle has 20+, and eleven of the ones checked
- * failed the list, including the summariser behind every `/compact`. Each of
- * those was quietly rebuilt through the template instead of forwarded
- * byte-faithfully, and the transcript being summarised had its
- * `<system-reminder>` blocks scrubbed on the way. Enumerating CC's prompts is
- * not a maintainable discriminator; the billing block already is one.
+ * That coupled the predicate to a CC release: CC ships far more than five
+ * system prompts, and a custom `~/.claude/agents` definition puts
+ * operator-authored text there with no CC marker to key on, so every custom
+ * sub-agent rode the template path. Enumerating CC's prompts is not a
+ * maintainable discriminator; the billing block already is one.
  *
- * The second signal is negative and stays. A wrapper client that replays CC's
- * preamble while declaring its own identity (Kilo, Cline, Roo, Hermes, arnie,
- * hands) is not CC, and its tool schemas diverge enough that the byte-faithful
- * path would corrupt the calls — which is the whole reason detectTextToolClient
- * exists.
+ * The negative signal stays. A wrapper client that replays CC's preamble while
+ * declaring its own identity (Kilo, Cline, Roo, Hermes, arnie, hands) is not
+ * CC, and its tool schemas diverge enough that the byte-faithful path would
+ * corrupt the calls — which is the whole reason detectTextToolClient exists.
  *
- * This also closes the custom-agent gap. A `~/.claude/agents` definition puts
- * operator-authored text at system[1] with no CC marker to key on, so every
- * custom sub-agent used to ride the template path. It carries CC's billing
- * block and no foreign identity, so it is now recognised like any other CC
- * request.
+ * `headers` covers CC's quota probe, the one request with no `system` key:
+ *
+ *     POST /v1/messages?beta=true
+ *     {"model":"claude-haiku-4-5-20251001","max_tokens":1,
+ *      "messages":[{"role":"user","content":"quota"}],"metadata":{…}}
+ *
+ * CC fires it to read the `anthropic-ratelimit-*` response headers for one
+ * token of output. Without the header fallback it failed the body test and got
+ * the full template stapled on: 323 bytes became 28.5KB, `max_tokens` 1 became
+ * 64000, and 55 tool schemas came along — measured against a real CC 2.1.236
+ * capture. Callers with no headers to hand keep the body-only behaviour.
  */
-export function isGenuineCCClient(clientBody: Record<string, unknown>): boolean {
+export function isGenuineCCClient(
+  clientBody: Record<string, unknown>,
+  headers?: Record<string, string | string[] | undefined>,
+): boolean {
   const sys = clientBody.system;
+  if (sys === undefined) return headers ? hasCCIdentityHeaders(headers) : false;
   if (!Array.isArray(sys) || sys.length < 2) return false;
   const first = sys[0] as { text?: unknown } | undefined;
   if (typeof first?.text !== 'string' || !first.text.includes('x-anthropic-billing-header:')) return false;
@@ -1888,12 +1915,25 @@ export function normalizeInterruptedAssistantTurns(messages: Array<Record<string
   });
 }
 
+/**
+ * Keep a block's cache breakpoint exactly where the client put it, but honour
+ * an operator-forced TTL. Blocks with no `cache_control` are returned as-is —
+ * a forced TTL changes what a breakpoint means, never how many there are.
+ */
+function retagCacheControl(
+  block: Record<string, unknown>,
+  cacheControl: CacheControl,
+): Record<string, unknown> {
+  if (!block.cache_control) return block;
+  return { ...block, cache_control: cacheControl };
+}
+
 export function buildCCRequest(
   clientBody: Record<string, unknown>,
   billingTag: string,
   cacheControl: CacheControl,
   identity: { deviceId: string; accountUuid: string; sessionId: string },
-  opts: { preserveTools?: boolean; hybridTools?: boolean; mergeTools?: boolean; noAutoDetect?: boolean; effort?: EffortValue; maxTokens?: number | 'client'; systemPrompt?: string; skipFields?: ReadonlySet<string>; honorClientThinking?: boolean; preserveOutputFormat?: boolean } = {},
+  opts: { preserveTools?: boolean; hybridTools?: boolean; mergeTools?: boolean; noAutoDetect?: boolean; effort?: EffortValue; maxTokens?: number | 'client'; systemPrompt?: string; skipFields?: ReadonlySet<string>; honorClientThinking?: boolean; preserveOutputFormat?: boolean; clientHeaders?: Record<string, string | string[] | undefined> } = {},
 ): { body: Record<string, unknown>; toolMap: Map<string, ToolMapping>; unmappedTools: string[]; unreachableTools: string[]; detectedClient?: string; genuineCC?: boolean } {
 
   const model = clientBody.model as string || 'claude-sonnet-5';
@@ -1910,41 +1950,52 @@ export function buildCCRequest(
   // the dario#678 re-test), drifted the tool schemas whenever the client's CC
   // version differed from the template's, and round-robin-mangled natives the
   // `--print`-mode template capture never sees (AskUserQuestion, plan-mode
-  // tools). Forward system blocks and tools verbatim. dario still owns:
-  //   - system[0]: dario's billing tag (consistent with dario's headers),
-  //   - metadata.user_id: dario's identity (the OAuth account is dario's,
-  //     not the client's),
-  //   - cache breakpoints: client stamps are stripped and re-placed (system
-  //     here, conversation in applyCcPromptCaching) so the 4-breakpoint
-  //     budget stays deterministic.
+  // tools). Forward system blocks and tools verbatim.
+  //
+  // dario owns exactly one field here: `metadata.user_id`, because the OAuth
+  // account being billed is dario's, not the client's.
+  //
+  // Two things it used to own and no longer does, both measured against a real
+  // CC 2.1.236 capture rather than reasoned about:
+  //
+  //   system[0], the billing block. dario stamped its own `billingTag` over
+  //   the client's. The tag is built from the template's capture, and the
+  //   template is captured with `claude -p`, so an interactive session went
+  //   upstream as `cc_version=2.1.236.43f; cc_entrypoint=sdk-cli;` when the
+  //   client had sent `…236.ce1; cc_entrypoint=cli;`. Worse, the same request
+  //   forwards the client's `user-agent: claude-cli/… (external, cli)`, so
+  //   header and body disagreed about which entrypoint sent it. The block CC
+  //   sends is the truthful one, and it is the block this predicate keys on —
+  //   recognising a client by a marker and then overwriting it is not
+  //   passthrough.
+  //
+  //   Cache breakpoints. dario stripped every client stamp and re-placed its
+  //   own: system's last two blocks here, the last two user turns in
+  //   applyCcPromptCaching. On the capture that relocated CC's single
+  //   conversation breakpoint from messages[1] to messages[0] and messages[2],
+  //   taking the request from 3 breakpoints to 4. CC plans its own cache
+  //   layout across the turn and knows which prefix it will reuse; dario does
+  //   not. Keep the client's placement. `cacheControl` is still honoured when
+  //   the operator forces a TTL (DARIO_CACHE_TTL_1H / _5M) — the ttl is
+  //   rewritten on the breakpoints CC chose, never moved to different ones.
+  //
   // Messages (apart from a required recovery user turn after an interrupted
   // assistant), thinking, effort, max_tokens, top-level key order: untouched — the
   // client is the authority on its own wire shape. Outranks the
   // tool-mode flags: those configure how NON-CC clients are dressed up as
   // CC, which a genuine CC client doesn't need.
-  if (isGenuineCCClient(clientBody)) {
+  if (isGenuineCCClient(clientBody, opts.clientHeaders)) {
     normalizeInterruptedAssistantTurns(messages, model);
-    const clientSystem = clientBody.system as Array<Record<string, unknown>>;
-    const system = clientSystem.map((b, i) => {
-      const copy = { ...b };
-      delete copy.cache_control;
-      if (i === 0) copy.text = billingTag;
-      return copy;
-    });
-    // Mirror CC's own placement: the identity + prompt blocks carry the
-    // stamps (the last two non-billing blocks; a 2-block system stamps just
-    // the last one).
-    for (let i = Math.max(1, system.length - 2); i < system.length; i++) {
-      system[i] = { ...system[i], cache_control: cacheControl };
+    const clientSystem = clientBody.system as Array<Record<string, unknown>> | undefined;
+    const body: Record<string, unknown> = { ...clientBody };
+    if (Array.isArray(clientSystem)) {
+      body.system = clientSystem.map((b) => retagCacheControl(b, cacheControl));
     }
     for (const msg of messages) {
-      if (Array.isArray(msg.content)) {
-        for (const block of msg.content as Array<Record<string, unknown>>) {
-          delete block.cache_control;
-        }
-      }
+      if (!Array.isArray(msg.content)) continue;
+      msg.content = (msg.content as Array<Record<string, unknown>>)
+        .map((block) => retagCacheControl(block, cacheControl));
     }
-    const body: Record<string, unknown> = { ...clientBody, system };
     body.metadata = {
       user_id: JSON.stringify({
         device_id: identity.deviceId,

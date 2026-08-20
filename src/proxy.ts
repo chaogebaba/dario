@@ -11,7 +11,7 @@ import { egressIsNotChangingIp, getEgressSnapshot, refreshEgressIpIfStale } from
 import { fetchPlan } from './quota.js';
 import { getServingProbe } from './serving-probe.js';
 import { darioVersion } from './version.js';
-import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
+import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, hasCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
 import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
@@ -465,6 +465,30 @@ function moveBetaBefore(flags: string[], flag: string, anchor: string): string[]
 }
 
 /**
+ * Headers whose ABSENCE is part of a client's fingerprint, so a template value
+ * must not fill them in when the client owns its own header set. Restricted to
+ * the ones real CC varies per endpoint — the rest of the template's static set
+ * is either universal or transport-owned.
+ */
+const OMISSION_SIGNIFICANT_HEADERS = new Set(['x-stainless-timeout', 'x-client-request-id']);
+
+/**
+ * Collapse repeats in an `anthropic-beta` value, keeping first position.
+ * Order is part of the fingerprint, so this must not sort.
+ */
+export function dedupeBetaFlags(beta: string): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const flag of beta.split(',')) {
+    const f = flag.trim();
+    if (!f || seen.has(f)) continue;
+    seen.add(f);
+    out.push(f);
+  }
+  return out.join(',');
+}
+
+/**
  * Model-conditional anthropic-beta set for current Claude Code. `base` is the
  * opus/sonnet order (TEMPLATE.anthropic_beta); each family is a transform of
  * it, ORDER included:
@@ -656,6 +680,7 @@ export function isForwardableUpstreamHeader(key: string): boolean {
     || key === 'retry-after'
     || key === 'x-should-retry'
     || key === 'anthropic-organization-id'
+    || key === 'anthropic-workspace-id'
     || key === 'anthropic-usage-limit';
 }
 
@@ -793,12 +818,23 @@ function orchestrationPatternsFor(preserveTags?: Set<string>): RegExp[] {
  * Pass `preserveTags` (a Set of tag names, or `Set(['*'])` for all) to
  * opt any tag out of the scrub. dario#78.
  */
-export function sanitizeMessages(body: Record<string, unknown>, preserveTags?: Set<string>): void {
+export function sanitizeMessages(
+  body: Record<string, unknown>,
+  preserveTags?: Set<string>,
+  clientHeaders?: Record<string, string | string[] | undefined>,
+): void {
   // Claude Code owns these tags as protocol messages (task callbacks, model
   // switches, token counters). Removing a tag-only final user turn exposes the
   // preceding assistant turn as an unsupported prefill on newer models. A
   // genuine client is already sent through buildCCRequest's byte-faithful path.
-  if (isGenuineCCClient(body)) return;
+  //
+  // `clientHeaders` matters for CC's bodies that carry no system block, which
+  // the body test alone reads as foreign. count_tokens is the live case: the
+  // scrub's trailing `.trim()` took one newline off the end of a 96KB file
+  // read, so the count CC got back was for a prompt it never sends — measured
+  // as a 2-byte delta against a real 2.1.236 capture. The endpoint exists to
+  // answer "how big is MY prompt"; editing the prompt first defeats it.
+  if (isGenuineCCClient(body, clientHeaders)) return;
 
   const messages = body.messages as Array<{ role: string; content: unknown }> | undefined;
   if (!messages) return;
@@ -2818,8 +2854,11 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     // the one status a CC client can observe without sending a message.
     // Answer it locally — never forwarded upstream, so the allowlist is intact.
     if (urlPath === '/api/hello' && (req.method === 'GET' || req.method === 'HEAD')) {
-      const body = JSON.stringify({ message: 'Hello, world!' });
-      res.writeHead(200, { ...JSON_HEADERS, ...CORS_RESPONSE_HEADERS });
+      // Body and status recorded off api.anthropic.com, not guessed: it
+      // answers `{"message":"hello"}` with `content-type: application/json`
+      // and no CORS headers, to both GET and HEAD.
+      const body = JSON.stringify({ message: 'hello' });
+      res.writeHead(200, JSON_HEADERS);
       res.end(req.method === 'HEAD' ? undefined : body);
       return;
     }
@@ -2850,6 +2889,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     if (!route) { res.writeHead(403, JSON_HEADERS); res.end(ERR_FORBIDDEN); return; }
     const targetBase = route.target;
     const isCountTokens = route.thin;
+    // count_tokens never reaches buildCCRequest — it forwards thin, so nothing
+    // on that path ever sets `genuineCCRequest` and CC's own identity headers
+    // were replaced with the template's. Recorded against real CC 2.1.236: the
+    // count_tokens call went out as `(external, sdk-cli)` while the
+    // /v1/messages calls from the same session went out as `(external, cli)`,
+    // because the template is captured with `claude -p`. The body test can't
+    // help here (a count_tokens body carries no system block), so the headers
+    // answer for themselves.
+    const ccIdentityHeaders = hasCCIdentityHeaders(req.headers as Record<string, string | string[] | undefined>);
     if (req.method !== 'POST') { res.writeHead(405, JSON_HEADERS); res.end(ERR_METHOD); return; }
     // Monotonic request identity is separate from requestCount, which is a
     // completion counter and therefore repeats under concurrent requests.
@@ -3312,7 +3360,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
           );
           stickyKey = selectSessionAffinitySignal(affinitySignals)?.key ?? null;
           // Strip orchestration tags from messages (Aider, Cursor, etc.)
-          sanitizeMessages(parsed, opts.preserveOrchestrationTags);
+          sanitizeMessages(parsed, opts.preserveOrchestrationTags, req.headers as Record<string, string | string[] | undefined>);
           // Tier-aware routing: under a forced --model, a Haiku-tier sub-agent
           // request routes to --fast-model (when set) instead of the forced
           // model, so CC's cheap sub-agents aren't silently upgraded. Inert
@@ -3416,6 +3464,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
                 skipFields,
                 honorClientThinking: opts.honorClientThinking ?? false,
                 preserveOutputFormat: opts.preserveOutputFormat ?? false,
+                clientHeaders: req.headers as Record<string, string | string[] | undefined>,
               },
             );
             // Prompt-cache the tools + conversation prefix (the system prompt
@@ -3424,7 +3473,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
             // every turn and burn the Max 5h/7d window — the cause of the
             // "sessions wall in minutes through dario but not CC" report.
             // Opt-out: DARIO_SKIP_FIELDS=prompt_cache.
-            if (!skipFields?.has('prompt_cache')) {
+            // Not on the genuine-CC path: CC placed its own breakpoints and
+            // buildCCRequest kept them. Running this over a CC request moved
+            // the conversation breakpoint off the turn CC chose and pushed the
+            // request from 3 breakpoints to 4 (measured against a real 2.1.236
+            // /compact capture).
+            if (!genuineCC && !skipFields?.has('prompt_cache')) {
               applyCcPromptCaching(ccBody, CACHE_EPHEMERAL);
             }
             // Record which path the request took, not just which foreign
@@ -3640,8 +3694,56 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
       if (passthrough || isCountTokens) {
         // Passthrough (and thin count_tokens): only add oauth beta,
         // forward client betas as-is — no template beta set.
-        beta = 'oauth-2025-04-20';
-        if (clientBeta) beta += ',' + clientBeta;
+        //
+        // Deduped: CC sends `oauth-2025-04-20` first in its own list, so the
+        // naive concat emitted `oauth-2025-04-20,oauth-2025-04-20,…` on every
+        // count_tokens call. A repeated flag is not a shape any real client
+        // produces, which makes it a free fingerprint.
+        beta = dedupeBetaFlags(clientBeta ? 'oauth-2025-04-20,' + clientBeta : 'oauth-2025-04-20');
+      } else if (genuineCCRequest && clientBeta) {
+        // Genuine Claude Code → forward its own list, verbatim and in order.
+        //
+        // betaForModel below reconstructs CC's set from the captured template
+        // and a per-family transform. That machinery exists to synthesise a
+        // list for clients that have none; for CC it can only ever approximate
+        // a list the client already sent us. Measured against real CC 2.1.236,
+        // the approximation was wrong in three ways at once: it added
+        // `claude-code-20250219` and `advanced-tool-use-2025-11-20` (2.1.236
+        // sends neither on the main loop), dropped `redact-thinking-2026-02-12`
+        // (it does), and moved `oauth-2025-04-20` from first to eighth. And the
+        // set is not even constant per model — across six consecutive requests
+        // from one session CC sent five different lists, because it varies them
+        // by request KIND: the main loop carries `extended-cache-ttl`,
+        // compaction does not, the title generator carries
+        // `structured-outputs-2025-12-15`, count_tokens carries four flags
+        // total. No per-model transform can produce that. The client can.
+        //
+        // The operator-facing knobs below still apply: they exist to work
+        // around upstream rejections and are not part of imitating CC.
+        beta = clientBeta;
+        // One thing the client cannot know about: dario's `[1m]` model suffix.
+        // A CC pointed at `claude-opus-5[1m]` is asking dario for the 1M
+        // context window, and CC does not ship the enabling flag because the
+        // suffix is dario's invention, not Anthropic's. Add it, in the slot
+        // real CC puts it in. Never for a plain model — CC does not send it
+        // there either, and the account may not be billed for it.
+        if (/\[1m\]$/i.test(requestModel) && !beta.split(',').includes(CONTEXT_1M_BETA)) {
+          beta = insertBetaAfter(beta.split(','), CONTEXT_1M_BETA, CLAUDE_CODE_BETA).join(',');
+        }
+        if (passthroughBetas.size > 0) {
+          const present = new Set(beta.split(','));
+          const toAdd = [...passthroughBetas].filter((b) => !present.has(b));
+          if (toAdd.length > 0) beta += ',' + toAdd.join(',');
+        }
+        beta = withForced1hBeta(beta);
+        const rejectedSet = unavailableBetas.get(poolAccount?.alias ?? ACCOUNT_KEY_APIKEY);
+        if (rejectedSet && rejectedSet.size > 0) {
+          beta = beta.split(',').filter((t) => t.length > 0 && !rejectedSet.has(t)).join(',');
+        }
+        if (context1mUnavailable.has(poolAccount?.alias ?? ACCOUNT_KEY_APIKEY)) {
+          beta = beta.split(',').filter((t) => t !== CONTEXT_1M_BETA).join(',');
+        }
+        beta = dedupeBetaFlags(beta);
       } else {
         // Beta set sourced from the live template (schema v2). Bundled
         // snapshots predating v3.19 leave anthropic_beta undefined, so fall
@@ -3744,7 +3846,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
       // 0 forwarded (dario#885). Spread AFTER staticHeaders so the client wins
       // over template values, and BEFORE the dario-owned block below so auth,
       // session rotation and the merged beta set still win over the client.
-      const forwardedIdentity = (passthrough || genuineCCRequest)
+      const forwardedIdentity = (passthrough || genuineCCRequest || (isCountTokens && ccIdentityHeaders))
         ? forwardClientCCIdentityHeaders(req.headers as Record<string, string | string[] | undefined>)
         : {};
       const headers: Record<string, string> = {
@@ -3754,13 +3856,40 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         'x-claude-code-session-id': outboundSessionId,
         'anthropic-version': passthrough ? (req.headers['anthropic-version'] as string || '2023-06-01') : '2023-06-01',
         'anthropic-beta': beta,
-        // Prefer the client's own when passthrough forwarded one: a genuine CC
-        // request already carries a real request id, and synthesising over it
-        // discards information for no gain. Falls back to a fresh uuid otherwise.
-        'x-client-request-id': forwardedIdentity['x-client-request-id'] ?? randomUUID(),
-        // CC sends 600 on first request per session. With rotation, every request is "first"
-        'x-stainless-timeout': forwardedIdentity['x-stainless-timeout'] ?? '600',
       };
+      // Two headers that used to be synthesised unconditionally. Neither is one
+      // real CC always sends: across a full recorded 2.1.236 session CC sent
+      // `x-client-request-id` on no request at all, and `x-stainless-timeout`
+      // on the /v1/messages calls but not on count_tokens. Inventing them for a
+      // client that IS Claude Code adds a header the real client omitted, which
+      // is the same kind of tell as dropping one it sent. For everyone else the
+      // template default stands — a non-CC client has no CC-shaped header set
+      // of its own to preserve.
+      const clientOwnsItsHeaders = passthrough || genuineCCRequest || (isCountTokens && ccIdentityHeaders);
+      // staticHeaders is the template's captured header set, so a header the
+      // template carries and this client omitted survives the spread. Real CC
+      // sends `x-stainless-timeout` on /v1/messages and not on count_tokens;
+      // the template is captured from a /v1/messages call, so every proxied
+      // count_tokens grew one. When the client owns its own header set, what
+      // it omitted is as much a part of that set as what it sent.
+      if (clientOwnsItsHeaders) {
+        for (const key of Object.keys(headers)) {
+          if (!OMISSION_SIGNIFICANT_HEADERS.has(key)) continue;
+          if (key in forwardedIdentity) continue;
+          delete headers[key];
+        }
+      }
+      if (forwardedIdentity['x-client-request-id']) {
+        headers['x-client-request-id'] = forwardedIdentity['x-client-request-id'];
+      } else if (!clientOwnsItsHeaders) {
+        headers['x-client-request-id'] = randomUUID();
+      }
+      if (forwardedIdentity['x-stainless-timeout']) {
+        headers['x-stainless-timeout'] = forwardedIdentity['x-stainless-timeout'];
+      } else if (!clientOwnsItsHeaders) {
+        // CC sends 600 on first request per session. With rotation, every request is "first"
+        headers['x-stainless-timeout'] = '600';
+      }
 
       const activatePoolAccount = (account: PoolAccount): void => {
         poolAccount = account;

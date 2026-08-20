@@ -1,0 +1,92 @@
+{
+  "name": "count-tokens",
+  "what": "POST /v1/messages/count_tokens — model, messages, tools only; no system, no metadata.",
+  "request": {
+    "method": "POST",
+    "url": "/v1/messages/count_tokens?beta=true",
+    "headerOrder": [
+      "Accept",
+      "Authorization",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.236 (external, cli)",
+      "x-claude-code-session-id": "00000000-0000-4000-8000-0000000000se",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Linux",
+      "x-stainless-package-version": "0.112.1",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,token-counting-2024-11-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli"
+    },
+    "bodyKeyOrder": [
+      "model",
+      "messages",
+      "tools"
+    ],
+    "systemBlocks": "absent",
+    "toolNames": [],
+    "messageShape": [
+      {
+        "role": "user",
+        "blocks": "string"
+      }
+    ],
+    "scalars": {
+      "model": "claude-haiku-4-5-20251001"
+    },
+    "nested": {}
+  },
+  "response": {
+    "status": 200,
+    "contentType": "application/json",
+    "headerNames": [
+      "anthropic-organization-id",
+      "anthropic-workspace-id",
+      "cf-cache-status",
+      "cf-ray",
+      "connection",
+      "content-encoding",
+      "content-security-policy",
+      "content-type",
+      "date",
+      "request-id",
+      "server",
+      "server-timing",
+      "transfer-encoding",
+      "vary",
+      "x-robots-tag"
+    ],
+    "sse": null,
+    "bodyKeys": [
+      "input_tokens"
+    ],
+    "body": {
+      "input_tokens": 22506
+    }
+  }
+}
