@@ -100,6 +100,13 @@ export interface AdminAccountLive {
   measuredAt: number;
   claim: string;
   status: string;
+  /**
+   * Whether the router would send the next unconstrained request here.
+   * Carried next to `status` so a headless operator never has to infer
+   * routability from a display string — which is how this surface came to
+   * report `unknown` for accounts the router was refusing to use.
+   */
+  serving: boolean;
   requestCount: number;
   /**
    * Consecutive auth failures on this account (dario#234's cool-down
@@ -536,6 +543,8 @@ export async function handleAdminRequest(
             measured_at: l.measuredAt,
             claim: l.claim,
             status: l.status,
+            serving: l.serving,
+            enabled: l.enabled !== false,
             request_count: l.requestCount,
             consecutive_auth_failures: l.consecutiveAuthFailures,
           } : {}),

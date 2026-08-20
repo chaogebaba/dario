@@ -14,7 +14,7 @@ import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
-import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
+import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinitySignals, selectSessionAffinitySignal, type ClaudeSessionIdentitySource, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, withoutRequestPreviews, type RequestRecord } from './analytics.js';
@@ -1534,6 +1534,44 @@ export class ProxyBindError extends Error {
   }
 }
 
+/**
+ * Live per-account status for `GET /admin/accounts`, extracted from the
+ * closure that used to build it inline.
+ *
+ * It was the only account-listing surface with no test seam, and the only one
+ * that reported nothing but `auth-cooldown`: a disabled account, an expired
+ * one and one in a quota cool-down all came back as whatever upstream last
+ * said about quota, usually `unknown`. Its own comment claimed it was "the
+ * same snapshot GET /accounts exposes", which is what stopped anyone checking.
+ * Both now read `accountAvailability`, so they are the same snapshot in fact
+ * and not just in the comment.
+ */
+export function adminAccountSnapshot(
+  accounts: readonly PoolAccount[],
+  now: number = Date.now(),
+): Map<string, AdminAccountLive> {
+  const snap = new Map<string, AdminAccountLive>();
+  for (const a of accounts) {
+    const availability = accountAvailability(a, now);
+    snap.set(a.alias, {
+      util5h: a.rateLimit.util5h,
+      util7d: a.rateLimit.util7d,
+      measuredAt: a.rateLimit.updatedAt,
+      claim: a.rateLimit.claim,
+      status: availability.status,
+      serving: availability.serving,
+      requestCount: a.requestCount,
+      // Raw streak, not just the cooldown boolean: a single 401 also shows
+      // `auth-cooldown` for 60s, indistinguishable from a genuinely dead
+      // refresh token by that field alone. The magnitude is what
+      // /admin/login/start-needed filters on (#913).
+      consecutiveAuthFailures: a.consecutiveAuthFailures,
+      enabled: a.enabled,
+    });
+  }
+  return snap;
+}
+
 export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> {
   const port = opts.port ?? DEFAULT_PORT;
   const host = opts.host ?? process.env.DARIO_HOST ?? DEFAULT_HOST;
@@ -2318,6 +2356,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
       }
       const enabled = accounts.filter((a) => a.enabled);
       if (enabled.length === 0) throw new Error('no enabled accounts available');
+      // Deliberately wider than `ineligibleReason`, and not a surface that
+      // reports on the pool — it is picking a bearer for one catalog fetch.
+      // A quota cool-down bears on /v1/messages, not on /v1/models, so
+      // excluding a rate-limited account here would fail a fetch that would
+      // have succeeded; and when nothing is usable it still tries, because a
+      // 401 that falls back to the baked list beats not asking at all.
       const usable = enabled.filter((a) => !isInAuthCooldown(a, now) && a.expiresAt > now);
       return (usable[0] ?? enabled[0]).accessToken;
     },
@@ -2476,27 +2520,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         },
         // Live per-account status so GET /admin/accounts reports headroom, not
         // just persisted metadata — the same snapshot GET /accounts exposes.
-        poolStatus: () => {
-          const snapNow = Date.now();
-          const snap = new Map<string, AdminAccountLive>();
-          for (const a of pool.all()) {
-            snap.set(a.alias, {
-              util5h: a.rateLimit.util5h,
-              util7d: a.rateLimit.util7d,
-              measuredAt: a.rateLimit.updatedAt,
-              claim: a.rateLimit.claim,
-              status: isInAuthCooldown(a, snapNow) ? 'auth-cooldown' : a.rateLimit.status,
-              requestCount: a.requestCount,
-              // Raw streak, not just the cooldown boolean: a single 401 also
-              // shows `auth-cooldown` for 60s, indistinguishable from a
-              // genuinely dead refresh token by that field alone. The magnitude
-              // is what /admin/login/start-needed filters on (#913).
-              consecutiveAuthFailures: a.consecutiveAuthFailures,
-              enabled: a.enabled,
-            });
-          }
-          return snap;
-        },
+        poolStatus: () => adminAccountSnapshot(pool.all()),
         // Audit trail for admin activity. Console always (headless operators
         // read container stdout; the JSON log file is opt-in), plus a structured
         // line when --log-file / DARIO_LOG_FILE is set.

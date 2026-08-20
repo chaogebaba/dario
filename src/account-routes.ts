@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { isValidAccountAlias } from './account-alias.js';
 import { removeAccount, renameAccountWithResult, setAccountEnabled, toggleAccountEnabled, type RenameAccountResult } from './account-store.js';
-import { authCooldownMs, isInAuthCooldown, type AccountPool } from './pool.js';
+import { accountAvailability, authCooldownMs, isInAuthCooldown, type AccountPool } from './pool.js';
 import { fetchQuota, type QuotaSnapshot } from './quota.js';
 
 // Two routes read a body now — rename and the explicit enabled-state set —
@@ -128,6 +128,7 @@ async function readJsonBody(
 function accountStatus(pool: AccountPool): Record<string, unknown> {
   const now = Date.now();
   const accounts = pool.all().map((account) => {
+    const availability = accountAvailability(account, now);
     const inCooldown = isInAuthCooldown(account, now);
     const quotaCooldowns = Object.entries(account.rateLimitCooldowns)
       .filter(([, cooldown]) => cooldown.until > now);
@@ -139,15 +140,8 @@ function accountStatus(pool: AccountPool): Record<string, unknown> {
       util5h: account.rateLimit.util5h,
       util7d: account.rateLimit.util7d,
       claim: account.rateLimit.claim,
-      status: !account.enabled
-        ? 'disabled'
-        : inCooldown
-        ? 'auth-cooldown'
-        : quotaCooldowns.length > 0
-        ? 'quota-cooldown'
-        : account.refreshError
-        ? 'refresh-failed'
-        : account.rateLimit.status,
+      status: availability.status,
+      serving: availability.serving,
       requestCount: account.requestCount,
       expiresInMs: Math.max(0, account.expiresAt - now),
       expiresAt: account.expiresAt,

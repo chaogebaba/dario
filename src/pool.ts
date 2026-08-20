@@ -315,6 +315,82 @@ export function blockedSummary(verdict: PoolVerdict): string {
   return reasons.map((r) => `${blockedBy[r]} ${REASON_PHRASE[r]}`).join(', ');
 }
 
+/**
+ * The fields a per-account status line reads, on top of the router's.
+ *
+ * `rateLimit.status` is the last thing upstream said about this account's
+ * quota; `refreshError` is the last thing the refresh loop said about its
+ * credentials. Neither is a routing input — both are things the operator
+ * wants on the row — which is why this type is wider than `EligibilityFields`
+ * rather than the same type gaining two optional fields.
+ */
+export interface AccountStatusFields extends EligibilityFields {
+  refreshError?: string;
+  rateLimit: { status: string };
+}
+
+/**
+ * What one account looks like to every surface that lists accounts.
+ *
+ * `poolVerdict` answers "can the pool serve"; this answers "can this account
+ * serve, and what do we call its condition" — the per-row question `GET
+ * /accounts`, `GET /admin/accounts` and the TUI's Accounts tab each used to
+ * answer for themselves. They disagreed with the router in four ways: an
+ * expired account was listed as `unknown` (the never-measured status, which
+ * the TUI renders as no status at all) while the router refused to route to
+ * it; so was one expiring inside select()'s 30s window; the admin API omitted
+ * `disabled`, `expired` and the quota cool-downs altogether, so a headless
+ * operator could not tell a switched-off account from a serving one; and an
+ * expired token that had already provoked its 401 was reported as
+ * `auth-cooldown`, which is the precedence `ineligibleReason` documents at
+ * length and inverts here — sending the operator after a transient blip
+ * instead of the credential they have to replace.
+ *
+ * `serving` is the router's own answer, carried alongside the label so a
+ * consumer never has to infer routability from a display string again.
+ */
+export interface AccountAvailability {
+  /**
+   * Whether `select()` would route to this account right now, for a request
+   * with no model-family constraint. A cool-down scoped to one family leaves
+   * this true — the account still serves everything else — and the blocked
+   * family is in the caller's own `cooldownScopes`.
+   */
+  serving: boolean;
+  /** Why not, in the router's precedence. Null when serving. */
+  blockedBy: IneligibleReason | null;
+  /** The one status string every per-account surface shows. */
+  status: string;
+}
+
+/**
+ * Display names for the routing reasons. Only `rate-limited` differs from the
+ * reason itself: `quota-cooldown` is what `GET /accounts` has always sent and
+ * what the TUI's `.includes('cooldown')` colouring matches on, so the wire
+ * name stays put and the router keeps its own vocabulary.
+ */
+const STATUS_LABEL: Record<IneligibleReason, string> = {
+  disabled: 'disabled',
+  expired: 'expired',
+  'auth-cooldown': 'auth-cooldown',
+  'rate-limited': 'quota-cooldown',
+};
+
+export function accountAvailability(
+  account: AccountStatusFields,
+  now: number = Date.now(),
+  family?: string | null,
+): AccountAvailability {
+  const blockedBy = ineligibleReason(account, now, family);
+  if (blockedBy !== null) return { serving: false, blockedBy, status: STATUS_LABEL[blockedBy] };
+  // Serving, but the last refresh failed: the current token still works and
+  // the router will use it, and it will not be renewed when it runs out. A
+  // warning on a live account, not a block — which is why it ranks below
+  // every reason above and above the quota status below.
+  if (account.refreshError) return { serving: true, blockedBy: null, status: 'refresh-failed' };
+  return { serving: true, blockedBy: null, status: account.rateLimit.status };
+}
+
 export interface PoolStatus {
   accounts: number;
   healthy: number;

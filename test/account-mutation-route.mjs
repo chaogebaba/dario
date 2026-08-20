@@ -101,9 +101,14 @@ try {
     measured: true,
   }, 'sonnet', 60_000);
   const cooldownBody = await (await fetch(`${base}/accounts`)).json();
+  // A cool-down scoped to one family is not a block: the account still serves
+  // every other model, and `select()` with no family still picks it. The row
+  // used to flatten that to `quota-cooldown`, which reads as fully benched.
+  // The scope is what carries the news, and `serving` keeps the row honest.
   check('GET /accounts exposes model-scoped quota cooldowns',
-    cooldownBody.accounts?.[0]?.status === 'quota-cooldown'
-      && cooldownBody.accounts?.[0]?.cooldownScopes?.includes('sonnet'));
+    cooldownBody.accounts?.[0]?.cooldownScopes?.includes('sonnet')
+      && cooldownBody.accounts?.[0]?.status === 'rejected'
+      && cooldownBody.accounts?.[0]?.serving === true);
 
   await fetch(`${base}/quota`);
   await fetch(`${base}/quota`);
