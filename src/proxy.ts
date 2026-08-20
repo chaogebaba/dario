@@ -465,6 +465,55 @@ function moveBetaBefore(flags: string[], flag: string, anchor: string): string[]
 }
 
 /**
+ * The error envelope api.anthropic.com returns, for the errors dario answers
+ * itself.
+ *
+ * Recorded off the real API rather than reasoned about (and cross-checked
+ * against docs.claude.com/en/api/errors):
+ *
+ *   {"type":"error","error":{"type":"not_found_error","message":"Not found"},
+ *    "request_id":"req_011CeDdHwTnW4Q9FuQkaa4mj"}
+ *
+ * dario's own errors used a shape of their own — `{"error":"Forbidden",
+ * "message":"…"}` — which has neither `error.type` nor `error.message` where a
+ * client looks for them. Every Anthropic SDK, Claude Code included, reads
+ * `error.message` to show the user what went wrong and falls back to a generic
+ * string when it is absent, so a proxy-originated failure surfaced as no
+ * explanation at all. The status codes are unchanged; only the body is.
+ *
+ * `request_id` is marked `req_dario_…` on purpose. The field is what a client
+ * quotes in a bug report, and pointing Anthropic support at an id their logs
+ * have never seen is worse than pointing them at one that says where it came
+ * from. It still parses as the string every client expects.
+ */
+export function anthropicErrorType(status: number): string {
+  switch (status) {
+    case 400: return 'invalid_request_error';
+    case 401: return 'authentication_error';
+    case 402: return 'billing_error';
+    case 403: return 'permission_error';
+    case 404: return 'not_found_error';
+    case 405: return 'invalid_request_error';  // the real API's answer for a wrong method
+    case 408: return 'invalid_request_error';
+    case 409: return 'conflict_error';
+    case 413: return 'request_too_large';
+    case 429: return 'rate_limit_error';
+    case 504: return 'timeout_error';
+    case 529: return 'overloaded_error';
+    default: return status >= 500 ? 'api_error' : 'invalid_request_error';
+  }
+}
+
+/** Serialize one Anthropic-shaped error body. */
+export function anthropicErrorBody(status: number, message: string, requestId?: string): string {
+  return JSON.stringify({
+    type: 'error',
+    error: { type: anthropicErrorType(status), message },
+    request_id: requestId ?? `req_dario_${randomUUID().replace(/-/g, '')}`,
+  });
+}
+
+/**
  * Headers whose ABSENCE is part of a client's fingerprint, so a template value
  * must not fill them in when the client owns its own header set. Restricted to
  * the ones real CC varies per endpoint — the rest of the template's static set
@@ -2444,9 +2493,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
   } else {
     prewarmModelCatalog(catalogDeps);
   }
-  const ERR_UNAUTH = JSON.stringify({ error: 'Unauthorized', message: 'Invalid or missing API key' });
-  const ERR_FORBIDDEN = JSON.stringify({ error: 'Forbidden', message: 'Path not allowed. Supported paths: POST /v1/messages, POST /v1/messages/count_tokens, POST /v1/chat/completions, GET /v1/models' });
-  const ERR_METHOD = JSON.stringify({ error: 'Method not allowed' });
+  const ERR_UNAUTH = anthropicErrorBody(401, 'Invalid or missing API key');
+  const ERR_FORBIDDEN = anthropicErrorBody(403, 'Path not allowed. Supported paths: POST /v1/messages, POST /v1/messages/count_tokens, POST /v1/chat/completions, GET /v1/models');
+  const ERR_METHOD = anthropicErrorBody(405, 'Method Not Allowed');
 
   function checkAuth(req: IncomingMessage): boolean {
     return authenticateRequest(req.headers, apiKeyBuf);
@@ -3156,7 +3205,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
           if (totalBytes > MAX_BODY_BYTES) {
             clearTimeout(bodyTimeout);
             res.writeHead(413, JSON_HEADERS);
-            res.end(JSON.stringify({ error: 'Request body too large', max: `${MAX_BODY_BYTES / 1024 / 1024}MB` }));
+            res.end(anthropicErrorBody(413, `Request exceeds the maximum size of ${MAX_BODY_BYTES / 1024 / 1024}MB`));
             return;
           }
           chunks.push(buf);
@@ -4905,7 +4954,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         console.error(`[dario] #${requestCount} upstream timeout after ${upstreamTimeoutMs / 1000}s`);
         if (!res.headersSent) {
           res.writeHead(504, JSON_HEADERS);
-          res.end(JSON.stringify({ error: 'Upstream timeout', message: `Anthropic did not respond within ${upstreamTimeoutMs / 1000}s` }));
+          res.end(anthropicErrorBody(504, `Anthropic did not respond within ${upstreamTimeoutMs / 1000}s`));
         } else if (!res.writableEnded) {
           res.end();
         }
@@ -4920,7 +4969,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         console.error('[dario] Proxy error:', sanitizeError(err));
         if (!res.headersSent) {
           res.writeHead(502, JSON_HEADERS);
-          res.end(JSON.stringify({ error: 'Proxy error', message: 'Failed to reach upstream API' }));
+          res.end(anthropicErrorBody(502, 'Failed to reach upstream API'));
         } else if (!res.writableEnded) {
           res.end();
         }

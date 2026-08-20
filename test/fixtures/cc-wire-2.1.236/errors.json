@@ -1,0 +1,133 @@
+{
+  "name": "errors",
+  "what": "api.anthropic.com's error envelopes, probed directly on 2026-08-20 and cross-checked against docs.claude.com/en/api/errors. request_id values are scrubbed.",
+  "envelope": {
+    "type": "error",
+    "error": {
+      "type": "<per status>",
+      "message": "<human readable>"
+    },
+    "request_id": "req_<id>"
+  },
+  "statusToType": {
+    "400": "invalid_request_error",
+    "401": "authentication_error",
+    "402": "billing_error",
+    "403": "permission_error",
+    "404": "not_found_error",
+    "405": "invalid_request_error",
+    "409": "conflict_error",
+    "413": "request_too_large",
+    "429": "rate_limit_error",
+    "500": "api_error",
+    "504": "timeout_error",
+    "529": "overloaded_error"
+  },
+  "observed": [
+    {
+      "what": "POST /v1/messages with no max_tokens",
+      "status": 400,
+      "body": {
+        "type": "error",
+        "error": {
+          "type": "invalid_request_error",
+          "message": "max_tokens: Field required"
+        },
+        "request_id": "req_SCRUBBED"
+      }
+    },
+    {
+      "what": "POST /v1/messages with an unknown model",
+      "status": 404,
+      "body": {
+        "type": "error",
+        "error": {
+          "type": "not_found_error",
+          "message": "model: claude-nope-9"
+        },
+        "request_id": "req_SCRUBBED"
+      }
+    },
+    {
+      "what": "POST /v1/messages with an unrecognised top-level field",
+      "status": 400,
+      "body": {
+        "type": "error",
+        "error": {
+          "type": "invalid_request_error",
+          "message": "nonsense_field: Extra inputs are not permitted"
+        },
+        "request_id": "req_SCRUBBED"
+      }
+    },
+    {
+      "what": "POST /v1/messages with no credential",
+      "status": 401,
+      "body": {
+        "type": "error",
+        "error": {
+          "type": "authentication_error",
+          "message": "x-api-key header is required"
+        },
+        "request_id": "req_SCRUBBED"
+      }
+    },
+    {
+      "what": "GET /v1/nope \u2014 an unknown path",
+      "status": 404,
+      "body": {
+        "type": "error",
+        "error": {
+          "type": "not_found_error",
+          "message": "Not found"
+        },
+        "request_id": "req_SCRUBBED"
+      }
+    },
+    {
+      "what": "GET /v1/messages \u2014 right path, wrong method. Note the type is invalid_request_error, not a method-specific one, and the edge omits request_id.",
+      "status": 405,
+      "body": {
+        "type": "error",
+        "error": {
+          "type": "invalid_request_error",
+          "message": "Method Not Allowed"
+        }
+      }
+    },
+    {
+      "what": "POST /v1/messages with a 60MB body. Rejected at the edge: no top-level type, no request_id.",
+      "status": 413,
+      "body": {
+        "error": {
+          "type": "request_too_large",
+          "message": "Request exceeds the maximum size"
+        }
+      }
+    },
+    {
+      "what": "POST /v1/messages with malformed JSON",
+      "status": 400,
+      "body": {
+        "type": "error",
+        "error": {
+          "type": "invalid_request_error",
+          "message": "The request body is not valid JSON: unexpected end of data: line 1 column 2 (char 1)"
+        },
+        "request_id": "req_SCRUBBED"
+      }
+    }
+  ],
+  "responseHeaders": {
+    "what": "Headers on a real 400. x-should-retry is present on errors and absent on 200s.",
+    "names": [
+      "anthropic-organization-id",
+      "anthropic-workspace-id",
+      "content-type",
+      "request-id",
+      "x-should-retry"
+    ],
+    "xShouldRetry": "false"
+  },
+  "statusToTypeNote": "404, 400, 401, 413 and 405 are observed on the wire; the rest come from docs.claude.com/en/api/errors. 405 is not in the published table \u2014 the real API answers a wrong method with invalid_request_error rather than a method-specific type."
+}

@@ -34,6 +34,7 @@ import {
 } from '../dist/cc-template.js';
 import {
   startProxy, isForwardableUpstreamHeader, dedupeBetaFlags,
+  anthropicErrorType, anthropicErrorBody,
 } from '../dist/proxy.js';
 
 let pass = 0, fail = 0;
@@ -54,9 +55,9 @@ const FULL = JSON.parse(readFileSync(join(DIR, 'compaction.full.json'), 'utf8'))
 // ======================================================================
 header('the corpus is what it claims to be');
 {
-  check(`index lists ${index.captures.length} captures and every file exists`,
-    index.captures.length >= 8
-    && index.captures.every((c) => existsSync(join(DIR, c.file))));
+  check(`index lists ${index.captures.length} captures + ${index.probes.length} probe(s), every file present`,
+    index.captures.length >= 9
+    && [...index.captures, ...index.probes].every((c) => existsSync(join(DIR, c.file))));
   check('every CC-issued capture came from CC 2.1.236',
     Object.values(SHAPES).filter((s) => s.request.method === 'POST')
       .every((s) => s.request.headers['user-agent']?.startsWith('claude-cli/2.1.236 ')));
@@ -261,6 +262,39 @@ header('response headers — forward what CC reads, drop the infrastructure');
 }
 
 // ======================================================================
+header('errors dario answers itself wear the API\'s envelope');
+{
+  const ERRORS = JSON.parse(readFileSync(join(DIR, 'errors.json'), 'utf8'));
+
+  // The status → type table, probed and cross-checked against the published
+  // list. A client that switches on error.type is switching on these.
+  for (const [status, type] of Object.entries(ERRORS.statusToType)) {
+    check(`${status} → ${type}`, anthropicErrorType(Number(status)) === type);
+  }
+  check('an unmapped 5xx is api_error', anthropicErrorType(503) === 'api_error');
+  check('an unmapped 4xx is invalid_request_error', anthropicErrorType(451) === 'invalid_request_error');
+
+  // Every observed real body must parse under the shape dario now emits: the
+  // envelope is `{type, error:{type, message}}`, and the two edge-served
+  // statuses (405, 413) legitimately omit request_id.
+  for (const obs of ERRORS.observed) {
+    check(`recorded ${obs.status} (${obs.what.slice(0, 44)}…) has error.type + error.message`,
+      typeof obs.body.error?.type === 'string' && typeof obs.body.error?.message === 'string');
+    check(`  …and error.type is the one the table gives for ${obs.status}`,
+      obs.body.error.type === ERRORS.statusToType[String(obs.status)]);
+  }
+
+  const body = JSON.parse(anthropicErrorBody(403, 'Path not allowed'));
+  check('dario\'s body has the top-level type discriminator', body.type === 'error');
+  check('dario\'s body puts the message where a client reads it',
+    body.error.message === 'Path not allowed' && body.error.type === 'permission_error');
+  check('dario\'s request_id says it came from dario, and still parses as one',
+    /^req_dario_[0-9a-f]{32}$/.test(body.request_id));
+  check('two errors do not share a request_id',
+    JSON.parse(anthropicErrorBody(403, 'x')).request_id !== JSON.parse(anthropicErrorBody(403, 'x')).request_id);
+}
+
+// ======================================================================
 header('SSE — the recorded event stream, as CC would see it');
 {
   const sse = SHAPES['compaction'].response.sse;
@@ -333,6 +367,20 @@ header('live: through the assembled proxy');
       } else {
         check('HEAD /api/hello has no body', text === '');
       }
+    }
+
+    // ── dario's own errors, through the real server
+    const ERRORS2 = JSON.parse(readFileSync(join(DIR, 'errors.json'), 'utf8'));
+    for (const [path, method, want] of [
+      ['/v1/nope', 'GET', 403],
+      ['/v1/messages', 'GET', 405],
+    ]) {
+      const r = await fetch(BASE + path, { method });
+      const j = await r.json().catch(() => null);
+      check(`${method} ${path} → ${want} with an Anthropic-shaped body`,
+        r.status === want && j?.type === 'error'
+        && j.error?.type === ERRORS2.statusToType[String(want)]
+        && typeof j.error?.message === 'string' && j.error.message.length > 0);
     }
 
     // ── the full compaction capture, replayed
