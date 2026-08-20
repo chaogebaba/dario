@@ -35,6 +35,7 @@
     "stress": "bun test/stress.mjs",
     "compat": "bun test/compat.mjs",
     "test:refresh-lock-race": "bun test/integration/dual-instance-race.mjs",
+    "test:mutation": "bun scripts/mutation-gate.mjs",
     "lint:pkg": "bun scripts/check-package-json.mjs",
     "drift:sdk": "bun scripts/check-sdk-drift.mjs",
     "drift:wire": "bun scripts/check-wire-drift.mjs",
@@ -79,6 +80,7 @@
     "bun": ">=1.4.0"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
     "@types/node": "^26.0.0",
     "typescript": "^5.7.0"
   },
