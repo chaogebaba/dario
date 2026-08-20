@@ -16,6 +16,17 @@ import {
   loadAccount,
   renameAccountWithResult,
 } from '../dist/accounts.js';
+import { detectCCOAuthConfig } from '../dist/cc-oauth-detect.js';
+
+// Warm the OAuth detector before anything is on a clock. doRefreshAccountToken
+// awaits detectCCOAuthConfig, which on a cold cache reads and scans the whole
+// installed Claude Code binary — 319 MB of it here. The runner hands every
+// suite a HOME of its own, so ~/.dario's cache is cold on every run and that
+// scan lands inside waitForFetches' budget: ~1.4s idle, 4-5s at
+// TEST_CONCURRENCY=12, over 20s in a burst. That is what made this file fail
+// once in a concurrent run and pass on its own. Nothing here asserts anything
+// about the scan, so memoize it first and let the budget cover the refresh.
+await detectCCOAuthConfig();
 
 let pass = 0, fail = 0;
 function check(label, cond) {
