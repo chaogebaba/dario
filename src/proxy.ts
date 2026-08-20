@@ -4680,6 +4680,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         let streamCacheReadTokens = 0;
         let streamCacheCreateTokens = 0;
         let streamThinkingChars = 0;
+        // Characters of generated output actually forwarded to the client.
+        // The only basis for costing a stream that never reached message_delta.
+        let streamOutputChars = 0;
         const streamPreview = new StreamingTextPreview();
         const analyticsDecoder = analytics ? new TextDecoder() : null;
         let analyticsBuffer = '';
@@ -4699,9 +4702,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
               const u = (e as { usage?: Record<string, number> }).usage;
               if (u?.output_tokens) streamOutputTokens = u.output_tokens;
             } else if (e.type === 'content_block_delta') {
-              const d = (e as { delta?: { type?: string; thinking?: string; text?: string } }).delta;
+              const d = (e as { delta?: { type?: string; thinking?: string; text?: string; partial_json?: string } }).delta;
               if (d?.type === 'thinking_delta' && typeof d.thinking === 'string') streamThinkingChars += d.thinking.length;
               if (d?.type === 'text_delta' && typeof d.text === 'string') streamPreview.append(d.text);
+              // Every character of generated output that crossed the wire, so
+              // a stream cut before message_delta can still be costed. See
+              // estimatedOutputTokens below.
+              for (const generated of [d?.text, d?.thinking, d?.partial_json]) {
+                if (typeof generated === 'string') streamOutputChars += generated.length;
+              }
             } else if (e.type === 'content_block_start') {
               const block = (e as { content_block?: { type?: string; name?: string } }).content_block;
               if (block?.type === 'tool_use' || block?.type === 'server_tool_use') {
@@ -4743,6 +4752,54 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         // parking this handler forever and leaking its queue slot — the
         // dario#905 wedge. See waitForClientDrain in src/stream-drain.ts.
         const waitForDrain = () => waitForClientDrain(res, upstreamAbort.signal);
+        /**
+         * Terminal frame for a stream that ended abnormally.
+         *
+         * Once 200 and the SSE content-type are on the wire there is no status
+         * code left to spend, and a bare `res.end()` writes the terminating
+         * chunk on a keep-alive socket — so a truncated response is
+         * byte-indistinguishable from a complete one at the HTTP, SSE and
+         * transport layers all three. An SDK only finds out when its
+         * accumulator notices `message_stop` never came; a raw consumer never
+         * finds out at all. Worse, the transport error a direct caller would
+         * have seen gets laundered by the proxy into a clean success.
+         *
+         * The API signals this condition on an already-200 stream with an
+         * `error` event (streaming docs: an `overloaded_error` arriving
+         * mid-stream), so dario says it the same way and clients need no
+         * dario-specific handling. OpenAI-shape clients get the terminator
+         * their SDKs actually wait on instead — the same error-chunk-plus-
+         * `[DONE]` pair the SSE-overflow path above already emits.
+         *
+         * The frame is the LAST thing written — no synthetic `message_stop`
+         * follows it. Whether api.anthropic.com sends one of its own after a
+         * mid-stream `error` is UNVERIFIED: the streaming docs show the error
+         * event in isolation and say nothing about what comes next, and no
+         * recording in test/fixtures/ has caught a real mid-stream error.
+         * Other gateways append one; dario deliberately does not, because
+         * inventing framing upstream never sent is the failure this whole
+         * response path exists to remove, and the error event alone is enough
+         * for an SDK to raise a typed error. What would settle it: a MITM
+         * capture of a genuine `overloaded_error` mid-stream — the same rig
+         * that produced test/fixtures/cc-wire-2.1.236/. If such a recording
+         * shows a trailing `message_stop`, add it here and drop the
+         * "does not invent a message_stop" assertion that guards this choice
+         * in test/stream-fault-injection.mjs.
+         *
+         * Inert on a healthy stream: only the abnormal-exit path calls this,
+         * so the byte-for-byte passthrough cc-wire-fidelity asserts is
+         * untouched.
+         */
+        const endStreamWithError = (status: number, message: string): void => {
+          if (clientDisconnected || res.writableEnded) return;
+          const type = anthropicErrorType(status);
+          if (isOpenAI) {
+            writeToClient(`data: ${JSON.stringify({ error: { message, type } })}\n\n`);
+            writeToClient('data: [DONE]\n\n');
+            return;
+          }
+          writeToClient(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`);
+        };
         let streamCompleted = false;
         let streamError: string | undefined;
         try {
@@ -4824,12 +4881,53 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
           // mid-stream error (e.g. a bare upstream socket reset) so the undici
           // socket is released now, not at GC (#642-audit). No-op if aborted.
           if (!upstreamAbort.signal.aborted) upstreamAbort.abort();
+          // Anything the mapper is still holding for a tool block that never
+          // got its content_block_stop is data upstream already sent. Flush it
+          // before the terminal frame instead of dropping it on the floor —
+          // the happy path does this after the loop, and an aborted stream is
+          // exactly when the buffered arguments matter most.
+          if (streamMapper) {
+            try {
+              const tail = streamMapper.end();
+              if (tail.length > 0) writeToClient(tail);
+            } catch { /* a mapper failure must not mask the stream error */ }
+          }
+          // A client that hung up is not an upstream failure: there is nobody
+          // left to tell, and its own abort is the signal it already has.
+          if (upstreamAbortReason !== 'client_closed') {
+            const timedOut = upstreamAbortReason === 'timeout';
+            endStreamWithError(
+              timedOut ? 504 : 502,
+              timedOut
+                ? `Anthropic stopped sending mid-stream; no data for ${upstreamTimeoutMs / 1000}s`
+                : 'Upstream stream ended before message_stop',
+            );
+          }
           if (poolAccount && upstream.status >= 200 && upstream.status < 300) {
             pool.releaseStickyLease(stickyLease);
             recordRelease('network');
           }
         }
         res.end();
+        // Output tokens for a stream that never reached message_delta.
+        //
+        // The authoritative count rides on message_delta, which a cut stream
+        // by definition never sees — so every truncated stream used to be
+        // booked at ZERO output tokens while upstream had generated, and
+        // charged for, real ones. That under-count is not noise: it is biased
+        // in one direction and it lands entirely on the traffic that failed,
+        // so the worse upstream behaves the more /analytics understates the
+        // burn. A rough number beats a wrong one, and the deltas dario
+        // actually forwarded are the one basis available.
+        //
+        // Four characters per token is the same approximation thinkingTokens
+        // already uses. It is an ESTIMATE, not a floor — real English runs
+        // near it but code and JSON tool arguments tokenize denser, so this
+        // can land either side of the true figure. `outputTokensEstimated`
+        // marks the record so nothing downstream mistakes it for a measured
+        // count; only the truncated case ever sets it.
+        const estimatedOutputTokens = streamOutputTokens === 0 && streamOutputChars > 0;
+        if (estimatedOutputTokens) streamOutputTokens = Math.ceil(streamOutputChars / 4);
         if (streamCompleted && poolAccount && upstream.status >= 200 && upstream.status < 300) {
           pool.clearAuthFailure(poolAccount.alias, observedAuthFailureEpoch);
           pool.confirmSticky(stickyLease);
@@ -4856,6 +4954,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
             thinkingTokens: Math.round(streamThinkingChars / 4),
             claim: rl.claim, util5h: rl.util5h, util7d: rl.util7d, overageUtil: rl.overageUtil,
             latencyMs: Date.now() - startTime, status: upstream.status, isStream: true, isOpenAI,
+            // Same verdict /debug/requests records below, so the two surfaces
+            // cannot disagree about whether this request succeeded.
+            streamTruncated: !streamCompleted && upstreamAbortReason !== 'client_closed',
+            outputTokensEstimated: estimatedOutputTokens,
             upstreamAttempts,
             ...previewFields(),
           });

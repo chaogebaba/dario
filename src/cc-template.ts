@@ -2847,6 +2847,42 @@ export function createStreamingReverseMapper(
   }
 
   /**
+   * Release every tool block still held for end-of-block translation, as
+   * passthrough deltas carrying the raw accumulated partial_json.
+   *
+   * Buffering swallows each input_json_delta on the promise of emitting one
+   * translated delta at content_block_stop. When that stop never arrives —
+   * upstream cut the stream, or ended the message with the block still open —
+   * the promise goes unkept and the arguments vanish. The client is left with
+   * a content_block_start whose input is `{}`: a well-formed, terminal, and
+   * completely wrong tool call, which is worse than an error because nothing
+   * downstream retries it. It reads as the model having called the tool with
+   * no arguments.
+   *
+   * Raw rather than translated on purpose: translation is what
+   * content_block_stop licenses, and without it we cannot know the JSON is
+   * complete. Passing through what upstream actually sent is the same
+   * fallback the 2MB cap above takes, and it leaves upstream's (broken)
+   * framing alone instead of inventing a content_block_stop nobody sent.
+   *
+   * Inert on a healthy stream: every block is deleted at its own
+   * content_block_stop, so the map is empty by the time this runs.
+   */
+  function flushBufferedBlocks(): string[] {
+    if (buffered.size === 0) return [];
+    const out: string[] = [];
+    for (const [idx, buf] of buffered) {
+      out.push(buildEvent('content_block_delta', {
+        type: 'content_block_delta',
+        index: idx,
+        delta: { type: 'input_json_delta', partial_json: buf.partial },
+      }));
+    }
+    buffered.clear();
+    return out;
+  }
+
+  /**
    * Process one complete SSE event group. Returns:
    *   - a string with one or more rewritten event groups separated
    *     by "\n\n" (no trailing blank line — the caller adds that)
@@ -3005,6 +3041,15 @@ export function createStreamingReverseMapper(
       );
     }
 
+    // Message is ending while tool blocks are still buffered — upstream never
+    // sent their content_block_stop. Release what we swallowed BEFORE the
+    // terminal event so the deltas stay in order; see flushBufferedBlocks.
+    if (type === 'message_delta' || type === 'message_stop') {
+      const flushed = flushBufferedBlocks();
+      if (flushed.length > 0) return [...flushed, eventText].join('\n\n');
+      return eventText;
+    }
+
     return eventText;
   }
 
@@ -3042,7 +3087,12 @@ export function createStreamingReverseMapper(
     },
     end(): Uint8Array {
       groupBuffer += decoder.decode();
-      const out = processBuffer(true);
+      let out = processBuffer(true);
+      // The stream stopped without any terminal event at all (a dead socket,
+      // not a message_stop), so nothing upstream ever licensed the flush.
+      // Release the held blocks here rather than discarding them.
+      const flushed = flushBufferedBlocks();
+      if (flushed.length > 0) out += flushed.join('\n\n') + '\n\n';
       return out.length > 0 ? encoder.encode(out) : new Uint8Array(0);
     },
   };

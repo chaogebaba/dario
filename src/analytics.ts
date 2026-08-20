@@ -36,6 +36,24 @@ export interface RequestRecord {
   status: number;
   isStream: boolean;
   isOpenAI: boolean;
+  /**
+   * A streaming response that ended before its terminal event. `status` is
+   * upstream's, and upstream said 200 before it broke — so without this flag
+   * a cut stream is booked as a success and errorRate under-reports every
+   * mid-stream failure. /debug/requests already records the truncation
+   * (`outcome: 'stream-error'`); this is what stops the two surfaces from
+   * disagreeing about the same request. Not set for a client-side hangup,
+   * which is not an upstream failure.
+   */
+  streamTruncated?: boolean;
+  /**
+   * `outputTokens` was derived from the characters dario forwarded rather
+   * than read off `message_delta`, because the stream was cut before that
+   * event arrived. An estimate, not a measurement — it can land either side
+   * of the true figure. Set only on a truncated stream; anything reporting
+   * exact usage should exclude these records rather than trust the number.
+   */
+  outputTokensEstimated?: boolean;
   /** Number of upstream dispatches used to complete this client request. */
   upstreamAttempts?: number;
   /** Bounded, redacted semantic previews for local TUI diagnostics. */
@@ -378,7 +396,8 @@ export class Analytics extends EventEmitter {
     const totalThinking = records.reduce((s, r) => s + r.thinkingTokens, 0);
     const cost = records.reduce((s, r) => s + estimateCost(r), 0);
     const avgLatency = records.reduce((s, r) => s + r.latencyMs, 0) / records.length;
-    const errors = records.filter(r => r.status >= 400).length;
+    // A truncated stream carries upstream's 200, so status alone misses it.
+    const errors = records.filter(r => r.status >= 400 || r.streamTruncated === true).length;
 
     const claims: Record<string, number> = {};
     const buckets: Record<BillingBucket, number> = {
