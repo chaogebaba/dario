@@ -118,7 +118,21 @@ check('torn final line is repaired before append', afterTorn.recent()[0]?.req ==
   });
   await big.flush();
   const written = (await readFile(bigFile, 'utf8')).trim();
-  check('escaped preview would have overrun the bound', 8192 * 6 * 2 > 32_768);
+  // Measured off the record that was actually written, not computed from the
+  // literals above. The old form was `check(..., 8192 * 6 * 2 > 32_768)` — an
+  // inequality over three constants, true at parse time, which cannot fail
+  // whatever the store does. It read as evidence that the cap is load-bearing
+  // and was evidence of nothing.
+  const uncapped = Buffer.byteLength(JSON.stringify({
+    ts: '2026-01-03T00:00:00.000Z', req: 1, method: 'POST', path: '/v1/messages',
+    model: 'claude-opus-5', initialAccount: 'seat', account: 'seat', status: 200,
+    latencyMs: 1, upstreamAttempts: 1, recoveryPasses: 0, failoverCount: 0,
+    retryReasons: ['x'.repeat(4000)], inputTokens: 1, outputTokens: 1,
+    cacheReadTokens: 0, cacheCreateTokens: 0,
+    inputPreview: '\u0001'.repeat(8192), outputPreview: '\u0001'.repeat(8192),
+  }));
+  check('escaped preview would have overrun the bound', uncapped > 32_768,
+    `${uncapped} bytes unescaped-capped`);
   check('written line is capped at MAX_LINE_BYTES', Buffer.byteLength(written) <= 32_768);
   const parsed = JSON.parse(written);
   check('capping drops previews, not diagnostics', parsed.req === 1 && parsed.status === 200);
