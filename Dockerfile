@@ -8,6 +8,11 @@ WORKDIR /app
 COPY package.json bun.lock tsconfig.json ./
 RUN bun install --frozen-lockfile
 COPY src ./src
+# `bun run build` ends by stamping a hash of src/ + tsconfig.json into
+# dist/.build-stamp.json, so the script that computes it has to be in the
+# build context. It was added to the build without being added here, and the
+# docker job that would have caught it was being skipped at the time.
+COPY scripts ./scripts
 RUN bun run build
 
 FROM oven/bun:canary-alpine AS runtime

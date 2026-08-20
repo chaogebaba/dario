@@ -244,6 +244,10 @@ function runSuite(file, argv) {
         code: timedOut ? 'timeout' : (code ?? 'signal'),
         out: failed ? `${extra ?? ''}${text}` : '',
         tally: readTally(text),
+        // Read alongside the tally and for the same reason: a passing suite's
+        // output is dropped here to keep peak memory flat, so anything the
+        // scorer needs has to be extracted before it goes.
+        skip: (text.match(/^SKIP: (.+)$/m) ?? [])[1] ?? null,
         ms: Date.now() - started,
       });
     };
@@ -300,6 +304,15 @@ async function worker() {
       r.code = 'no-assertions';
       r.out = `suite exited 0 but reported 0 assertions\n${r.out}`;
     }
+    // A suite that cannot run on this host says so, on its own line, and is
+    // scored as skipped rather than passed. The two guards above exist so a
+    // suite that exits without running cannot be counted as a pass, and a
+    // silent skip is exactly that — but `oauth-detector` genuinely needs a
+    // real CC install to scan, and on a hosted runner there is none. The
+    // marker has to be deliberate (`SKIP: <why>`) and skipped suites are
+    // listed by name in the summary, so this stays a declaration and does
+    // not become somewhere a broken suite can hide.
+    if (r.code === 0 && r.tally === null && r.skip) r.code = 'skipped';
     if (r.code === 0 && r.tally === null) {
       r.code = 'no-tally';
       r.out = `suite exited 0 but printed no assertion tally this runner can read.\nAdd a summary line — "N pass, M fail" is the majority spelling — so a suite\nthat exits without running cannot be scored as a pass.\n${r.out}`;
@@ -309,7 +322,7 @@ async function worker() {
     // its timing, so peak memory doesn't scale with suite count.
     results.push(r.code === 0 ? { file: r.file, code: 0, ms: r.ms } : r);
     process.stdout.write(
-      `  ${r.code === 0 ? 'ok  ' : 'FAIL'} ${r.file} (${r.ms}ms)\n`,
+      `  ${r.code === 0 ? 'ok  ' : r.code === 'skipped' ? 'skip' : 'FAIL'} ${r.file} (${r.ms}ms)\n`,
     );
   }
 }
@@ -319,7 +332,8 @@ const wallStart = Date.now();
 await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker));
 const wallMs = Date.now() - wallStart;
 
-const failed = results.filter(r => r.code !== 0).sort((a, b) => a.file.localeCompare(b.file));
+const skipped = results.filter(r => r.code === 'skipped').sort((a, b) => a.file.localeCompare(b.file));
+const failed = results.filter(r => r.code !== 0 && r.code !== 'skipped').sort((a, b) => a.file.localeCompare(b.file));
 
 // A driver that drops jobs must not report success. Nothing else checks
 // this: `passed`, `failed` and the summary are all derived from what the
@@ -337,8 +351,9 @@ for (const r of failed) {
 
 console.log(
   `\n${'='.repeat(70)}\n` +
-  `  ${passed}/${results.length} suites passed` +
+  `  ${passed}/${results.length - skipped.length} suites passed` +
   `${failed.length ? ` — ${failed.length} failed: ${failed.map(f => f.file).join(', ')}` : ''}\n` +
+  `${skipped.length ? skipped.map(r => `  skipped ${r.file}: ${r.skip}\n`).join('') : ''}` +
   `  ${(wallMs / 1000).toFixed(1)}s wall\n` +
   `${'='.repeat(70)}`,
 );
