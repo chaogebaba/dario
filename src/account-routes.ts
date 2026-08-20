@@ -1,12 +1,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { isValidAccountAlias } from './account-alias.js';
-import { removeAccount, renameAccountWithResult, toggleAccountEnabled, type RenameAccountResult } from './account-store.js';
+import { removeAccount, renameAccountWithResult, setAccountEnabled, toggleAccountEnabled, type RenameAccountResult } from './account-store.js';
 import { authCooldownMs, isInAuthCooldown, type AccountPool } from './pool.js';
 import { fetchQuota, type QuotaSnapshot } from './quota.js';
 
-const RENAME_BODY_LIMIT_BYTES = 8 * 1024;
-const RENAME_BODY_TIMEOUT_MS = 5_000;
+// Two routes read a body now — rename and the explicit enabled-state set —
+// so the bounds are named for mutations rather than for rename.
+const MUTATION_BODY_LIMIT_BYTES = 8 * 1024;
+const MUTATION_BODY_TIMEOUT_MS = 5_000;
 
 export interface QuotaCacheEntry {
   at: number;
@@ -17,8 +19,8 @@ export interface AccountRouteDependencies {
   pool: AccountPool;
   quotaCache: Map<string, QuotaCacheEntry>;
   quotaCacheMs: number;
-  renameBodyLimitBytes?: number;
-  renameBodyTimeoutMs?: number;
+  mutationBodyLimitBytes?: number;
+  mutationBodyTimeoutMs?: number;
   jsonHeaders: Record<string, string>;
   isLoopbackAddress(address: string | undefined): boolean;
   reconcile(): Promise<number>;
@@ -31,7 +33,7 @@ export interface AccountRouteDependencies {
 }
 
 type AccountMutation = {
-  action: 'delete' | 'rename' | 'toggle';
+  action: 'delete' | 'rename' | 'toggle' | 'enabled';
   alias: string | null;
 };
 
@@ -294,8 +296,8 @@ export async function handleAccountRoute(
     try {
       body = await readJsonBody(
         req,
-        deps.renameBodyLimitBytes ?? RENAME_BODY_LIMIT_BYTES,
-        deps.renameBodyTimeoutMs ?? RENAME_BODY_TIMEOUT_MS,
+        deps.mutationBodyLimitBytes ?? MUTATION_BODY_LIMIT_BYTES,
+        deps.mutationBodyTimeoutMs ?? MUTATION_BODY_TIMEOUT_MS,
         () => {
           if (!res.headersSent) {
             sendJson(res, 408, deps.jsonHeaders, { ok: false, error: 'rename request body timed out' });
@@ -337,14 +339,59 @@ export async function handleAccountRoute(
     return true;
   }
 
-  if (mutation?.action === 'toggle' && req.method === 'POST') {
+  // `POST /accounts/:alias/enabled` sets the state the caller names;
+  // `POST /accounts/:alias/toggle` flips whatever it finds. The set route
+  // exists because the flip is not idempotent: a client timeout on a request
+  // the server did apply, retried, inverts twice and lands back where it
+  // started — or lands opposite to what the operator saw, if the retry raced
+  // the original. There is no way for a flip to tell those apart, because the
+  // request does not say what state it wanted. Toggle stays for the TUI's
+  // single keypress and shares this handler; both go through the same
+  // per-alias lock, so a flip cannot read a state a set is about to replace.
+  if ((mutation?.action === 'toggle' || mutation?.action === 'enabled') && req.method === 'POST') {
     if (!requireLoopback(req, res, deps, 'account mutations are loopback-only')) return true;
     if (!isValidAccountAlias(mutation.alias)) {
       sendJson(res, 400, deps.jsonHeaders, { ok: false, error: 'invalid account alias' });
       return true;
     }
+
+    let desired: boolean | null = null;
+    if (mutation.action === 'enabled') {
+      let body: Record<string, unknown>;
+      try {
+        body = await readJsonBody(
+          req,
+          deps.mutationBodyLimitBytes ?? MUTATION_BODY_LIMIT_BYTES,
+          deps.mutationBodyTimeoutMs ?? MUTATION_BODY_TIMEOUT_MS,
+          () => {
+            if (!res.headersSent) {
+              sendJson(res, 408, deps.jsonHeaders, { ok: false, error: 'request body timed out' });
+            }
+          },
+        );
+      } catch (error) {
+        const bodyError = error instanceof RequestBodyError
+          ? error
+          : new RequestBodyError(400, 'invalid request body');
+        if (!res.headersSent) {
+          sendJson(res, bodyError.status, deps.jsonHeaders, { ok: false, error: bodyError.message });
+        }
+        return true;
+      }
+      // Strictly boolean. Accepting "true" or 1 would make the route's whole
+      // reason for existing — saying exactly which state you want — depend on
+      // a coercion the caller cannot see, and `Boolean('false')` is true.
+      if (typeof body.enabled !== 'boolean') {
+        sendJson(res, 400, deps.jsonHeaders, { ok: false, error: 'missing or non-boolean `enabled`' });
+        return true;
+      }
+      desired = body.enabled;
+    }
+
     try {
-      const updated = await toggleAccountEnabled(mutation.alias);
+      const updated = desired === null
+        ? await toggleAccountEnabled(mutation.alias)
+        : await setAccountEnabled(mutation.alias, desired);
       if (!updated) {
         sendJson(res, 404, deps.jsonHeaders, { ok: false, alias: mutation.alias });
         return true;
@@ -353,7 +400,11 @@ export async function handleAccountRoute(
       deps.quotaCache.delete(mutation.alias);
       deps.accountToggled?.(mutation.alias, updated.enabled === true);
       deps.probePlans();
-      if (deps.verbose) deps.log?.(`[dario] account "${mutation.alias}" ${updated.enabled ? 'enabled' : 'disabled'} via TUI`);
+      // The route, not "via TUI": the TUI is one caller of two now, and the
+      // log is the only record of which one asked.
+      if (deps.verbose) {
+        deps.log?.(`[dario] account "${mutation.alias}" ${updated.enabled ? 'enabled' : 'disabled'} via /${mutation.action}`);
+      }
       sendJson(res, 200, deps.jsonHeaders, { ok: true, alias: mutation.alias, enabled: updated.enabled });
     } catch (error) {
       sendJson(res, 500, deps.jsonHeaders, {
@@ -379,13 +430,15 @@ export async function handleAccountRoute(
 
 export function parseAccountMutationPath(path: string): AccountMutation | null {
   const rename = /^\/accounts\/([^/]+)\/rename$/.exec(path);
-  const toggle = rename ? null : /^(?:\/accounts\/([^/]+)\/toggle)$/.exec(path);
-  const remove = rename || toggle ? null : /^\/accounts\/([^/]+)$/.exec(path);
-  const encoded = rename?.[1] ?? toggle?.[1] ?? remove?.[1];
+  const toggle = rename ? null : /^\/accounts\/([^/]+)\/toggle$/.exec(path);
+  const enabled = rename || toggle ? null : /^\/accounts\/([^/]+)\/enabled$/.exec(path);
+  const remove = rename || toggle || enabled ? null : /^\/accounts\/([^/]+)$/.exec(path);
+  const encoded = rename?.[1] ?? toggle?.[1] ?? enabled?.[1] ?? remove?.[1];
   if (encoded === undefined) return null;
+  const action: AccountMutation['action'] = rename ? 'rename' : toggle ? 'toggle' : enabled ? 'enabled' : 'delete';
   try {
-    return { action: rename ? 'rename' : toggle ? 'toggle' : 'delete', alias: decodeURIComponent(encoded) || null };
+    return { action, alias: decodeURIComponent(encoded) || null };
   } catch {
-    return { action: rename ? 'rename' : toggle ? 'toggle' : 'delete', alias: null };
+    return { action, alias: null };
   }
 }

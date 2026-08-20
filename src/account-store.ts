@@ -79,13 +79,45 @@ export async function loadAccount(alias: string): Promise<AccountCredentials | n
   }
 }
 
+/**
+ * Put an account into a state the caller names, rather than the opposite of
+ * whatever it finds. Idempotent, which `toggleAccountEnabled` is not: a
+ * request that times out on the client and is retried lands in the state the
+ * operator asked for instead of inverting twice, or — worse — once.
+ *
+ * A request that asks for the state the account is already in writes nothing.
+ * Reconcile watches these files, so a no-op write is churn that reports itself
+ * as a change.
+ */
+export async function setAccountEnabled(
+  alias: string,
+  enabled: boolean,
+): Promise<AccountCredentials | null> {
+  return updateEnabled(alias, () => enabled);
+}
+
+/**
+ * Flip an account's enabled state. Kept for the TUI's single keypress, and
+ * implemented as a read-then-set under the same lock the set path uses, so
+ * the read cannot see a state a concurrent write is about to replace.
+ */
 export async function toggleAccountEnabled(alias: string): Promise<AccountCredentials | null> {
+  return updateEnabled(alias, (current) => current === false);
+}
+
+async function updateEnabled(
+  alias: string,
+  next: (current: boolean) => boolean,
+): Promise<AccountCredentials | null> {
   const path = accountFilePath(alias);
   if (!path) return null;
   return withAccountLocks([alias], async () => {
     const current = await loadAccount(alias);
     if (!current) return null;
-    const updated = { ...current, enabled: current.enabled === false };
+    // loadAccount normalizes the absent case, so this is a real boolean.
+    const enabled = next(current.enabled !== false);
+    if (enabled === (current.enabled !== false)) return current;
+    const updated = { ...current, enabled };
     await saveAccountWhileLocked(updated, path);
     return updated;
   });

@@ -35,7 +35,7 @@ export type AccountsAction =
   | { type: 'cancel-add' }
   | { type: 'delete'; alias: string; selectedIdx: number }
   | { type: 'rename'; oldAlias: string; newAlias: string }
-  | { type: 'toggle'; alias: string; selectedIdx: number };
+  | { type: 'toggle'; alias: string; enabled: boolean; selectedIdx: number };
 
 export interface AccountsState {
   loading: boolean;
@@ -145,14 +145,22 @@ export function reduceAccountsKey(state: AccountsState, key: Key): AccountsState
     if (!alias) return undefined;
     return { ...state, mode: 'edit-alias', editBuffer: alias, message: null, messageKind: null };
   }
-  if (key.name === 'printable' && key.ch?.toLowerCase() === 't' && !key.ctrl) {
-    const alias = state.accounts[state.selectedIdx]?.alias;
-    if (!alias) return undefined;
+  // Exact `t`, like every other key on this tab. It was the one matched
+  // case-insensitively, so shift-T — a plausible slip on a keyboard where the
+  // shift key is already down — put a deliberately benched account back into
+  // routing, and back into billing, with no confirm step in the way.
+  if (key.name === 'printable' && key.ch === 't' && !key.ctrl) {
+    const account = state.accounts[state.selectedIdx];
+    if (!account) return undefined;
     return {
       ...state,
       message: 'Updating account…',
       messageKind: 'info',
-      pendingAction: { type: 'toggle', alias, selectedIdx: state.selectedIdx },
+      // The state to move to, decided here off the row the operator is looking
+      // at, rather than left to the server to infer from what it finds.
+      // `enabled` is optional on the row and absent means on, which is why this
+      // is `=== false` and not `!`.
+      pendingAction: { type: 'toggle', alias: account.alias, enabled: account.enabled === false, selectedIdx: state.selectedIdx },
     };
   }
   return undefined;

@@ -39,6 +39,7 @@ import {
   replaceAccount,
   saveAccount,
   saveAccountWhileLocked,
+  setAccountEnabled,
   toggleAccountEnabled,
   isAccountCredentials,
   type AccountCredentials,
@@ -56,6 +57,7 @@ export {
   renameAccount,
   renameAccountWithResult,
   saveAccount,
+  setAccountEnabled,
   toggleAccountEnabled,
 } from './account-store.js';
 export type { AccountCredentials, RenameAccountResult } from './account-store.js';

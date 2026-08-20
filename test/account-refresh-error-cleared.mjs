@@ -83,7 +83,7 @@ const deps = {
   pool,
   quotaCache: new Map(),
   quotaCacheMs: 60_000,
-  renameBodyTimeoutMs: 50,
+  mutationBodyTimeoutMs: 50,
   jsonHeaders: { 'Content-Type': 'application/json' },
   isLoopbackAddress: () => true,
   reconcile: async () => {},

@@ -84,15 +84,15 @@ export class AccountsController {
       return;
     }
     if (action.type === 'toggle') {
-      void this.performToggle(ctx, action.alias, action.selectedIdx);
+      void this.performToggle(ctx, action.alias, action.enabled, action.selectedIdx);
       return;
     }
     void this.performRename(ctx, action.oldAlias, action.newAlias);
   }
 
-  private async performToggle(ctx: TabContext<AccountsState>, alias: string, selectedIdx: number): Promise<void> {
+  private async performToggle(ctx: TabContext<AccountsState>, alias: string, enabled: boolean, selectedIdx: number): Promise<void> {
     try {
-      const result = await ctx.client.toggleAccount(alias);
+      const result = await ctx.client.setAccountEnabled(alias, enabled);
       if (!result?.ok) {
         ctx.setState({ message: `Failed to update "${alias}".`, messageKind: 'error', mode: 'normal' });
         return;

@@ -26,6 +26,10 @@ check('rename accepts the exact action suffix',
   JSON.stringify(parseAccountMutationPath('/accounts/alpha/rename')) === JSON.stringify({ action: 'rename', alias: 'alpha' }));
 check('toggle accepts the exact action suffix',
   JSON.stringify(parseAccountMutationPath('/accounts/alpha/toggle')) === JSON.stringify({ action: 'toggle', alias: 'alpha' }));
+check('the explicit enabled route accepts the exact action suffix',
+  JSON.stringify(parseAccountMutationPath('/accounts/alpha/enabled')) === JSON.stringify({ action: 'enabled', alias: 'alpha' }));
+check('extra enabled path segments do not match',
+  parseAccountMutationPath('/accounts/alpha/enabled/anything') === null);
 check('malformed delete encoding is captured instead of thrown',
   parseAccountMutationPath('/accounts/%')?.alias === null);
 check('malformed rename encoding is captured instead of thrown',
@@ -55,7 +59,7 @@ const deps = {
   pool,
   quotaCache,
   quotaCacheMs: 60_000,
-  renameBodyTimeoutMs: 50,
+  mutationBodyTimeoutMs: 50,
   jsonHeaders: { 'Content-Type': 'application/json' },
   isLoopbackAddress: () => true,
   reconcile: async () => {
@@ -133,6 +137,47 @@ try {
   const enableBody = await enableRes.json();
   check('POST toggle enables the account again',
     enableRes.status === 200 && enableBody.enabled === true && pool.get('renamed')?.enabled === true);
+
+  // ── POST /accounts/:alias/enabled — say the state, don't flip it ──────
+  //
+  // The finding this route answers: a toggle cannot be retried. A client
+  // timeout on a request the server did apply inverts twice on retry and
+  // lands back where it started, and the request body carries nothing that
+  // would let the server tell a retry from a second deliberate press.
+  const setBody = async (alias, body) => {
+    const res = await fetch(`${base}/accounts/${alias}/enabled`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  const off1 = await setBody('renamed', { enabled: false });
+  check('POST enabled:false disables the account',
+    off1.status === 200 && off1.body.enabled === false && pool.get('renamed')?.enabled === false);
+  const off2 = await setBody('renamed', { enabled: false });
+  check('and asking for the same state again is a no-op, not an inversion',
+    off2.status === 200 && off2.body.enabled === false && pool.get('renamed')?.enabled === false);
+
+  // Five concurrent identical sets. A flip would end wherever the parity of
+  // the race left it; a set cannot.
+  await Promise.all(Array.from({ length: 5 }, () => setBody('renamed', { enabled: true })));
+  check('five concurrent identical sets all land in the state they named',
+    pool.get('renamed')?.enabled === true);
+
+  const noBody = await fetch(`${base}/accounts/renamed/enabled`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  check('a body with no `enabled` is refused rather than guessed at', noBody.status === 400);
+  // `Boolean('false')` is true, so a coerced string would do the opposite of
+  // what it says — on the one route whose entire purpose is saying so.
+  const stringy = await setBody('renamed', { enabled: 'false' });
+  check('a string is refused rather than coerced', stringy.status === 400);
+  check('a refused set changes nothing', pool.get('renamed')?.enabled === true);
+
+  const missing = await setBody('no-such-account', { enabled: false });
+  check('an unknown alias is 404, not a silent create', missing.status === 404);
 
   const [toggleA, toggleB] = await Promise.all([
     fetch(`${base}/accounts/renamed/toggle`, { method: 'POST' }),

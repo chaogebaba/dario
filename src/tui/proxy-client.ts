@@ -334,8 +334,14 @@ export class ProxyClient {
     catch { return null; }
   }
 
-  async toggleAccount(alias: string): Promise<{ ok: boolean; enabled?: boolean } | null> {
-    try { return await this.postJson<{ ok: boolean; enabled?: boolean }>(`/accounts/${encodeURIComponent(alias)}/toggle`, {}); }
+  /**
+   * Set the account's enabled state explicitly. The TUI knows what it is
+   * looking at, so it can say where it wants the account to end up instead of
+   * asking for the opposite of whatever the server finds — which is the same
+   * request whether it is the first attempt or a retry.
+   */
+  async setAccountEnabled(alias: string, enabled: boolean): Promise<{ ok: boolean; enabled?: boolean } | null> {
+    try { return await this.postJson<{ ok: boolean; enabled?: boolean }>(`/accounts/${encodeURIComponent(alias)}/enabled`, { enabled }); }
     catch { return null; }
   }
 }
