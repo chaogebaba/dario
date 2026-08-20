@@ -1760,52 +1760,33 @@ export function dedupeToolsByName<T extends { name?: unknown }>(tools: T[]): T[]
 }
 
 /**
- * A genuine Claude Code client is identified by TWO markers together:
- * the `x-anthropic-billing-header:` system block at [0] (the discriminator
- * extractSystemText and extractTemplate key on) AND a CC-origin block at [1].
- * Requiring both keeps a non-CC framework that replays a billing-tagged body
- * (e.g. a Kilo client behind a second proxy hop) on the detector path instead
- * of passthrough. Exported for tests.
+ * Does this request come from Claude Code itself?
  *
- * CC is not one request shape. Besides the main loop ("You are Claude Code…" /
- * the Claude Agent SDK variant), a single CC session also emits:
- *  - sub-agent (Task/Agent tool) requests — system[1] is the agent prompt,
- *    "You are an agent for Claude Code, Anthropic's official CLI for
- *    Claude.…" (exact bytes in the CC v2.1.205 bundle; it neither starts
- *    with "You are Claude Code" nor mentions the Agent SDK), and
- *  - auto-mode permission-classifier requests — system[1] is the ~106KB
- *    "You are a security monitor for autonomous AI coding agents" prompt,
- *    fired once per gated tool call (live-captured via loopback MITM).
- * Both missed the v4.8.146 detector and fell onto the template path, where
- * the ~25KB template prepend re-billed per request shape per cache window —
- * the #678 remote re-test burned +19% vs +2% direct on exactly the run where
- * CC fanned out parallel sub-agents. Openers are matched with startsWith,
- * same anti-replay posture as the main-loop marker: none of them appear at
- * system[1] in any known non-CC framework's wire shape.
+ * Two signals, in that order. `system[0]` must carry the
+ * `x-anthropic-billing-header` block: CC emits it on every request and nothing
+ * else generates one, so it is the positive test on its own.
  *
- * The built-in named agents (Explore, Plan) carry their own specialist
- * prompts — neither opens with the main-loop or general-purpose markers, so
- * they missed the v4.8.148 detector and stayed on the template path. That
- * was the #678 reporter's residual: on v4.8.148, forced parallel sub-agents
- * (a "read every file" prompt CC routes to Explore-type agents) still burned
- * ~3x the direct per-spawn cost. Openers are the exact bytes from the CC
- * v2.1.205 bundle; the drift-watch pipeline is the guard when they move.
+ * It used to also require `system[1]` to start with one of five known openers.
+ * That coupled the predicate to a CC release. CC ships far more than five
+ * system prompts — the v2.1.236 bundle has 20+, and eleven of the ones checked
+ * failed the list, including the summariser behind every `/compact`. Each of
+ * those was quietly rebuilt through the template instead of forwarded
+ * byte-faithfully, and the transcript being summarised had its
+ * `<system-reminder>` blocks scrubbed on the way. Enumerating CC's prompts is
+ * not a maintainable discriminator; the billing block already is one.
  *
- * Known gap: CUSTOM agents (~/.claude/agents) put operator-authored
- * definition text at system[1] with no stable CC marker — those still ride
- * the template path. There is no universal appended sentinel to key on (the
- * report-instruction sentence is baked into the general-purpose prompt only),
- * so a durable structural discriminator (e.g. billing block + claude-cli
- * user-agent) is a design decision for a follow-up.
+ * The second signal is negative and stays. A wrapper client that replays CC's
+ * preamble while declaring its own identity (Kilo, Cline, Roo, Hermes, arnie,
+ * hands) is not CC, and its tool schemas diverge enough that the byte-faithful
+ * path would corrupt the calls — which is the whole reason detectTextToolClient
+ * exists.
+ *
+ * This also closes the custom-agent gap. A `~/.claude/agents` definition puts
+ * operator-authored text at system[1] with no CC marker to key on, so every
+ * custom sub-agent used to ride the template path. It carries CC's billing
+ * block and no foreign identity, so it is now recognised like any other CC
+ * request.
  */
-const CC_ORIGIN_SYSTEM_OPENERS = [
-  'You are Claude Code',                                        // main loop, cli entrypoint
-  'You are an agent for Claude Code',                           // general-purpose sub-agent (Task/Agent tool)
-  'You are a file search specialist for Claude Code',           // built-in Explore agent (exact bytes, CC v2.1.205 bundle)
-  'You are a software architect and planning specialist for Claude Code', // built-in Plan agent (exact bytes, CC v2.1.205 bundle)
-  'You are a security monitor for autonomous AI coding agents', // auto-mode permission classifier
-] as const;
-
 export function isGenuineCCClient(clientBody: Record<string, unknown>): boolean {
   const sys = clientBody.system;
   if (!Array.isArray(sys) || sys.length < 2) return false;
@@ -1813,8 +1794,7 @@ export function isGenuineCCClient(clientBody: Record<string, unknown>): boolean 
   if (typeof first?.text !== 'string' || !first.text.includes('x-anthropic-billing-header:')) return false;
   const second = sys[1] as { text?: unknown } | undefined;
   if (typeof second?.text !== 'string') return false;
-  const text = second.text;
-  return CC_ORIGIN_SYSTEM_OPENERS.some((opener) => text.startsWith(opener)) || text.includes('Claude Agent SDK');
+  return detectTextToolClient(second.text) === null;
 }
 
 /** Claude's current model families reject a trailing assistant prefill. */

@@ -636,6 +636,39 @@ export function resolveProxyTarget(urlPath: string, isOpenAI: boolean): { target
   return allowed[urlPath] ?? null;
 }
 
+/**
+ * Response headers forwarded from upstream to the client verbatim.
+ *
+ * Claude Code reads all of these. The rate-limit family drives the usage
+ * warnings and `/status`; `retry-after` and `x-should-retry` drive the SDK's
+ * retry decisions; `request-id` is what CC quotes in an error report.
+ *
+ * This was three separate inline allowlists — one per response path — and they
+ * had already drifted: both 429 paths forwarded `retry-after`, the success path
+ * did not, and none of them forwarded `x-should-retry`, so CC fell back to its
+ * own heuristics on exactly the responses the header exists to arbitrate.
+ * One list, one call site each.
+ */
+export function isForwardableUpstreamHeader(key: string): boolean {
+  return key.startsWith('anthropic-ratelimit')
+    || key.startsWith('x-ratelimit')
+    || key === 'request-id'
+    || key === 'retry-after'
+    || key === 'x-should-retry'
+    || key === 'anthropic-organization-id'
+    || key === 'anthropic-usage-limit';
+}
+
+/** Copy every forwardable upstream header into an outgoing header bag. */
+export function forwardUpstreamHeaders(
+  upstreamHeaders: Headers, into: Record<string, string>,
+): Record<string, string> {
+  for (const [key, value] of upstreamHeaders.entries()) {
+    if (isForwardableUpstreamHeader(key)) into[key] = value;
+  }
+  return into;
+}
+
 // Orchestration tags injected by agents (Aider, Cursor, OpenCode, etc.)
 // that confuse Claude when passed through. Strip before forwarding.
 export const ORCHESTRATION_TAG_NAMES = [
@@ -2775,6 +2808,22 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
       return;
     }
 
+    // Claude Code's connectivity probe. `probeVoiceConnectivity` does a
+    // HEAD/GET of `${BASE_API_URL}/api/hello` and records the status verbatim
+    // (`http_403`, or `cf_mitigated_*` when Cloudflare stamps the response).
+    // api.anthropic.com answers 200; dario's SSRF allowlist answered 403 to
+    // everything outside the three proxied paths, so every CC session behind
+    // dario reported a blocked probe. Nothing downstream breaks, but it is a
+    // divergence from the real API on a path CC actually requests, and it is
+    // the one status a CC client can observe without sending a message.
+    // Answer it locally — never forwarded upstream, so the allowlist is intact.
+    if (urlPath === '/api/hello' && (req.method === 'GET' || req.method === 'HEAD')) {
+      const body = JSON.stringify({ message: 'Hello, world!' });
+      res.writeHead(200, { ...JSON_HEADERS, ...CORS_RESPONSE_HEADERS });
+      res.end(req.method === 'HEAD' ? undefined : body);
+      return;
+    }
+
     if (urlPath === '/v1/models' && req.method === 'GET') {
       requestCount++;
       // Upstream-autodetected catalog (TTL-cached, baked fallback — never
@@ -3378,7 +3427,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
             if (!skipFields?.has('prompt_cache')) {
               applyCcPromptCaching(ccBody, CACHE_EPHEMERAL);
             }
-            detectedClientForLog = detectedClient;
+            // Record which path the request took, not just which foreign
+            // framework was recognised. `genuineCC` decides whether CC's bytes
+            // are forwarded verbatim or rebuilt through the template — the
+            // single most consequential branch here — and it used to leave no
+            // trace in the debug store, analytics, or the routing trace. A CC
+            // release that changes the request shape enough to miss the
+            // detector is then invisible: requests keep succeeding, they are
+            // just no longer byte-faithful. `cc` / `foreign` makes that
+            // legible in /debug/requests without a new field.
+            detectedClientForLog = detectedClient ?? (genuineCC ? 'cc' : 'foreign');
             // genuineCC → the client's own tool schemas went out verbatim, so
             // the response path must not rewrite tool names either.
             preserveToolsEffective = Boolean(opts.preserveTools)
@@ -4201,11 +4259,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
             ...CORS_RESPONSE_HEADERS,
             ...SECURITY_HEADERS,
           };
-          for (const [key, value] of upstream.headers.entries()) {
-            if (key.startsWith('x-ratelimit') || key.startsWith('anthropic-ratelimit') || key === 'request-id' || key === 'retry-after') {
-              responseHeaders[key] = value;
-            }
-          }
+          forwardUpstreamHeaders(upstream.headers, responseHeaders);
           requestCount++;
           // v4: analytics is always-on. A pool account supplies the rate-limit
           // snapshot from `poolAccount.rateLimit` (already authoritative);
@@ -4307,11 +4361,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
           ...CORS_RESPONSE_HEADERS,
           ...SECURITY_HEADERS,
         };
-        for (const [key, value] of upstream.headers.entries()) {
-          if (key.startsWith('x-ratelimit') || key.startsWith('anthropic-ratelimit') || key === 'request-id' || key === 'retry-after') {
-            responseHeaders[key] = value;
-          }
-        }
+        forwardUpstreamHeaders(upstream.headers, responseHeaders);
         requestCount++;
         {
           const rl = poolAccount?.rateLimit ?? parseRateLimits(upstream.headers);
@@ -4361,11 +4411,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
       };
 
       // Forward rate limit headers (including unified subscription headers)
-      for (const [key, value] of upstream.headers.entries()) {
-        if (key.startsWith('x-ratelimit') || key.startsWith('anthropic-ratelimit') || key === 'request-id') {
-          responseHeaders[key] = value;
-        }
-      }
+      forwardUpstreamHeaders(upstream.headers, responseHeaders);
 
       requestCount++;
 
