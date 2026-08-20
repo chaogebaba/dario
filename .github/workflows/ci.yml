@@ -17,10 +17,12 @@ jobs:
       # These two scripts ran under `node` before the Bun migration, and node
       # is preinstalled on ubuntu-latest, so the rewrite to `bun` left a job
       # that shells out to a binary nothing installed. Every other job in this
-      # file gained a setup step; this one did not, and it gates the rest.
+      # file gained a setup step; this one did not, and it gates the rest --
+      # build, test and the docker smoke all declare `needs` on it, so they
+      # were skipped rather than run for four days.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: canary
       - name: package.json is valid JSON and canonically formatted
         run: bun scripts/check-package-json.mjs
 
@@ -35,9 +37,16 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # The floor dario declares in engines, plus latest so a Bun release
-        # that breaks us surfaces here rather than in a user's install.
-        bun-version: ['1.4.0', 'latest']
+        # One leg, and it is `canary`. package.json declares bun >=1.4.0 and
+        # bun.lock is written in a format only 1.4.x parses -- 1.3.14, the
+        # newest release, refuses it outright with UnknownLockfileVersion --
+        # but 1.4.0 has never shipped, so setup-bun 404s on the tag and every
+        # job pinning it exited before running anything. The second leg used
+        # to be `latest` on the reasoning that a Bun release which breaks us
+        # should surface here rather than in a user's install; `latest` cannot
+        # install this project at all today, so it would only ever be red.
+        # Restore it, and pin the first leg to 1.4.0, once 1.4.0 is released.
+        bun-version: ['canary']
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
       - uses: oven-sh/setup-bun@v2
@@ -65,7 +74,7 @@ jobs:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: canary
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun test/all.test.mjs

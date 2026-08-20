@@ -324,7 +324,7 @@ jobs:
         if: steps.gate.outputs.proceed == 'true'
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: canary
 
       - name: install
         if: steps.gate.outputs.proceed == 'true'
@@ -458,7 +458,7 @@ jobs:
         run: |
           set -eo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
-          node scripts/extract-release-notes.mjs "$VERSION" --file CHANGELOG.md > release-notes.md
+          bun scripts/extract-release-notes.mjs "$VERSION" --file CHANGELOG.md > release-notes.md
           echo "--- release-notes.md ---"
           cat release-notes.md
 

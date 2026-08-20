@@ -1,13 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.4.0-alpine AS build
+# `canary`, not 1.4.0: bun.lock needs 1.4.x to parse and 1.4.0 has never been
+# released, so oven/bun:1.4.0-alpine 404s and this image could not be built at
+# all. Move to the release tag once 1.4.0 ships.
+FROM oven/bun:canary-alpine AS build
 WORKDIR /app
 COPY package.json bun.lock tsconfig.json ./
 RUN bun install --frozen-lockfile
 COPY src ./src
 RUN bun run build
 
-FROM oven/bun:1.4.0-alpine AS runtime
+FROM oven/bun:canary-alpine AS runtime
 
 # su-exec is the alpine package that lets the entrypoint drop privileges
 # from root → dario after the volume self-heal. ~10KB; no shell, no PAM.
