@@ -2506,10 +2506,15 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
    *   2. These bodies used to be built once at startProxy time, so every 401
    *      a process served carried the same request_id. The real API mints one
    *      per response; two failures sharing an id cannot be told apart.
+   *
+   * The CORS block is the same one the 429 path already sends. A header a
+   * browser client cannot read is not a header it has: without the
+   * Access-Control-Expose-Headers entry, `request-id` is on the wire and
+   * invisible to fetch().
    */
   function sendError(res: ServerResponse, status: number, message: string, extra?: Record<string, string>): void {
     const requestId = `req_dario_${randomUUID().replace(/-/g, '')}`;
-    res.writeHead(status, { ...JSON_HEADERS, 'request-id': requestId, ...extra });
+    res.writeHead(status, { ...JSON_HEADERS, ...CORS_RESPONSE_HEADERS, 'request-id': requestId, ...extra });
     res.end(anthropicErrorBody(status, message, requestId));
   }
   const MSG_UNAUTH = 'Invalid or missing API key';
