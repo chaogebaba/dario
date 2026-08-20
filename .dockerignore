@@ -6,6 +6,12 @@ test
 docs
 reviews
 scripts
+# ...except the two the build itself needs: `bun run build` ends by stamping a
+# hash of src/ into dist/, and the stamper shares its hashing with the checker
+# that verifies dist/ was built from the src/ beside it. Everything else under
+# scripts/ is drift watchers and release tooling the image has no use for.
+!scripts/stamp-build.mjs
+!scripts/src-hash.mjs
 CHANGELOG.md
 RELEASING.md
 SECURITY.md

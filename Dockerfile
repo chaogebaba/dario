@@ -11,8 +11,10 @@ COPY src ./src
 # `bun run build` ends by stamping a hash of src/ + tsconfig.json into
 # dist/.build-stamp.json, so the script that computes it has to be in the
 # build context. It was added to the build without being added here, and the
-# docker job that would have caught it was being skipped at the time.
-COPY scripts ./scripts
+# docker job that would have caught it was being skipped at the time. Named
+# file by file rather than `COPY scripts`, because .dockerignore excludes the
+# directory on purpose and this says exactly what the exception is for.
+COPY scripts/stamp-build.mjs scripts/src-hash.mjs ./scripts/
 RUN bun run build
 
 FROM oven/bun:canary-alpine AS runtime
