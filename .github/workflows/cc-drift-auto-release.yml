@@ -106,7 +106,17 @@ jobs:
     # For pull_request: require `merged == true` (rules out close-
     # without-merge). For schedule / workflow_dispatch: always proceed;
     # the gate step short-circuits when there's nothing to ship.
-    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
+    # Never from a fork. This job tags, cuts a GitHub Release, runs `npm
+    # publish --access public --provenance` against @askalf/dario and pushes
+    # to GHCR -- all triggered by nothing more than package.json.version
+    # moving on master, on an hourly cron. A fork carries the workflow but not
+    # the authority, and until now the only thing stopping it here was an
+    # unrelated breakage: `Set up Bun` 404'd on a bun version that does not
+    # exist, so every hourly run died before reaching the gate. Fixing that
+    # pin removed the accident that was standing in for a guard.
+    if: >-
+      github.repository == 'askalf/dario'
+      && (github.event_name != 'pull_request' || github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     # Serializes overlapping triggers so a pull_request:closed and a
     # schedule tick that fire within seconds of each other don't both
