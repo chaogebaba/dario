@@ -34,6 +34,7 @@ import {
   VARIANT_FAMILIES,
 } from './live-fingerprint.js';
 import { detectCCOAuthConfig } from './cc-oauth-detect.js';
+import { blockedSummary, type IneligibleReason, type PoolStatus, type PoolVerdict } from './pool.js';
 import { runAuthorizeProbe } from './cc-authorize-probe.js';
 import { MIGRATED_LOGIN_ALIAS } from './accounts.js';
 import { homeDir } from './home-dir.js';
@@ -241,6 +242,53 @@ export function checkIdentityDrift(input: IdentityDriftInput): Check[] {
  */
 let _npmLatestCache: { value: string | null; at: number } | null = null;
 const NPM_CACHE_TTL_MS = 60 * 1000;
+
+/**
+ * The "Pool routing" line: what the proxy would do with the next request.
+ *
+ * Rendering only. The verdict comes from the router's own predicate, so this
+ * cannot disagree with the proxy about whether the pool can serve — which is
+ * the whole point, because it did. The previous version asked `select()` for
+ * an account and `ineligibleReason` for why that account was blocked, on the
+ * understanding that select() returned a blocked account when nothing was
+ * eligible. It had, until 1c4bd44 removed the fallback one day after this was
+ * written. From then on the "X is next in line but it is disabled" half could
+ * never print, and the comment above it explained a behaviour that no longer
+ * existed.
+ *
+ * `exhausted` stopped meaning "everything that cannot serve" when disabled
+ * seats were counted separately, so the ratio adds them back — an operator
+ * reading `1/3 unavailable` under a line saying nothing can serve is being
+ * told two different things.
+ */
+export function poolRoutingCheck(
+  verdict: PoolVerdict,
+  status: PoolStatus,
+  nextAlias: string | null,
+): Check {
+  if (verdict.state === 'serving' && nextAlias) {
+    return {
+      status: 'info',
+      label: 'Pool routing',
+      detail: `next: ${nextAlias}  (max-headroom select; ${status.healthy}/${status.accounts} healthy)`,
+    };
+  }
+  const fix: Partial<Record<IneligibleReason, string>> = {
+    expired: ' Run `dario login`.',
+    disabled: ' Enable it from the Accounts tab.',
+    'auth-cooldown': ' Run `dario login` if it persists.',
+  };
+  // Advice only when there is one cause to act on. A pool blocked three ways
+  // does not have a next step, and naming one of them picks a favourite.
+  const advice = verdict.reasons.length === 1 ? fix[verdict.reasons[0]] ?? '' : '';
+  const unavailable = status.exhausted + status.disabled;
+  const cause = verdict.state === 'empty' ? 'the pool is empty' : blockedSummary(verdict);
+  return {
+    status: 'warn',
+    label: 'Pool routing',
+    detail: `no account can serve — ${cause} (${unavailable}/${status.accounts} unavailable).${advice}`,
+  };
+}
 
 export function probeNpmLatestCC(): string | null {
   if (_npmLatestCache && Date.now() - _npmLatestCache.at < NPM_CACHE_TTL_MS) {
@@ -973,7 +1021,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
       // (v5.0): it confirms the sole account is eligible, not rejected.
       if (aliases.length >= 1) {
         try {
-          const { AccountPool, ineligibleReason } = await import('./pool.js');
+          const { AccountPool } = await import('./pool.js');
           const pool = new AccountPool();
           for (const acc of loaded) {
             pool.add(acc.alias, {
@@ -985,56 +1033,8 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<Check[]> {
               enabled: acc.enabled,
             });
           }
-          const next = pool.select();
-          const ps = pool.status();
-          // `next` is whatever select() returns, and select() deliberately
-          // falls back to an ineligible account when nothing is eligible —
-          // the request path then sends a doomed request and 401s. Naming
-          // that account as "next" told the operator the pool was ready to
-          // serve when it was not, one line below a WARN saying the token had
-          // expired. Ask the router's own predicate instead.
-          const blocked = next ? ineligibleReason(next) : null;
-          if (next && !blocked) {
-            checks.push({
-              status: 'info',
-              label: 'Pool routing',
-              detail: `next: ${next.alias}  (max-headroom select; ${ps.healthy}/${ps.accounts} healthy)`,
-            });
-          } else {
-            const why = {
-              expired: 'its token has expired',
-              disabled: 'it is disabled',
-              'auth-cooldown': 'upstream rejected its token and it is cooling down',
-              'rate-limited': 'its rate-limit window has not reset yet',
-            };
-            const fix = {
-              expired: ' Run `dario login`.',
-              disabled: ' Enable it from the Accounts tab.',
-              'auth-cooldown': ' Run `dario login` if it persists.',
-              'rate-limited': '',
-            };
-            // `exhausted` no longer means "everything that can't serve" — a
-            // disabled seat is counted apart from a drained one. The operator
-            // reading this line wants the total, so add them back, and name
-            // the benched ones rather than filing them under cool-down.
-            const unavailable = ps.exhausted + ps.disabled;
-            const causes = ps.disabled === 0
-              ? 'all rejected, expired, or in cool-down'
-              : ps.exhausted === 0
-                ? `all ${ps.disabled} disabled`
-                : `${ps.disabled} disabled, the rest rejected, expired, or in cool-down`;
-            checks.push({
-              status: 'warn',
-              label: 'Pool routing',
-              detail: next
-                // Say what the proxy will actually do, not just that nothing
-                // is eligible: it still dispatches to this account and takes
-                // the 401, which is what shows up in the logs.
-                ? `no account can serve — ${next.alias} is next in line but ${why[blocked!]}`
-                  + ` (${unavailable}/${ps.accounts} unavailable).${fix[blocked!]}`
-                : `no account can serve — ${causes} (${unavailable}/${ps.accounts} unavailable).`,
-            });
-          }
+          const verdict = pool.verdict();
+          checks.push(poolRoutingCheck(verdict, pool.status(), pool.select()?.alias ?? null));
         } catch (err) {
           checks.push({ status: 'warn', label: 'Pool routing', detail: `check failed: ${(err as Error).message}` });
         }

@@ -169,9 +169,17 @@ header('derivePoolStatus — empty non-admin pool');
   check('hint points at accounts add', s.expiresIn.includes('dario accounts add'));
 }
 
+// The fixtures below carry the fields the router's own eligibility predicate
+// reads, because that is what derivePoolStatus asks now. They used to pass a
+// precomputed `inAuthCooldown` boolean, which meant a test could describe a
+// pool state the router would never agree with — and did: `inAuthCooldown`
+// was the only blocker modelled, so expiry and rate-limit cool-downs went
+// unasserted on a surface whose whole job is to report them.
+const COOLING = { lastAuthFailureAt: NOW - 1_000, consecutiveAuthFailures: 1 };
+
 header('derivePoolStatus — one healthy account (the #636 repro shape)');
 {
-  const s = derivePoolStatus([{ expiresAt: NOW + 2 * HOUR, inAuthCooldown: false }], NOW, true);
+  const s = derivePoolStatus([{ expiresAt: NOW + 2 * HOUR }], NOW, true);
   check('authenticated', s.authenticated === true);
   check('status healthy', s.status === 'healthy');
   check('1 account reported', s.accounts === 1);
@@ -186,8 +194,8 @@ header('derivePoolStatus — cooldown accounts excluded from expiry');
 {
   const s = derivePoolStatus(
     [
-      { expiresAt: NOW + 1 * HOUR, inAuthCooldown: true },   // earlier, but dead
-      { expiresAt: NOW + 3 * HOUR, inAuthCooldown: false },
+      { expiresAt: NOW + 1 * HOUR, ...COOLING },   // earlier, but dead
+      { expiresAt: NOW + 3 * HOUR },
     ],
     NOW,
     false,
@@ -201,23 +209,55 @@ header('derivePoolStatus — all accounts in auth-cooldown');
 {
   const s = derivePoolStatus(
     [
-      { expiresAt: NOW + 1 * HOUR, inAuthCooldown: true },
-      { expiresAt: NOW + 2 * HOUR, inAuthCooldown: true },
+      { expiresAt: NOW + 1 * HOUR, ...COOLING },
+      { expiresAt: NOW + 2 * HOUR, ...COOLING },
     ],
     NOW,
     false,
   );
   check('not authenticated', s.authenticated === false);
   check('status broken', s.status === 'broken');
-  check('says why', s.expiresIn === 'all accounts in auth-cooldown');
+  check('says why', s.expiresIn === 'all 2 accounts are in auth cool-down');
   check('all-cooldown pool → /health 503', buildHealthResponse(s, 0, false).httpStatus === 503);
 }
 
-header('derivePoolStatus — expired-but-usable clamps to 0h 0m');
+// This case used to assert the opposite — `healthy`, on the grounds that
+// background refresh would roll the token. Refresh runs every 60s against a
+// 45-minute margin, so a token that is expired right now is one refresh has
+// already failed to roll, and `select()` refuses it: every request 503s while
+// /health said 200. The contract /health advertises is that it 503s when OAuth
+// is in a state that fails every upstream request, and this is that state.
+header('derivePoolStatus — an expired pool is broken, not healthy');
 {
-  const s = derivePoolStatus([{ expiresAt: NOW - HOUR, inAuthCooldown: false }], NOW, false);
-  check('healthy (background refresh will roll it)', s.status === 'healthy');
-  check('expiresIn clamped, not negative', s.expiresIn === '0h 0m');
+  const s = derivePoolStatus([{ expiresAt: NOW - HOUR }], NOW, false);
+  check('not healthy — select() would return null', s.status === 'broken');
+  check('names expiry rather than a cool-down', s.expiresIn === 'the only account is expired');
+  check('reports the expiry it has, not a clamp', s.expiresAt === NOW - HOUR);
+  check('expired pool → /health 503', buildHealthResponse(s, 0, false).httpStatus === 503);
+}
+
+// The pool's own predicate treats a disabled seat and a rate-limited one as
+// unroutable too. Both used to read as `healthy` here: `enabled` was checked
+// but only alongside auth-cooldown, and rate-limit cool-downs were not checked
+// at all, so an all-429 pool reported 200 while every request got a 503.
+header('derivePoolStatus — disabled and rate-limited pools are broken too');
+{
+  const off = derivePoolStatus([{ expiresAt: NOW + HOUR, enabled: false }], NOW, false);
+  check('an operator-disabled pool is broken', off.status === 'broken');
+  check('and says so without blaming a cool-down', off.expiresIn === 'the only account is disabled');
+
+  const limited = derivePoolStatus(
+    [{ expiresAt: NOW + HOUR, rateLimitCooldowns: { '*': { until: NOW + 60_000, backoffLevel: 1 } } }],
+    NOW, false,
+  );
+  check('an all-rate-limited pool is broken', limited.status === 'broken');
+  check('and names the rate limit', limited.expiresIn === 'the only account is rate-limited');
+
+  const mixed = derivePoolStatus(
+    [{ expiresAt: NOW + HOUR, enabled: false }, { expiresAt: NOW - HOUR }],
+    NOW, false,
+  );
+  check('a pool blocked two ways counts each', mixed.expiresIn === '1 disabled, 1 expired');
 }
 
 // ── serving probe on /health (#905) ──────────────────────────────────────

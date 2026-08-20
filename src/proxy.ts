@@ -14,7 +14,7 @@ import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
-import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
+import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinitySignals, selectSessionAffinitySignal, type ClaudeSessionIdentitySource, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, withoutRequestPreviews, type RequestRecord } from './analytics.js';
@@ -1418,27 +1418,37 @@ export async function resolveSingleAccountStartupStatus(
  * the error above it, and the operator left with a proxy that 503s every
  * request while claiming to be fine.
  *
- * 30s of slack matches `select()`'s eligibility window, so "healthy" here
- * means the same thing it means to the router: at least one account it would
- * be willing to pick.
+ * The fix for that filtered on expiry, which is one of the four things
+ * `select()` checks, so the banner went on announcing "healthy" for a pool
+ * whose every account the operator had disabled — the same pool /health called
+ * `broken`. It asks `poolVerdict` now. "Healthy" here means what it means to
+ * the router: at least one account it would be willing to pick.
+ *
+ * Expiry keeps its own status because it has its own fix. `dario login` is the
+ * answer to a dead token and not to a benched seat, and the banner
+ * interpolates `OAuth: ${status} — ${expiresIn}`, so the two halves must not
+ * repeat each other.
  */
 export function resolvePoolStartupStatus(
-  accounts: Array<{ expiresAt: number }>,
+  accounts: readonly EligibilityFields[],
   now: number = Date.now(),
 ): Awaited<ReturnType<typeof getStatus>> {
-  const live = accounts.filter(a => a.expiresAt > now + 30_000);
-  if (live.length === 0) {
-    const latest = accounts.length > 0 ? Math.max(...accounts.map(a => a.expiresAt)) : 0;
+  const verdict = poolVerdict(accounts, now);
+  if (verdict.state === 'empty') {
+    return { authenticated: false, status: 'none', expiresAt: 0, expiresIn: 'no accounts yet' };
+  }
+  if (verdict.state === 'blocked') {
+    const onlyExpired = verdict.reasons.length === 1 && verdict.reasons[0] === 'expired';
     return {
       authenticated: false,
-      status: 'expired',
-      expiresAt: latest,
-      expiresIn: 'run `dario login`',
+      status: onlyExpired ? 'expired' : 'broken',
+      expiresAt: Math.max(...accounts.map(a => a.expiresAt)),
+      expiresIn: onlyExpired ? 'run `dario login`' : blockedSummary(verdict),
     };
   }
   // Soonest expiry among the accounts that are still usable; an already-dead
   // seat alongside a live one must not drag the reported figure to zero.
-  const earliest = Math.min(...live.map(a => a.expiresAt));
+  const earliest = verdict.expiresAt;
   const msLeft = earliest - now;
   return {
     authenticated: true,
@@ -2282,11 +2292,9 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
   // made the TUI claim the proxy was down).
   async function currentStatus() {
     const now = Date.now();
-    return derivePoolStatus(
-      pool.all().map((a) => ({ expiresAt: a.expiresAt, inAuthCooldown: isInAuthCooldown(a, now), enabled: a.enabled })),
-      now,
-      adminEnabled,
-    );
+    // The accounts go in whole. Mapping them down to a hand-picked subset here
+    // is what let this surface answer a narrower question than the router's.
+    return derivePoolStatus(pool.all(), now, adminEnabled);
   }
 
   // Model catalog wiring — /v1/models serves the upstream-autodetected set,
@@ -2979,9 +2987,18 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
           if (!fallbackViable) {
             // Two distinct empty-selection cases (#599): the pool has no accounts
             // at all (headless admin bootstrap — nothing added yet), vs. it has
-            // accounts but all are rate-limited / in auth cool-down. Give each a
-            // truthful, actionable message so a headless operator isn't told
+            // accounts but none the router will pick. Give each a truthful,
+            // actionable message so a headless operator isn't told
             // "rate-limited" when they simply haven't added an account.
+            //
+            // The second message used to be the fixed string "all accounts are
+            // rate-limited or in auth cool-down; retry shortly", which an
+            // all-disabled pool also received — naming two causes that were not
+            // the cause and telling the operator to wait for a state that would
+            // never change on its own. Ask the pool instead. "Retry shortly" is
+            // held back for the reasons that do clear on their own.
+            const verdict = pool.verdict();
+            const transient = verdict.reasons.every((r) => r === 'rate-limited' || r === 'auth-cooldown');
             res.writeHead(503, JSON_HEADERS);
             res.end(JSON.stringify(
               pool.size === 0
@@ -2993,7 +3010,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
                   }
                 : {
                     error: 'No accounts available in pool',
-                    message: 'all accounts are rate-limited or in auth cool-down; retry shortly',
+                    message: `${blockedSummary(verdict)}${transient ? '; retry shortly' : ''}`,
                   },
             ));
             return;

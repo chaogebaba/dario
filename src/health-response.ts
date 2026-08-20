@@ -15,6 +15,8 @@
  * uptime monitoring that keys on the status code is unaffected.
  */
 
+import { blockedSummary, poolVerdict, type EligibilityFields } from './pool.js';
+
 export interface HealthStatusLike {
   status: string;
   canRefresh?: boolean;
@@ -120,11 +122,14 @@ export interface HealthResponse {
 // the admin API was built for. Pure function so the derivation is
 // unit-testable without spinning a proxy (test/health-response.mjs).
 
-export interface PoolAccountStatusLike {
-  expiresAt: number;
-  inAuthCooldown: boolean;
-  enabled?: boolean;
-}
+/**
+ * What this derivation needs from an account: exactly the fields the router's
+ * own eligibility predicate reads. It used to be `{ expiresAt, inAuthCooldown,
+ * enabled }` — the caller precomputing one clause of the predicate and this
+ * function checking two of the four — so a pool of expired tokens reported
+ * `healthy` while every request 503'd on `select()` returning null.
+ */
+export type PoolAccountStatusLike = EligibilityFields;
 
 export interface PoolDerivedStatus {
   authenticated: boolean;
@@ -160,32 +165,40 @@ export function derivePoolStatus(
         : 'no accounts yet — run `dario accounts add <alias>`',
     };
   }
-  const usable = accounts.filter((a) => a.enabled !== false && !a.inAuthCooldown);
-  if (usable.length === 0) {
-    // Every account is routing-excluded after upstream auth failures — the
-    // next request will fail, which is the deadness /health exists to signal.
+  const verdict = poolVerdict(accounts, now);
+  if (verdict.state === 'blocked') {
+    // Nothing the router would pick, so the next request 503s — which is the
+    // deadness /health exists to signal, and the contract it advertises to the
+    // uptime monitors and docker healthchecks that poll it.
+    //
+    // Two of these are new. An expired pool used to report `healthy` on the
+    // grounds that background refresh would roll it; refresh runs every 60s
+    // against a 45-minute margin, so a token that is expired *now* is one
+    // refresh has already failed to roll, not one about to be rolled. An
+    // all-rate-limited pool used to report `healthy` too, which was never
+    // consistent with the all-auth-cooldown case reporting `broken` — both are
+    // transient, both stop every request. A pool serving OpenAI-shape clients
+    // through the exhausted-pool fallback is the one case this calls dead
+    // while something still gets through; Anthropic-shape requests, which are
+    // the reason dario exists, still 503.
     return {
       authenticated: false,
       status: 'broken',
       mode: 'pool',
-      accounts: accounts.length,
-      expiresAt: Math.min(...accounts.map((a) => a.expiresAt)),
-      expiresIn: accounts.some((a) => a.enabled !== false)
-        ? 'all accounts in auth-cooldown'
-        : 'all accounts disabled',
+      accounts: verdict.accounts,
+      expiresAt: verdict.expiresAt,
+      expiresIn: blockedSummary(verdict),
     };
   }
-  // Earliest expiry among USABLE accounts — the pool's background refresh
-  // (15-min loop) keeps these rolling, mirroring what the startup banner
-  // reports for a warm pool.
-  const earliest = Math.min(...usable.map((a) => a.expiresAt));
+  // Earliest expiry among the accounts that can serve — a dead seat beside a
+  // live one must not drag the reported figure down.
   return {
     authenticated: true,
     status: 'healthy',
     mode: 'pool',
-    accounts: accounts.length,
-    expiresAt: earliest,
-    expiresIn: formatMsLeft(earliest - now),
+    accounts: verdict.accounts,
+    expiresAt: verdict.expiresAt,
+    expiresIn: formatMsLeft(verdict.expiresAt - now),
   };
 }
 

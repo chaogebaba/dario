@@ -119,7 +119,7 @@ export interface PoolAccount {
   rejectionEpoch: number;
 }
 
-interface RateLimitCooldown {
+export interface RateLimitCooldown {
   until: number;
   backoffLevel: number;
 }
@@ -139,9 +139,27 @@ export function authCooldownMs(consecutiveFailures: number): number {
   return Math.min(ms, AUTH_COOLDOWN_MAX_MS);
 }
 
-export function isInAuthCooldown(account: PoolAccount, now: number = Date.now()): boolean {
-  if (!account.lastAuthFailureAt || account.consecutiveAuthFailures <= 0) return false;
-  const cooldown = authCooldownMs(account.consecutiveAuthFailures);
+/**
+ * The fields `ineligibleReason` reads, named so a caller holding something
+ * thinner than a `PoolAccount` can ask the router's question instead of
+ * re-deriving part of it. /health used to pass a precomputed `inAuthCooldown`
+ * and nothing else, so it answered "healthy" for a pool of expired tokens the
+ * router would refuse; the startup banner filtered on `expiresAt` alone, so it
+ * answered "healthy" for a pool the operator had switched off. Four surfaces
+ * each reimplementing a subset of one predicate is how they came to disagree.
+ */
+export interface EligibilityFields {
+  enabled?: boolean;
+  expiresAt: number;
+  lastAuthFailureAt?: number;
+  consecutiveAuthFailures?: number;
+  rateLimitCooldowns?: Record<string, RateLimitCooldown>;
+}
+
+export function isInAuthCooldown(account: EligibilityFields, now: number = Date.now()): boolean {
+  const failures = account.consecutiveAuthFailures ?? 0;
+  if (!account.lastAuthFailureAt || failures <= 0) return false;
+  const cooldown = authCooldownMs(failures);
   return now - account.lastAuthFailureAt < cooldown;
 }
 
@@ -151,10 +169,13 @@ export function isInAuthCooldown(account: PoolAccount, now: number = Date.now())
  * The predicate `select()` filters on, named and reusable so a diagnostic can
  * ask the same question the router asks instead of re-deriving it. `dario
  * doctor` reported `next: login` for a token that had expired three months
- * earlier: select() falls back to an ineligible account rather than returning
- * null, so the answer was accurate about select()'s return value and wrong
- * about what would happen if you sent a request — which is the only thing the
- * operator reading that line wanted to know.
+ * earlier: select() then fell back to an ineligible account rather than
+ * returning null, so the answer was accurate about select()'s return value and
+ * wrong about what would happen if you sent a request — which is the only
+ * thing the operator reading that line wanted to know. 1c4bd44 has since
+ * removed that fallback, so select() now returns an eligible account or null;
+ * the predicate stays because the surfaces reporting on the pool need the
+ * reason, not just the absence.
  *
  * Order matters for the message, not for the outcome. An expired token is the
  * cause an operator can act on, and it is upstream of the auth cool-down that
@@ -163,7 +184,7 @@ export function isInAuthCooldown(account: PoolAccount, now: number = Date.now())
 export type IneligibleReason = 'disabled' | 'expired' | 'auth-cooldown' | 'rate-limited';
 
 export function ineligibleReason(
-  account: PoolAccount,
+  account: EligibilityFields,
   now: number = Date.now(),
   family?: string | null,
 ): IneligibleReason | null {
@@ -189,7 +210,7 @@ export function rateLimitCooldownMs(backoffLevel: number): number {
 }
 
 export function isInRateLimitCooldown(
-  account: PoolAccount,
+  account: EligibilityFields,
   family?: string | null,
   now: number = Date.now(),
 ): boolean {
@@ -208,6 +229,90 @@ function rejectionCooldownScope(snapshot: RateLimitSnapshot, family?: string | n
   const unifiedExhausted = Math.max(snapshot.util5h, snapshot.util7d) >= 1 - POOL_HEADROOM_FLOOR;
   const familyExhausted = (snapshot.perModel7d[family] ?? 0) >= 1 - POOL_HEADROOM_FLOOR;
   return familyExhausted && !unifiedExhausted ? rateLimitScope(family) : GLOBAL_RATE_LIMIT_SCOPE;
+}
+
+/**
+ * What the router would do with this pool right now, as one value.
+ *
+ * Four surfaces answer "can this pool serve?" — `dario doctor`, the 503 body,
+ * /health, and the startup banner — and until this existed each one filtered
+ * the accounts itself. They filtered differently, so one pool got three
+ * answers: an all-disabled pool was `broken` on /health, `healthy` on the
+ * banner, and told the client it was "rate-limited or in auth cool-down"; an
+ * all-expired pool was `healthy` on /health while every request 503'd.
+ *
+ * The question has exactly one right answer and `ineligibleReason` already is
+ * it, so the surfaces read this and differ only in wording. `family` is
+ * accepted because rate-limit cool-downs are per-family; a family-less verdict
+ * asks about the global scope, which is the right question for a status
+ * surface that does not know the next request's model.
+ */
+export interface PoolVerdict {
+  /** 'empty': no accounts. 'serving': select() would return one. 'blocked': accounts exist, none eligible. */
+  state: 'empty' | 'serving' | 'blocked';
+  accounts: number;
+  eligible: number;
+  /** Count per reason across the accounts that cannot serve. Absent keys are zero. */
+  blockedBy: Partial<Record<IneligibleReason, number>>;
+  /** The reasons in play, most actionable first — `ineligibleReason`'s own order. */
+  reasons: IneligibleReason[];
+  /**
+   * Earliest expiry among the accounts that can serve, or among all of them
+   * when none can. Zero for an empty pool. A dead seat beside a live one must
+   * not drag the reported figure down, which is why this is not a plain min.
+   */
+  expiresAt: number;
+}
+
+/** `ineligibleReason`'s check order, which is also the reporting order. */
+const REASON_ORDER: readonly IneligibleReason[] = ['disabled', 'expired', 'auth-cooldown', 'rate-limited'];
+
+const REASON_PHRASE: Record<IneligibleReason, string> = {
+  disabled: 'disabled',
+  expired: 'expired',
+  'auth-cooldown': 'in auth cool-down',
+  'rate-limited': 'rate-limited',
+};
+
+export function poolVerdict(
+  accounts: readonly EligibilityFields[],
+  now: number = Date.now(),
+  family?: string | null,
+): PoolVerdict {
+  if (accounts.length === 0) {
+    return { state: 'empty', accounts: 0, eligible: 0, blockedBy: {}, reasons: [], expiresAt: 0 };
+  }
+  const blockedBy: Partial<Record<IneligibleReason, number>> = {};
+  const eligible: EligibilityFields[] = [];
+  for (const account of accounts) {
+    const reason = ineligibleReason(account, now, family);
+    if (reason === null) eligible.push(account);
+    else blockedBy[reason] = (blockedBy[reason] ?? 0) + 1;
+  }
+  const measured = eligible.length > 0 ? eligible : accounts;
+  return {
+    state: eligible.length > 0 ? 'serving' : 'blocked',
+    accounts: accounts.length,
+    eligible: eligible.length,
+    blockedBy,
+    reasons: REASON_ORDER.filter((r) => blockedBy[r]),
+    expiresAt: Math.min(...measured.map((a) => a.expiresAt)),
+  };
+}
+
+/**
+ * One phrase for why nothing can serve, so the operator reads the same words
+ * from doctor, /health, and the 503 body. Empty string for a pool that is
+ * serving or has no accounts — those have nothing to explain.
+ */
+export function blockedSummary(verdict: PoolVerdict): string {
+  if (verdict.state !== 'blocked') return '';
+  const { reasons, blockedBy, accounts } = verdict;
+  if (reasons.length === 1) {
+    const phrase = REASON_PHRASE[reasons[0]];
+    return accounts === 1 ? `the only account is ${phrase}` : `all ${accounts} accounts are ${phrase}`;
+  }
+  return reasons.map((r) => `${blockedBy[r]} ${REASON_PHRASE[r]}`).join(', ');
 }
 
 export interface PoolStatus {
@@ -650,6 +755,15 @@ export class AccountPool {
   /** Select without consuming a round-robin turn. */
   peek(family?: string | null): PoolAccount | null {
     return this.selectInternal(family, false);
+  }
+
+  /**
+   * Whether this pool can serve, and why not when it cannot. The status
+   * surfaces read this rather than filtering `all()` themselves — see
+   * `poolVerdict`.
+   */
+  verdict(family?: string | null, now: number = Date.now()): PoolVerdict {
+    return poolVerdict([...this.accounts.values()], now, family);
   }
 
   private selectInternal(family: string | null | undefined, advanceRoundRobin: boolean): PoolAccount | null {
