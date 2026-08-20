@@ -68,6 +68,14 @@
       "method": "POST",
       "url": "/v1/messages?beta=true",
       "status": 200
+    },
+    {
+      "name": "headless-main-loop",
+      "what": "Headless claude -p main loop: cc_entrypoint=sdk-cli, Claude Agent SDK identity, context_management. Its beta list differs from the interactive main loop on an identically-shaped body.",
+      "file": "headless-main-loop.json",
+      "method": "POST",
+      "url": "/v1/messages?beta=true",
+      "status": 200
     }
   ]
 }

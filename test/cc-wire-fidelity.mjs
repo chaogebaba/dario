@@ -445,15 +445,21 @@ header('drift: re-record against the installed Claude Code');
     const { tmpdir } = await import('node:os');
 
     const home = await mkdtemp(join(tmpdir(), 'dario-live-cc-'));
-    let seen = null;
+    const seen = [];
     const rec = createServer(async (req, res) => {
       const chunks = [];
       for await (const c of req) chunks.push(c);
-      if (req.url.startsWith('/v1/messages') && !seen) {
-        seen = {
+      if (req.url.startsWith('/v1/messages')) {
+        // Every request, not just the first: one `claude -p` fires the title
+        // generator, the main loop, and sometimes count_tokens, in an order
+        // that is not stable. Matching a fixture to whichever arrived first
+        // compares a title-generator request against a main-loop capture and
+        // reports drift that is really just a different request kind.
+        seen.push({
+          url: req.url,
           headers: { ...req.headers },
           body: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'),
-        };
+        });
       }
       const up = await fetch('https://api.anthropic.com' + req.url, {
         method: req.method,
@@ -485,24 +491,58 @@ header('drift: re-record against the installed Claude Code');
         setTimeout(() => { cp.kill(); resolve(); }, 120_000);
       });
 
-      const want = SHAPES['headless-sdk'].request;
-      check('live CC reached the recorder', seen !== null);
-      if (seen) {
+      check('live CC reached the recorder', seen.length > 0);
+
+      const ver = seen.map((r) => /cc_version=([\d.]+)/.exec(r.body.system?.[0]?.text ?? '')?.[1]).find(Boolean);
+      if (ver && !ver.startsWith(index.ccVersion)) {
+        console.log(`  NOTE: installed CC is ${ver}, fixtures are ${index.ccVersion}`);
+      }
+
+      // Pair each live request with the fixture that has the same top-level
+      // key order — that is what identifies a request KIND, and it is the
+      // first thing that drifts when CC changes its wire shape.
+      // Keyed on entrypoint too, because they are not the same client. CC
+      // under `-p` announces cc_entrypoint=sdk-cli and sends a different beta
+      // list from the interactive `cli` entrypoint on an identically-shaped
+      // body — the headless title generator omits redact-thinking, which the
+      // interactive main loop sends. Pairing on key order alone compares those
+      // two and calls the difference drift.
+      const entrypoint = (blocks) => Array.isArray(blocks)
+        ? /cc_entrypoint=([a-z-]+)/.exec(JSON.stringify(blocks))?.[1] ?? '?'
+        : '?';
+      const fixtureKey = (f) => `${f.bodyKeyOrder.join(',')}|${f.headers['user-agent']?.match(/\(external, ([^)]+)\)/)?.[1] ?? '?'}`;
+      const byKeyOrder = new Map(Object.entries(SHAPES)
+        .filter(([, f]) => f.request.method === 'POST' && f.request.bodyKeyOrder)
+        .map(([n, f]) => [fixtureKey(f.request), { name: n, req: f.request }]));
+
+      const unmatched = [];
+      let compared = 0;
+      for (const live of seen) {
+        const key = `${Object.keys(live.body).join(',')}|${entrypoint(live.body.system)}`;
+        const fixture = byKeyOrder.get(key);
+        if (!fixture) { unmatched.push(`${live.url} → ${key}`); continue; }
+        compared++;
+        const want = fixture.req;
         const drift = [];
         for (const k of Object.keys(want.headers)) {
-          if (['x-claude-code-session-id', 'user-agent', 'x-stainless-runtime-version'].includes(k)) continue;
-          if (seen.headers[k] !== want.headers[k]) drift.push(`${k}: ${want.headers[k]} → ${seen.headers[k]}`);
+          // Per-session or per-host by nature; drift in these says nothing.
+          if (['x-claude-code-session-id', 'user-agent', 'x-stainless-runtime-version',
+            'x-stainless-os', 'x-stainless-arch'].includes(k)) continue;
+          if (live.headers[k] !== want.headers[k]) drift.push(`${k}:\n       fixture ${want.headers[k]}\n       live    ${live.headers[k]}`);
         }
-        check(`no header drift vs the ${index.ccVersion} fixture`, drift.length === 0, '\n     ' + drift.join('\n     '));
-        check('body key order unchanged',
-          Object.keys(seen.body).join(',') === want.bodyKeyOrder.join(','),
-          `\n     fixture ${want.bodyKeyOrder.join(',')}\n     live    ${Object.keys(seen.body).join(',')}`);
-        check('system block count unchanged',
-          seen.body.system?.length === want.systemBlocks.length);
-        const ver = /cc_version=([\d.]+)/.exec(seen.body.system?.[0]?.text ?? '')?.[1];
-        if (ver && !ver.startsWith(index.ccVersion)) {
-          console.log(`  NOTE: installed CC is ${ver}, fixtures are ${index.ccVersion} — re-record if the checks above drifted`);
+        check(`${fixture.name}: no header drift vs the ${index.ccVersion} fixture`,
+          drift.length === 0, '\n     ' + drift.join('\n     '));
+        if (Array.isArray(want.systemBlocks)) {
+          check(`${fixture.name}: system block count unchanged`,
+            live.body.system?.length === want.systemBlocks.length);
         }
+      }
+      check(`at least one live request matched a fixture kind (${compared}/${seen.length})`,
+        compared > 0);
+      // A shape with no fixture is news, not a failure: this run may simply
+      // not have exercised it, or CC may have grown one. Say so either way.
+      if (unmatched.length) {
+        console.log(`  NOTE: ${unmatched.length} live request shape(s) match no fixture:\n     ${unmatched.join('\n     ')}`);
       }
     } finally {
       rec.close();
