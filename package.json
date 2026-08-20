@@ -1,7 +1,7 @@
 {
   "name": "@askalf/dario",
   "version": "5.5.22",
-  "description": "Use your Claude Pro/Max subscription in any tool — Cursor, Cline, Aider, the Agent SDK, your scripts — at subscription pricing, not per-token API bills. One local Anthropic + OpenAI-compatible endpoint.",
+  "description": "Use your Claude Pro/Max subscription in any tool \u2014 Cursor, Cline, Aider, the Agent SDK, your scripts \u2014 at subscription pricing, not per-token API bills. One local Anthropic + OpenAI-compatible endpoint.",
   "type": "module",
   "bin": {
     "dario": "./dist/cli.js"
@@ -24,7 +24,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && cp src/cc-template-data.json dist/",
+    "build": "tsc && cp src/cc-template-data.json dist/ && bun scripts/stamp-build.mjs",
     "test": "bun test/all.test.mjs",
     "test:serial": "bun test/issue-29-tool-translation.mjs && bun test/hybrid-tools.mjs && bun test/tool-schema-contract.mjs && bun test/scrub-paths.mjs && bun test/provider-prefix.mjs && bun test/analytics-recording.mjs && bun test/analytics-billing-bucket.mjs && bun test/failover-429.mjs && bun test/pool-sticky.mjs && bun test/live-fingerprint.mjs && bun test/proxy-header-order.mjs && bun test/proxy-body-order.mjs && bun test/runtime-fingerprint.mjs && bun test/pacing.mjs && bun test/stream-drain.mjs && bun test/subagent.mjs && bun test/mcp-protocol.mjs && bun test/mcp-tools.mjs && bun test/mcp-e2e.mjs && bun test/session-rotation.mjs && bun test/drift-detection.mjs && bun test/cc-authorize-probe-classifier.mjs && bun test/compat-range.mjs && bun test/doctor-formatter.mjs && bun test/doctor-identity-drift.mjs && bun test/atomic-write.mjs && bun test/account-refresh-singleflight.mjs && bun test/durable-token-persist.mjs && bun test/streaming-edge-cases.mjs && bun test/client-detection.mjs && bun test/manual-oauth-flow.mjs && bun test/scrub-template.mjs && bun test/context-bleed.mjs && bun test/passthrough-header-forwarding.mjs && bun test/capture-provenance.mjs && bun test/sanitize-messages.mjs && bun test/platform-tools.mjs && bun test/strict-template-flags.mjs && bun test/request-queue.mjs && bun test/effort-flag.mjs && bun test/template-invariants.mjs",
     "audit": "bun audit --audit-level=high",
