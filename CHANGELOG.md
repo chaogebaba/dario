@@ -87,6 +87,18 @@ checklist.
 
 - **Interrupted Claude tool calls recover without corrupting the transcript.** A request whose history ended with a complete client `tool_use` but no immediately following `tool_result` used to hit Anthropic's persistent 400 pairing error; preserving the assistant tail to avoid the older runaway-loop regression was necessary but insufficient. Dario now repairs both trailing and persisted mid-history orphans at the outbound request boundary by inserting one adjacent `is_error: true` result per tool ID. The synthetic result states that execution was interrupted and its outcome is unknown, so Claude can continue without Dario rerunning a possibly side-effecting tool or claiming it failed. Existing results remain authoritative, parallel calls retain order, and text-only assistant tails on models without prefill support still receive the separate continuation user turn. Deliberate non-goals are trailing `server_tool_use` blocks, whose results are generated server-side, and malformed client `tool_use` blocks with missing/non-string IDs or incomplete name/input; fabricating client results for either can create `unexpected tool_use_id` errors. The normalization intentionally mutates the outbound message history in place; request-body diagnostics after the build therefore observe the repaired wire shape.
 
+## [5.5.25] - 2026-08-20
+
+- **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.236` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.236 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
+## [5.5.24] - 2026-08-19
+
+- **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.235` → `2.1.236` for CC v2.1.236. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
+## [5.5.23] - 2026-08-19
+
+- **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [5.5.22] - 2026-08-19
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.235` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.235 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
@@ -111,19 +123,24 @@ checklist.
 ## [5.5.18] - 2026-08-17
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.233` → `2.1.234` for CC v2.1.234. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.5.17] - 2026-08-15
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
 - **Config-scoped tool preservation** — the CC v2.1.233 capture omitted `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate` (remote-config drift; `TaskOutput`/`TaskStop` were unaffected), which would have shrunk `CC_NATIVE_NAMES_UNION` and pushed a CC client declaring those tools into the unmapped round-robin — the v4.8.93 failure mode. New `CONFIG_SCOPED_TOOLS` set + a preservation merge in `scripts/capture-and-bake.mjs` carry them forward from the previous bundle, mirroring `PLATFORM_ONLY_TOOLS` and `INTERACTIVE_ONLY_TOOLS`. Guarded by `test/template-config-scoped-tools.mjs`.
+
 ## [5.5.16] - 2026-08-14
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.232` → `2.1.233` for CC v2.1.233. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.5.15] - 2026-08-14
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.232` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.232 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.5.14] - 2026-08-13
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.229` → `2.1.232` for CC v2.1.232. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.5.13] - 2026-08-13
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.229` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.229 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
@@ -132,18 +149,23 @@ checklist.
 ## [5.5.12] - 2026-08-12
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.228` → `2.1.229` for CC v2.1.229. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.5.11] - 2026-08-12
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.228` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.228 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.5.10] - 2026-08-11
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.227` → `2.1.228` for CC v2.1.228. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.5.9] - 2026-08-11
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [5.5.8] - 2026-08-10
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.226` → `2.1.227` for CC v2.1.227. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.5.7] - 2026-08-09
 
 - **Perf: skip the orchestration-tag scrub on message blocks that can't contain a tag.** `sanitizeMessages` runs on every request (including byte-faithful CC traffic), and `sanitizeContent` applied all ~28 orchestration-tag regexes to every text block unconditionally. Every one of those patterns is anchored on a literal `<`, so a block with none — the common case: prose user turns, command/tool output — cannot match any of them. `sanitizeContent` now guards the loop with a single `indexOf('<')` check and skips straight to the trailing whitespace normalization when there's no `<`. On a realistic message mix this cuts the scrub's CPU ~80% (measured 5.85× on the loop) while producing byte-identical output — the loop is skipped only when it provably cannot change the string, and the whitespace-collapse/trim still runs for every block exactly as before. `test/sanitize-messages.mjs` adds a parity check asserting the guarded path matches the unconditional loop across tag-free and tag-bearing inputs, plus a guard that tag-free code containing a bare `<` comparison is preserved verbatim.
@@ -173,6 +195,7 @@ checklist.
 ## [5.5.3] - 2026-08-08
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.224` → `2.1.225` for CC v2.1.225. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.5.2] - 2026-08-08
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture (CC v2.1.224, `ListAgents` added). Bundled fallback template now matches the current CC wire shape.
@@ -206,6 +229,7 @@ checklist.
 ## [5.4.31] - 2026-08-07
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.223` → `2.1.224` for CC v2.1.224. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.4.30] - 2026-08-06
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.222` → `2.1.223` for CC v2.1.223. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
@@ -335,6 +359,7 @@ checklist.
 ## [5.4.15] - 2026-07-26
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [5.4.14] - 2026-07-26
 
 - **`DARIO_OVERAGE_GUARD=off` and `DARIO_OVERAGE_NOTIFY=off` now actually turn those features off.** `cli.ts` has documented both as the env equivalents of `--no-overage-guard` / `--no-overage-notify` since v4.1, but `parseBooleanEnv` returns `true` or `undefined` and never `false` — so `off` fell straight through `flag ?? env ?? fileCfg ?? true` and the guard stayed enabled, silently. Container deployments were the only ones affected, and the worst ones to affect: a flag was the sole working way to disable it. New `parseTriStateEnv` handles `off|0|false|no` as well as `on|1|true|yes`, and is used only at those two sites. `parseBooleanEnv` keeps its truthy-only contract — the three call sites that read it (`DARIO_STEALTH`, `DARIO_NO_LIVE_CAPTURE`, `DARIO_STRICT_TEMPLATE`) use `||`, where `false` and `undefined` are indistinguishable, and `test/strict-template-flags.mjs` pins that behaviour. An unrecognised value still yields `undefined` at both, so a typo defers to the config file and the default instead of guessing.
@@ -400,6 +425,7 @@ checklist.
 ## [5.4.8] - 2026-07-26
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [5.4.7] - 2026-07-26
 
 Found by driving the real `startTuiApp()` through a fake TTY against a local stub proxy — real sockets, real SSE, real raw-mode key parsing — and auditing every frame the app actually wrote, across six tabs and twelve terminal geometries.
@@ -451,6 +477,7 @@ Found by driving the real `startTuiApp()` through a fake TTY against a local stu
 ## [5.4.3] - 2026-07-25
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [5.4.2] - 2026-07-25
 
 - **The baked template's two tool lists disagreed.** `tool_names` is derived from `tools` in both places that build a template (`scrub-template.ts:50`, `live-fingerprint.ts:757`), so equality is the contract — but `capture-and-bake` merges other-platform and interactive-only tools into `tools` *after* `scrubTemplate()` has already derived the names, and nothing re-synced them. The shipped bundle carried **`tool_names` 30 vs `tools` 33**: `AskUserQuestion`, `EnterPlanMode` and `ExitPlanMode` had full definitions sitting in `tools` while being absent from the inventory a consumer would read. A Linux bake widened it to 27 vs 33, since platform preservation re-adds `Glob` / `Grep` / `PowerShell` too.
@@ -472,6 +499,7 @@ Found by driving the real `startTuiApp()` through a fake TTY against a local stu
 - `header_order` still lists both keys: the *order* CC emits headers in is wire shape and is not host-specific. Only the captured *values* are dropped — the proxy sets them per-process, as it always did.
 
 - **Tests:** new `test/template-header-overlay.mjs` (13 assertions) covers the self-healing path — a Windows-baked bundle against a Linux runtime, an arm64 mac against an x64-baked bundle, case-insensitive key matching, the `x-api-key` regression, and degenerate inputs. `test/live-fingerprint.mjs` gains 5 assertions pinning that the two host keys are excluded from capture *and* that the CC-determined stainless keys (`lang`, `runtime`, `runtime-version`) are still captured, so the fix cannot silently over-reach.
+
 ## [5.4.0] - 2026-07-25
 
 - **Per-model system prompts: Opus 5 and Sonnet 5 were getting the wrong one.** CC ships several models a materially different system prompt than the shared base, but `systemPromptForModel()` branched on `fable` alone — so Opus 5 and Sonnet 5 requests carried the opus-4-8 base. Measured on CC 2.1.220 with two byte-identical passes each (raw chars): base 6664, opus-5 9990, sonnet-5 28156, fable-5 11084. The bake now captures a variant per model into a `system_prompt_variants` map (scrubbed: fable 9222, opus-5 8110, sonnet-5 13442) and the selector routes each family to its own.
@@ -483,6 +511,7 @@ Found by driving the real `startTuiApp()` through a fake TTY against a local stu
 ## [5.3.2] - 2026-07-25
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [5.3.1] - 2026-07-25
 
 - **Template re-bake — CC opted into `afk-mode-2026-01-31`.** A live `capture-and-bake --check` against CC v2.1.220 exited 2 (real shape drift): the flag is on again, and the fable system-prompt variant grew 9200 -> 9222 chars. Re-baked; `--check` now exits 0. This is the same-binary remote-config drift class the checker exists for — CI reported zero drift on the v5.2.21 label refresh earlier the same day, so the flip happened between those two runs.
@@ -500,36 +529,47 @@ Found by driving the real `startTuiApp()` through a fake TTY against a local stu
 ## [5.2.21] - 2026-07-25
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.220` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.220 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.2.20] - 2026-07-25
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.219` → `2.1.220` for CC v2.1.220. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.2.19] - 2026-07-24
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.218` → `2.1.219` for CC v2.1.219. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.2.18] - 2026-07-23
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.218` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.218 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.2.17] - 2026-07-22
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.217` → `2.1.218` for CC v2.1.218. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.2.16] - 2026-07-21
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.216` → `2.1.217` for CC v2.1.217. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.2.15] - 2026-07-21
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.216` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.216 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.2.14] - 2026-07-20
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.215` → `2.1.216` for CC v2.1.216. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.2.13] - 2026-07-19
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.215` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.215 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.2.12] - 2026-07-19
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.214` → `2.1.215` for CC v2.1.215. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.2.11] - 2026-07-18
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [5.2.10] - 2026-07-18
 
 - **Fix: a container recreate could clobber a freshly-refreshed pool token, causing a fleet-wide auth outage (#805).** `resyncLoginFromCredentialsIfStale` overwrote the pool's `login` account from `credentials.json` on *any* token divergence, assuming the legacy file was always the newer source (#235's single-account case). In pool mode the reverse happens — the pool's own refresh loop advances `accounts/login.json` while `credentials.json` stays frozen — so a recreate replaced the live pool token with the stale legacy one, whose refresh token Anthropic had already rotated → `invalid_grant` on every startup → every request 503s until a manual re-auth. The resync now reconciles by freshness: it only overwrites when `credentials.json` is newer-or-equal, and leaves a strictly-newer pool token untouched (`creds-stale`).
@@ -537,6 +577,7 @@ Found by driving the real `startTuiApp()` through a fake TTY against a local stu
 ## [5.2.9] - 2026-07-18
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.214` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.214 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [5.2.8] - 2026-07-18
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.212` → `2.1.214` for CC v2.1.214. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
@@ -590,6 +631,7 @@ Found by driving the real `startTuiApp()` through a fake TTY against a local stu
 ## [5.2.2] - 2026-07-15
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.210` → `2.1.211` for CC v2.1.211. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.2.1] - 2026-07-15
 
 ### Changed
@@ -641,6 +683,7 @@ Found by driving the real `startTuiApp()` through a fake TTY against a local stu
 ## [5.1.1] - 2026-07-14
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.207` → `2.1.209` for CC v2.1.209. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [5.1.0] - 2026-07-13
 
 Two new opt-in proxy flags for the "run any model in Claude Code" use case, plus a dead-refresh-token diagnosability fix. No breaking changes; all defaults unchanged.
@@ -698,15 +741,19 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.154] - 2026-07-11
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [4.8.153] - 2026-07-11
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.206` → `2.1.207` for CC v2.1.207. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.152] - 2026-07-10
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.206` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.206 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.151] - 2026-07-10
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.205` → `2.1.206` for CC v2.1.206. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.150] - 2026-07-09
 
 - **Built-in Explore and Plan sub-agents ride the genuine-CC passthrough (#678, the v4.8.148 residual).** The reporter's forced-sub-agent re-run on v4.8.148 still burned ~3x direct per spawn (+17%/3 and +26%/6 spawns vs +7%/4 direct). Cause: CC's built-in *named* agents don't use the general-purpose agent prompt — Explore opens with "You are a file search specialist for Claude Code…" and Plan with "You are a software architect and planning specialist for Claude Code…" (exact bytes in the CC v2.1.205 bundle; a "read every file in parallel" prompt routes to Explore-type agents) — so neither matched the v4.8.148 opener list and every spawn fell onto the template path (~25KB prompt prepend + template tool rebuild, per request shape per cache window). Both openers are now in `CC_ORIGIN_SYSTEM_OPENERS`; anti-replay posture unchanged (billing block at `system[0]` still required, `startsWith` matching). Remaining known gap, now narrower: **custom agents** (`~/.claude/agents`) carry operator-authored definition text with no stable CC marker — there is no universal appended sentinel (the report-instruction sentence is baked into the general-purpose prompt only), so a durable structural discriminator is a follow-up design decision. `test/cc-passthrough.mjs` +3 checks.
@@ -714,6 +761,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.149] - 2026-07-09
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.205` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.205 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.148] - 2026-07-08
 
 - **Sub-agent and auto-mode-classifier requests ride the genuine-CC passthrough (#678 remote re-test).** A single CC session emits more than its main loop, and the v4.8.146 detector only recognized the main-loop identity block — so two whole request classes from a genuine CC client still fell onto the template path (~25KB template prompt prepended to their own system text, tool array rebuilt from template defs, re-billed per request shape per cache window): **sub-agent (Task/Agent tool) turns**, whose `system[1]` is the agent prompt "You are an agent for Claude Code, Anthropic's official CLI for Claude…" (exact bytes in the CC v2.1.205 bundle — neither starts with "You are Claude Code" nor mentions the Agent SDK), and **auto-mode permission-classifier calls**, fired once per gated tool call (including per sub-agent spawn) with a ~106KB "You are a security monitor for autonomous AI coding agents" prompt at `system[1]` (live loopback capture; the released 4.8.147 detector returns `false` on the captured body). This is the #678 reporter's v4.8.147 re-run: +3% local (≈ +2% direct) but **+19% on exactly the run where CC fanned out parallel sub-agents**. The detector now matches a `startsWith` opener list at `system[1]` — main loop, sub-agent, security monitor, plus the Agent SDK variant — with the `x-anthropic-billing-header:` block still required at `system[0]`, so the anti-replay posture for non-CC frameworks replaying billing-tagged bodies is unchanged. Verified against the captured wire bodies: the classifier request flips to passthrough and round-trips byte-faithfully (system verbatim, no tools injected on its tool-less body); a sub-agent-shaped body forwards its agent prompt and reduced tool set verbatim. Known gap: named/custom agents (`~/.claude/agents`, Explore/Plan) carry operator-authored definition text at `system[1]` with no stable CC marker and still ride the template path — follow-up needs a live capture to pin a discriminator. `test/cc-passthrough.mjs` +9 checks; suite 108/108.
@@ -721,6 +769,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.147] - 2026-07-08
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.204` → `2.1.205` for CC v2.1.205. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.146] - 2026-07-08
 
 - **Genuine Claude Code clients get byte-faithful passthrough (#678 follow-up).** A real CC request already IS the CC wire shape, but the template pipeline treated it like any non-CC client: dario prepended its ~25KB template prompt to the client's own CC system prompt (re-billed per request shape per cache window — the residual +5%-vs-direct in the #678 re-run), substituted template tool defs for the client's own (schema drift whenever the client's CC version differs from the template's), stripped thinking blocks CC intends to replay, truncated 30KB+ tool_results, scrubbed message content, and round-robin-mangled natives the `--print` template capture never sees (`AskUserQuestion`, plan-mode tools). Detection is two markers together — the `x-anthropic-billing-header:` system block AND CC's identity block ("You are Claude Code…" / the Agent SDK variant) — so a non-CC framework replaying a billing-tagged body stays on the detector path. On match, system blocks, tools, messages, thinking, effort, max_tokens, and top-level key order forward verbatim; dario still owns its billing tag (system[0]), its `metadata.user_id` identity, the anthropic-beta matrix and headers, `[1m]` model normalization, and deterministic cache breakpoints (client stamps stripped, 2 system + 2 conversation re-placed). Outranks the tool-mode flags — those dress up NON-CC clients as CC. Response path skips reverse-mapping (the client's own schemas went out). Live A/B (real API, identical captured CC turns): the passthrough build writes a smaller cold prefix (template-prompt duplication gone) with identical turn-2 cache reads, and the `tool substitution` warn disappears. `test/cc-passthrough.mjs` (44 checks).
@@ -736,9 +785,11 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.144] - 2026-07-08
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.204` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.204 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.143] - 2026-07-08
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.203` → `2.1.204` for CC v2.1.204. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.142] - 2026-07-08
 
 - **TUI Status tab shows the advertised model catalog.** New `Models` panel sourced live from the proxy's `/v1/models` (the upstream-autodetected catalog with the baked fallback), so the current families — Sonnet 5 and Fable 5 included — are visible at a glance and future models appear without a TUI change. `[1m]` long-context variants fold onto their base id as a `+[1m]` marker instead of doubling the list. Renders nothing when the proxy is unreachable. Core Sonnet 5 / Fable 5 support was audited as part of this release and is current everywhere it lives: baked catalog + autodetection, adaptive-thinking gating (any 5+ major), per-family beta matrix, the Fable system-prompt variant and tool-less guard, and date-modeled Sonnet 5 intro pricing in `/analytics`. `test/tui-tabs.mjs` +10 checks.
@@ -750,6 +801,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.141] - 2026-07-07
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.202` → `2.1.203` for CC v2.1.203. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.140] - 2026-07-07
 
 - **Cache TTL is 1h now, matching real CC — stops dario draining the Max window far faster than direct CC (#678).** dario stamped the 5-min ephemeral default (`{type:'ephemeral'}`) on all four cache breakpoints, but real CC caches its system blocks for 1h (documented in `live-fingerprint.ts` extractTemplate). So dario's prefix — system + the entire tool array — expired 12× sooner than CC's: any interactive turn past the 5-min window re-created the whole prefix at cache-creation cost while native CC read it warm for up to an hour. On a heavy MCP config (the reporter forwarded 228 `mcp__*` tools) that cold re-create is what burned ~15%/message through dario vs 1–2% direct — nothing to do with the tool count itself (direct CC sends the same tools), only with how long the prefix stays cached. The emitted cache-control is now a single `CC_CACHE_CONTROL = { type: 'ephemeral', ttl: '1h' }` (`src/cc-template.ts`) consumed by both the system blocks and `applyCcPromptCaching`, so the TTL can't silently drift back to 5m. Live-verified on a bare Max subscription (no Extra Usage): the identical request A/B'd through unpatched vs patched dario returns `ephemeral_5m_input_tokens:1117 / ephemeral_1h:0` vs `ephemeral_5m:0 / ephemeral_1h:1112`, both billed `subscription` — Anthropic honors the 1h TTL on subscription OAuth via the beta set CC already sends, so no `extended-cache-ttl` / Extra Usage is involved. `test/prompt-caching.mjs` +4 (all breakpoints carry `ttl:'1h'`; 17/17, full suite 107/107).
@@ -757,9 +809,11 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.139] - 2026-07-07
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.202` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.202 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.138] - 2026-07-06
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.201` → `2.1.202` for CC v2.1.202. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.137] - 2026-07-05
 
 - **`*_overage_included` claims classify as subscription — stops overage-guard halt loops (#672)** — a Max account crossing into its included high-tier overage credit (7d 82%, `7d_oi` bucket 99%) started receiving `representative-claim: seven_day_overage_included` — a healthy, $0, subscription-side response (genuine model echo, `status=allowed_warning`, overage-utilization 0) that dario's halt-on-unknown allow-list (#288) treated as non-subscription billing, 503ing the proxy in 30-minute cooldown loops exactly as the weekly window tightened. `SUBSCRIPTION_CLAIMS` / `billingBucketFromClaim` now recognize `five_hour_overage_included` / `seven_day_overage_included`; the proxy billing log keys its overage-`0%` fallback off `SUBSCRIPTION_CLAIMS` instead of a duplicate list; real paid `overage` (and novel credit-bucket claims) still halt. `analytics-billing-bucket.mjs` +6 checks.
@@ -776,15 +830,19 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.133] - 2026-07-04
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.201` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.201 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.132] - 2026-07-04
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.200` → `2.1.201` for CC v2.1.201. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.131] - 2026-07-03
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.199` → `2.1.200` for CC v2.1.200. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.130] - 2026-07-03
 
 - **Default `output_config.effort` to `high` — fixes zero-text output on long prompts (#658)** — `resolveEffort` defaulted to `max`, the reasoning ceiling. Combined with unbounded `thinking: {type:"adaptive"}`, `max` effort makes the model reason until it exhausts `max_tokens`: on prompts over ~5K input tokens the thinking phase consumes the entire budget and the stream ends `stop_reason: max_tokens` with **zero text content blocks**. `high` — Claude Code's out-of-box default — thinks proportionally and leaves room for the answer, so this fixes the reported failure for every client by default; no opt-out flag needed. Operators wanting a higher tier still pin `--effort` / `DARIO_EFFORT`. The `max`-default regression landed in #470 and outlived the #624 clamp removal.
+
 ## [4.8.129] - 2026-07-03
 
 - **Keep dario's request format in step with current Claude Code (#657)** — three fields in dario's outgoing requests had fallen out of step with what current Claude Code sends. Brought back into line:
@@ -792,12 +850,15 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
   - **Per-model `anthropic-beta` refreshed.** The per-model beta sets in `betaForModel` were stale. Updated to the current per-model shape: sonnet-5 keeps `mid-conversation-system`, haiku drops `afk-mode` and orders `claude-code-20250219` at position 5, fable places `fallback-credit` before `afk-mode`, and `[1m]` carries `context-1m` at position 2. Rebuilt with anchor-relative insert/move so both order and membership match, whether or not the base set carries the remote-config-volatile `afk-mode`.
   - **`cc_version` build suffix is now stable per config.** The suffix was derived per-request from the user message; it now depends only on the loaded template, so it's one stable value per config (a memoized hash) rather than changing every request.
   - **Drift guards.** New `scripts/check-wire-drift.mjs` (self-hosted `wire-drift-self-hosted.yml`) flags per-model `anthropic-beta` / billing-header drift so it can't go stale silently again. `scripts/check-overage-live.mjs` (`npm run check:overage`) is an operator-run check that all models bill to the subscription plan under load. 105 tests green.
+
 ## [4.8.128] - 2026-07-03
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.199` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.199 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.127] - 2026-07-03
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.198` → `2.1.199` for CC v2.1.199. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.126] - 2026-07-02
 
 - **`dario login` no longer hangs the terminal for up to 5 minutes after a successful login (#642-audit)** — the OAuth callback flow's 5-minute timeout was neither `.unref()`'d nor cleared, so after login completed the timer kept the Node process alive until it fired. It is now `unref`'d (so a completed login can't pin the process) and cleared on the success path. Matches the sibling `accounts.ts` add-account flow.
@@ -863,6 +924,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.116] - 2026-07-02
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [4.8.115] - 2026-07-01
 
 - **Pool activates at one account — a cold `accounts add` is servable without `dario login` (#630)** — a single `~/.dario/accounts/` entry now boots the pool (previously required 2+), so `dario accounts add acct1` on a fresh box yields a working proxy with no `dario login` step; `dario login` is unchanged as the single-default-account one-liner. The activation decision is extracted as `shouldUsePool()` and pinned by `test/pool-activation.mjs`. Also in the change: the `resyncLoginFromCredentialsIfStale` guard tightened `< 2` → `=== 0` so a pool shrunk to one migrated entry still refreshes stale tokens; the first `accounts add` prints a "servable — no `dario login` needed" hint; `accounts list` / `dario doctor` (1-account pool is `ok`, not `info`) / MCP `accounts_list`+`usage` / startup banner copy updated off the 2+ wording. Behavior note: a lone pooled account plus a later `credentials.json` now serves the pooled account, matching what ≥2-account pools already do.
@@ -874,6 +936,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.113] - 2026-07-01
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.197` → `2.1.198` for CC v2.1.198. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.112] - 2026-07-01
 
 - **Fable 5 wire lock-step with CC 2.1.198** — after Fable 5's 2026-07-01 redeploy, a fresh live replay (CC 2.1.198's verbatim fable body through the proxy, only `output_config.effort` mutated) shows two divergences from CC, now fixed. (1) **Effort clamp removed** — the pre-suspension fable soft-refused `max`/`xhigh` (200 + `stop_reason:"refusal"`), so dario clamped them to `high` and defaulted fable to `high`; the redeployed model now answers `high`/`xhigh`/`max` (all `end_turn`, zero refusals) and CC 2.1.198 sends `effort:"xhigh"` on fable, so fable now takes the general path (default `max`, no clamp) exactly like opus. A box pinning `DARIO_EFFORT=max` now sends fable full effort instead of a silently-downgraded `high`. (2) **`thinking.display:"omitted"`** — CC 2.1.198 emits `{ type:"adaptive", display:"omitted" }` on every adaptive-thinking model; dario emitted only `{ type:"adaptive" }`. Added `display:"omitted"` to match the wire byte-for-byte. The `fallback-credit-2026-06-01` beta on fable is unchanged and still valid (verified end_turn through prod).
@@ -893,6 +956,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.110] - 2026-07-01
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.197` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.197 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.109] - 2026-06-30
 
 - **Admin API refinements (#599)** — per reviewer feedback, the headless login flow is now keyed by the account **`alias`** instead of a separate `login_id`: `POST /admin/login/start { alias }` → `{ authorize_url, expires_at }` and `POST /admin/login/complete { alias, code }` → `{ alias, status }` (one pending login per alias; a repeat `/start` replaces it). Also: when `DARIO_ADMIN=1` and there are **no credentials yet**, the proxy now starts in **admin-only mode** instead of exiting — so the first account can be provisioned over HTTP with no console access (LLM routes return 503 until an account exists). Default (non-admin) startup is unchanged.
@@ -904,6 +968,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.107] - 2026-06-30
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.196` → `2.1.197` for CC v2.1.197. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.106] - 2026-06-30
 
 - **Headless admin API (#599)** — opt-in HTTP control plane for managing the account pool without console access. Enable with `DARIO_ADMIN=1`; loopback-only, and every `/admin/*` call requires a bearer token (`DARIO_ADMIN_TOKEN`, falling back to `DARIO_API_KEY`) **even on loopback**, since these endpoints add/remove OAuth accounts (fails closed if enabled without a token). Endpoints: `POST /admin/login/start` + `POST /admin/login/complete` (headless PKCE add-account, mirroring `dario accounts add --manual`), `GET /admin/accounts`, `DELETE /admin/accounts/<alias>`. Account changes take effect on the next proxy restart.
@@ -919,15 +984,19 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.103] - 2026-06-30
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [4.8.102] - 2026-06-30
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.195` → `2.1.196` for CC v2.1.196. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.101] - 2026-06-27
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.195` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.195 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.100] - 2026-06-26
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.193` → `2.1.195` for CC v2.1.195. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.99] - 2026-06-26
 
 - **Preserve client structured-output schema (`--preserve-output-format`)** — opt-in flag (env `DARIO_PRESERVE_OUTPUT_FORMAT`) that carries the client's `output_config.format` (Anthropic's native structured-output JSON schema) through dario's CC rebuild instead of dropping it. Structured-output clients — e.g. the Vercel AI SDK's `generateObject` — otherwise get unconstrained prose their strict schema parser rejects (`No object generated: response did not match schema`). Off by default, so the CC wire shape stays byte-identical unless set; independent of `--skip-fields` (which opts out dario's *injected* fields, not the caller's schema); rides on whatever model the caller chose, since the constraint is enforced upstream during decoding. Thanks @pnewell. (#583)
@@ -935,31 +1004,40 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.98] - 2026-06-26
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.193` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.193 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.97] - 2026-06-25
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.191` → `2.1.193` for CC v2.1.193. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.96] - 2026-06-25
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.191` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.191 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.95] - 2026-06-24
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.190` → `2.1.191` for CC v2.1.191. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.94] - 2026-06-24
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.187` → `2.1.190` for CC v2.1.190. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.93] - 2026-06-24
 
 - **Template rebake (v2.1.187)** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected drift against a live CC capture.
 - **Fix — preserve interactive-only tools across headless rebakes** — the bake captures CC headlessly (`claude --print -p hi`), and CC v2.1.187 stopped advertising `AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode` in `--print` mode, so the auto-rebake dropped them from the bundled template. Because `buildCCRequest` advertises only the intersection of the client's declared tools and the template, a full CC client that declared `AskUserQuestion` no longer had it advertised (the advertise-respects-client contract). The bake now preserves `INTERACTIVE_ONLY_TOOLS` from the previous bundle — mirroring the existing win32-only `PowerShell`/`Glob`/`Grep` preservation — so the bundled template stays a superset. Added `test/template-interactive-tools.mjs` to guard the invariant.
+
 ## [4.8.92] - 2026-06-23
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.186` → `2.1.187` for CC v2.1.187. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.91] - 2026-06-23
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [4.8.90] - 2026-06-22
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.185` → `2.1.186` for CC v2.1.186. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.89] - 2026-06-21
 
 - **Tool detection** — `detectNonCCByTools` now auto-preserves a *fully*-unmapped tool surface (`ratio === 1`) at any size, not just 3+ tools. A non-CC client carrying only 1–2 custom tools (none in `TOOL_MAP`) previously slipped under the `len < 3` guard and had its tools round-robined onto CC fallback slots, which silently corrupts every call (the model upstream never sees the real tool). Safe for real CC — it always carries `Bash`+`Read` (both `TOOL_MAP` keys once lowercased), so it can never present a 100%-unmapped surface; its detection result and wire shape are unchanged. The mixed-surface rule (3+ tools, ≥80% unmapped) is retained. (#554)
@@ -967,30 +1045,39 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.88] - 2026-06-21
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.185` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.185 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.87] - 2026-06-20
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.183` → `2.1.185` for CC v2.1.185. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.86] - 2026-06-19
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.183` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.183 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.85] - 2026-06-19
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.181` → `2.1.183` for CC v2.1.183. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.84] - 2026-06-18
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.181` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.181 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.83] - 2026-06-17
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.179` → `2.1.181` for CC v2.1.181. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.82] - 2026-06-17
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.179` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.179 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.81] - 2026-06-16
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.178` → `2.1.179` for CC v2.1.179. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.79] - 2026-06-16
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.178` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.178 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.78] - 2026-06-15
 
 - **`cch` is now anchored to the billing tag, never first-match (dario#528).** The deterministic-`cch` hashing and the outbound stamp matched the first `cch=#####` anywhere in the serialized request body. Because `messages` serialize before the `system` billing tag, a `cch=` quoted in conversation content was matched first — which mis-hashed the request and silently rewrote the user's prompt text at stamp time, leaving the real billing `cch` as the random placeholder. The token is now matched with a bounded, ReDoS-safe regex anchored on `cc_entrypoint=...; cch=`, centralized in `cch.ts:stampCch`. Output is identical on the normal single-`cch` body (existing behavior unchanged) and correct on bodies that quote a `cch` — which is also what real Claude Code must do. New regression tests in `test/cch.mjs`.
@@ -999,6 +1086,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.77] - 2026-06-15
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.177` → `2.1.178` for CC v2.1.178. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.76] - 2026-06-15
 
 - **Overage-guard now halts on any non-subscription billing claim, not just `overage` (dario#288).** The guard matched `representative-claim === 'overage'` exactly, so two cases slipped through: `api` billing, and — the reason for this change — a request reclassified into the new Agent-SDK / headless **credit bucket** from the 2026-06-15 split, whose claim string dario has never observed (it keeps traffic in the pool, so the credit-bucket value is unknown and can't be hardcoded). Detection is now an allow-list (`isNonSubscriptionBilling`): it halts on anything that is not a known subscription claim (`five_hour`/`seven_day` + `_fallback` variants) and not the `unknown` sentinel (no rate-limit header = a transient non-200/stream-abort, which must not halt). The guard is auto-disabled in `--upstream-api-key` passthrough mode, where `api` billing is intended rather than a failure. No TUI credit-balance tracking was added: dario's invariant is subscription-pool-or-halt, so credit usage is always zero when it's working, and the per-request rate-limit headers it reads don't carry account credit balances. New unit coverage in `test/overage-guard.mjs` (`api` + novel `sdk_credit`/`agent_credit` claims halt; subscription + `unknown` stay clear) and `test/analytics-billing-bucket.mjs` (the `isNonSubscriptionBilling` predicate).
@@ -1026,12 +1114,15 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.70] - 2026-06-13
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.177` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.177 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.69] - 2026-06-13
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.176` → `2.1.177` for CC v2.1.177. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.68] - 2026-06-12
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.175` → `2.1.176` for CC v2.1.176. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.67] - 2026-06-12
 
 - **`dario doctor --obedience` — per-family client-system obedience probe (dario#509).** The 2026-06-12 sonnet regression (client system prompts silently ignored; fixed by the precedence framing in 4.8.66) was invisible to every existing check: 200s, subscription billing, label-clean templates, and the model smoke all stayed green, and detection came from a downstream consumer failing to parse JSON. The new opt-in probe sends each model family — through the running proxy, so it exercises the cc-template merge seam — a trivial client system prompt ("reply with ONLY the word PONG") and asserts the reply obeys, up to 3 attempts per family to tolerate sampling (families probe in parallel). Verdicts are deliberately two-tier: `[FAIL]` = the model *answered but ignored the instruction* (behavioral drift — and per the runbook, that means "investigate presentation/merge", since this property is upstream-influenced and not necessarily a dario bug); `[WARN]` = the probe couldn't complete (infra flake, not drift). `scripts/check-doctor-drift.mjs` now runs `doctor --obedience` and treats obedience `[FAIL]` rows as drift, so the 6-hourly `dario-doctor-watch` files the dedup'd issue the morning behavior shifts — before any consumer notices. A deployed dario predating the flag ignores it and emits no rows, so the watch upgrade is safe to ship ahead of the container image. New e2e section in `test/e2e.mjs` covers the same probe per family; pure verdict helpers (`isObedientReply`, `extractMessageText`) are unit-tested in `test/doctor-obedience.mjs`.
@@ -1043,24 +1134,31 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.65] - 2026-06-12
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.174` → `2.1.175` for CC v2.1.175. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.64] - 2026-06-12
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.175` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.175 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.63] - 2026-06-12
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.173` → `2.1.174` for CC v2.1.174. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.62] - 2026-06-11
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [4.8.61] - 2026-06-11
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.172` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.172 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.60] - 2026-06-11
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.172` → `2.1.173` for CC v2.1.173. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.59] - 2026-06-10
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.170` → `2.1.172` for CC v2.1.172. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.58] - 2026-06-10
 
 - **fix: auto-retry effort-capability 400s — older models meet pinned efforts gracefully.** The v4.8.57 autodetected catalog exposes models that predate the newer effort tiers (smoke catch, same day: `claude-opus-4-5-20251101` + the prod `DARIO_EFFORT=max` pin → 400 `"This model does not support effort level 'max'. Supported levels: high, low, medium."`). Same pattern as the context-1m and anthropic-beta rejection machinery: parse the supported set out of the 400 (`parseEffortRejection`), retry once with `output_config.effort` clamped to the strongest supported level (`bestSupportedEffort` — degrade as little as possible: xhigh > max > high > medium > low), and cache the supported set **per wire model** (effort support is a model property, not an account property) so the body-build path clamps up front on every later request. Value-only in-place mutation — JSON field order (a fingerprint surface) is untouched. When the 400 matches but the body has no `output_config.effort` to clamp, the original upstream error is forwarded unchanged. fable's effort intolerance is unaffected — it soft-refuses (200 + `stop_reason:"refusal"`), invisible to 400-based machinery, and stays handled by its measured `resolveEffort` clamp. New `test/effort-capability.mjs` (16 assertions); full suite 86/86. Lockfile re-synced in-PR this time.
@@ -1130,9 +1228,11 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.45] - 2026-06-09
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.169` → `2.1.170` for CC v2.1.170. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.44] - 2026-06-09
 
 - **Template label refresh** — `_version`, `_supportedMaxTested`, and the `user-agent` header bumped to `2.1.169` to track `@anthropic-ai/claude-code@latest`. The live wire shape is unchanged — cc-drift-template-watch ran `capture-and-bake --check` against live CC v2.1.169 and found zero shape drift vs the bundle — so this is a label refresh, not a re-capture (`_captured` stays at the last real capture). Auto-merged; clears the `sdk-drift` early-warning signal.
+
 ## [4.8.43] - 2026-06-08
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.168` → `2.1.169` for CC v2.1.169. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
@@ -1164,6 +1264,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.36] - 2026-06-07
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.167` → `2.1.168` for CC v2.1.168. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.35] - 2026-06-06
 
 - **Prefer IPv4 for the Anthropic upstream (`dns.setDefaultResultOrder('ipv4first')` at proxy startup)** — `api.anthropic.com` publishes both A and AAAA records; in a container with no IPv6 egress (e.g. a default Docker bridge network) Node's default `verbatim` order tries the AAAA address first → `ENETUNREACH`/hang → every upstream `fetch` times out (`Proxy error: The operation timed out`) while `/health` still returns 200. This silently took down a self-hosted SDK fleet routing all LLM calls through dario. `startProxy()` now defaults the DNS result order to `ipv4first` (Node built-in fetch/undici honors it). Override with `DARIO_DNS_RESULT_ORDER=verbatim|ipv6first` on IPv6-only / dual-stack hosts; the active order is logged under `--verbose`.
@@ -1171,30 +1272,39 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.34] - 2026-06-06
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.165` → `2.1.167` for CC v2.1.167. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.33] - 2026-06-05
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.163` → `2.1.165` for CC v2.1.165. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.32] - 2026-06-04
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.162` → `2.1.163` for CC v2.1.163. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.31] - 2026-06-04
 
 - **Restore `--system-prompt` strip on the compact CC prompt + refresh a stale alias test** — `system-prompt-modes` exposed that `resolveSystemPrompt('partial'/'aggressive')` had silently degraded to verbatim: its strip targeted the old verbose prompt (`# Tone and style`, `# Doing tasks` bullets, `# Executing actions with care`), none of which exist in CC 2.1.x's compact prompt. `stripBehavioralConstraints` now also targets the compact prompt — `partial` swaps the comment-density / match-surrounding-style line for the positive "be thorough" instruction; `aggressive` additionally removes the `IMPORTANT:` RLHF line and the hard-to-reverse caution paragraph. Legacy patterns stay as no-op fallbacks. Separately, `provider-prefix` expected `opus → claude-opus-4-7`, stale since the opus 4.8 release (the alias resolves to `claude-opus-4-8`); fixed and `opus47` legacy-pin coverage added. `npm test` is green again (77/77).
+
 ## [4.8.30] - 2026-06-04
 
 - **Scrub the POSIX `~/.claude/projects` path slug** — the template scrubber normalized Windows / `C--Users-` home paths but not the POSIX flattened project slug, so the self-hosted-runner bake left `/root/.claude/projects/-root-actions-runner--work-dario-dario/memory/` in the bundled `# Memory` section: a host-path leak on every fresh install's first request, and a source of benign per-working-directory `--check` drift. `scrubText` now collapses the slug to `.claude/projects/project/` under any home (incl. `/root`), `findUserPathHits` gains a matching detector, and the shipped bundle is re-scrubbed. Forward-slash anchored, so the Windows backslash form is untouched.
+
 ## [4.8.29] - 2026-06-04
 
 - **Glob/Grep are platform-scoped** — `Glob` and `Grep` join `PowerShell` in `PLATFORM_ONLY_TOOLS` (win32). CC v2.1.162 advertises them on Windows CC but drops them on POSIX (steering the agent to shell `find`/`grep`), so the v4.8.28 re-bake on the Linux runner silently culled them from the bundled union — degrading the Windows fallback to a 28-tool POSIX shape. They are now preserved across bakes and filtered to win32 clients, restoring the 30-tool Windows wire shape. A POSIX `capture-and-bake --check` once again reports no drift.
+
 ## [4.8.28] - 2026-06-04
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [4.8.27] - 2026-06-03
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.161` → `2.1.162` for CC v2.1.162. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.26] - 2026-06-02
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.160` → `2.1.161` for CC v2.1.161. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.25] - 2026-06-02
 
 - **Template version-label bump** — `_version` + the `user-agent` header value → `2.1.160` to track `@anthropic-ai/claude-code@latest`. The wire shape is unchanged (`cc-drift-template-watch` reports zero shape drift vs live CC), so this is a label refresh, not a re-capture — `_captured` is intentionally left at the last real capture. Clears the `sdk-drift` signal ([#426](https://github.com/askalf/dario/issues/426)).
@@ -1202,6 +1312,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.24] - 2026-06-02
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.159` → `2.1.160` for CC v2.1.160. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.23] - 2026-06-01
 
 - **Effort via model-name suffix** ([#419](https://github.com/askalf/dario/issues/419)) — OpenAI-compatible clients that can't set `output_config.effort` (e.g. Cursor) can now pick reasoning effort by model name: `anthropic:opus-4-8:high` / `claude:opus-4-8:high` (colon) or Cursor-style `claude-opus-4-8-high` (hyphen). Levels `low|medium|high|xhigh|max` (plus `ultracode`). Parsed per-request and takes precedence over the global `--effort` flag; Claude-routed models only — OpenAI-bound models keep their own `-high`/`-low` suffixes for the OpenAI backend.
@@ -1213,6 +1324,7 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.21] - 2026-05-31
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.158` → `2.1.159` for CC v2.1.159. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.20] - 2026-05-31
 
 - **Default effort → `max` (was `xhigh`)** — the unset `output_config.effort` default is now `max`, the highest *universally-supported* level. `xhigh` is Opus-only, so a fresh `npx @askalf/dario` on Sonnet/Haiku-class models 400'd ("does not support effort level 'xhigh'"). `max` is accepted by every model and still routes to the subscription pool (verified `representative-claim=five_hour` on Opus + Sonnet). Power users wanting Opus's extra tier set `--effort=xhigh` / `DARIO_EFFORT=xhigh`. (`resolveEffort` default + client-mode fallback.)
@@ -1220,30 +1332,39 @@ The `pool ? … : single-account` fork is gone from `src/proxy.ts`. A plain `dar
 ## [4.8.19] - 2026-05-30
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.157` → `2.1.158` for CC v2.1.158. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.18] - 2026-05-29
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.156` → `2.1.157` for CC v2.1.157. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.17] - 2026-05-29
 
 - **Template rebake** — re-captured `src/cc-template-data.json` after cc-drift-template-watch detected wire-fingerprint drift against a live CC capture. Bundled fallback template now matches the current CC wire shape.
+
 ## [4.8.16] - 2026-05-29
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.154` → `2.1.156` for CC v2.1.156. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.13] - 2026-05-28
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.153` → `2.1.154` for CC v2.1.154. Auto-drafted by `cc-drift-watch.yml`. Template re-capture, if needed, is auto-handled by `cc-drift-template-watch.yml`.
+
 ## [4.8.11] - 2026-05-28
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.152` → `2.1.153` for CC v2.1.153. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [4.8.10] - 2026-05-27
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.150` → `2.1.152` for CC v2.1.152. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [4.8.9] - 2026-05-23
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.149` → `2.1.150` for CC v2.1.150. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [4.8.8] - 2026-05-22
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.148` → `2.1.149` for CC v2.1.149. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [4.8.7] - 2026-05-22
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.147` → `2.1.148` for CC v2.1.148. Supersedes the blocked bot PR #359 (CI doesn't run on bot-opened branches due to GITHUB_TOKEN-attributed event suppression — same blocker that affected #352 / #356). Closes cc-drift issue #358.
@@ -1272,6 +1393,7 @@ Out of scope (follow-up): single-account mode can't detect bearer-vs-`.claude.js
 ## [4.8.4] - 2026-05-19
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.144` → `2.1.145` for CC v2.1.145. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [4.8.3] - 2026-05-19
 
 ### Added — `--honor-client-thinking` for non-CC SDK clients
@@ -1302,6 +1424,7 @@ No effect on Haiku (skips thinking by construction) or when the client omits `th
 ## [4.8.1] - 2026-05-19
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.143` → `2.1.144` for CC v2.1.144. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [4.8.0] - 2026-05-18
 
 ### Added — `--skip-fields=<csv>` for opting out of CC body injections (#325)
@@ -2355,12 +2478,15 @@ Operators who run `docker run --user dario ...` opt out of the self-heal and the
 ## [3.37.15] - 2026-05-14
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.140` → `2.1.141` for CC v2.1.141. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.37.14] - 2026-05-12
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.139` → `2.1.140` for CC v2.1.140. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.37.13] - 2026-05-11
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.138` → `2.1.139` for CC v2.1.139. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.37.10] - 2026-05-09
 
 Community contribution from [@Saik0s](https://github.com/Saik0s) — thank you. (#222)
@@ -2465,6 +2591,7 @@ No behavioral change. Pool routing, headroom selection, sticky bindings, in-flig
 ## [3.37.7] - 2026-05-07
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.132` → `2.1.133` for CC v2.1.133. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.37.6] - 2026-05-07
 
 ### Added — supply-chain attestation on the GHCR image
@@ -2508,6 +2635,7 @@ Added `.env`, `.env.*`, `*.local.json` (#219). Defense in depth — none referen
 ## [3.37.5] - 2026-05-06
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.128` → `2.1.132` for CC v2.1.132. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.37.4] - 2026-05-05
 
 ### Fixed — `vX.Y` and `vX` Docker tags lost their `v` prefix
@@ -2536,6 +2664,7 @@ Both publish paths build the same Dockerfile and tag with the same matrix; Docke
 ## [3.37.2] - 2026-05-04
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.126` → `2.1.128` for CC v2.1.128. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.37.1] - 2026-05-03
 
 ### Drift fix — `--effort=max` (CC v2.1.126 supported, dario didn't)
@@ -2651,6 +2780,7 @@ DARIO_UPSTREAM_PROXY=http://user:pass@proxy.corp:8080 dario proxy
 ## [3.34.1] - 2026-05-01
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.123` → `2.1.126` for CC v2.1.126. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.34.0] - 2026-04-30
 
 User-controlled system-prompt mode. Productizes the classifier-empirical finding from PR #171 / `scripts/test-system-prompt-mods.mjs`: Anthropic's billing classifier doesn't read the system prompt content, so users can strip CC's behavioral constraints (Tone-and-style, Text-output, scope/verbosity/comment bullets in Doing-tasks) and recover ~1.2–2.8× output capability on open-ended work — without losing subscription billing. Default `verbatim` preserves existing behavior so nothing regresses.
@@ -2725,9 +2855,11 @@ Each script reads OAuth directly from `~/.claude/.credentials.json` — robust a
 ## [3.32.2] - 2026-04-29
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.122` → `2.1.123` for CC v2.1.123. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.32.1] - 2026-04-28
 
 - **CC drift patch** — `SUPPORTED_CC_RANGE.maxTested` bumped `2.1.121` → `2.1.122` for CC v2.1.122. Auto-drafted by `cc-drift-watch.yml`; maintainer confirm the bundled template doesn't also need a re-capture (run `node scripts/capture-and-bake.mjs` locally, amend this PR).
+
 ## [3.32.0] - 2026-04-28
 
 Backlog clear-out — five new operator-facing features (one per merged PR) plus a test-suite cleanup. Net: dario gets a structural fallback that catches in-house non-CC clients without per-client maintenance, an append-only request log for backgrounded proxies, four `dario doctor` improvements, an operator-pinned beta allow-list, a user-facing `dario usage` summary, and an experimental `--merge-tools` mode. Wire shape unchanged on the default path; every new behavior is opt-in via flag, env var, or detector heuristic. Test suite goes from 54/56 to 56/56 — both long-running failures fixed alongside the feature work.
