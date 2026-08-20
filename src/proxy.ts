@@ -33,6 +33,7 @@ import { BAKED_BASE_MODELS, withLongContextVariants, buildOpenAIModelsList, getM
 import { homeDir } from './home-dir.js';
 import { RequestDebugStore, DEFAULT_MAX_ENTRIES, type RequestDebugEntry } from './request-debug.js';
 import { boundPreview, extractRequestPreview, extractResponsePreview, redactPreviewText, StreamingTextPreview, type TextPreview } from './request-preview.js';
+import { attachVoiceRelay, VOICE_WS_PATH } from './voice-relay.js';
 
 const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
@@ -1144,6 +1145,19 @@ interface ProxyOptions {
   sessionAffinityTtlMs?: number;
   /** Preferred Claude identity when header and body metadata disagree. */
   sessionAffinityClaudeSource?: ClaudeSessionIdentitySource;
+  /**
+   * Override the origin the voice relay dials. Injectable so the suite can
+   * point it at a local fake; nothing sets it in production, where it stays
+   * api.anthropic.com:443.
+   */
+  voiceUpstream?: { host: string; port: number; tls: boolean };
+  /**
+   * Set when --egress-proxy is configured. The voice relay dials with
+   * node:https, which the egress wrapper (globalThis.fetch only) does not
+   * cover, so it declines rather than sending one socket direct while
+   * everything else tunnels.
+   */
+  egressProxyConfigured?: boolean;
   /** Max concurrent in-flight requests. Default 10. dario#80. */
   maxConcurrent?: number;
   /** Max requests buffered waiting for a concurrency slot. Default 128. dario#80. */
@@ -5237,6 +5251,32 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     console.log('[dario] --no-live-capture: background live fingerprint refresh skipped; using bundled template.');
   }
 
+  // Voice dictation relay (see src/voice-relay.ts for the whole story). This
+  // hangs off the same server as the request handler: a request carrying
+  // `Upgrade:` is routed to the 'upgrade' event by Bun and Node alike and never
+  // reaches the handler above, so the allowlist's 404 cannot fire for it.
+  // Registered before the bind so no upgrade can race an unattached listener.
+  const voiceRelay = attachVoiceRelay(server, {
+    upstream: { host: new URL(ANTHROPIC_API).hostname, port: 443, tls: true, ...opts.voiceUpstream },
+    egressProxyConfigured: opts.egressProxyConfigured,
+    verbose,
+    // CC hardcodes `Authorization: Bearer <its own OAuth token>` on this socket,
+    // so it can never present dario's key and `checkAuth` can never pass for a
+    // real client. The gate that applies is the one that matches how voice is
+    // actually used: it needs a local microphone (Anthropic's own docs rule out
+    // remote environments), so a loopback client is the deployment, and an
+    // exposed bind still requires the key — which in practice means voice is
+    // off for exposed binds. Same shape as the /health internals gate.
+    authorize: (req) => isLoopbackAddr(req.socket?.remoteAddress) || checkAuth(req),
+    // peek(), not select(): the voice socket must not consume a round-robin
+    // turn and skew inference routing. Family is null because a voice socket
+    // has no model.
+    selectAccount: (excluded) => {
+      const account = excluded.size === 0 ? pool.peek(null) : pool.selectExcluding(excluded, null);
+      return account ? { alias: account.alias, accessToken: account.accessToken } : null;
+    },
+  });
+
   /**
    * Bind, and turn the outcome into a value rather than an exit status.
    *
@@ -5296,6 +5336,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     console.log('  Usage:');
     console.log(`    ANTHROPIC_BASE_URL=http://${displayHost}:${boundPort}`);
     console.log('    ANTHROPIC_API_KEY=dario');
+    // Voice needs its own variable: CC builds the voice WebSocket URL from its
+    // OAuth config, not from ANTHROPIC_BASE_URL, so without this line the
+    // socket goes straight to Anthropic carrying the user's own token. Printed
+    // here rather than buried in the docs because that is the only place a
+    // user would ever find out.
+    console.log(`    VOICE_STREAM_BASE_URL=ws://${displayHost}:${boundPort}   (optional — routes ${VOICE_WS_PATH} through dario)`);
     console.log('');
     console.log(`  ${modeLine}`);
     console.log(`  ${modelLine}`);
@@ -5400,6 +5446,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     // Flush tokens first (best-effort, bounded), then close the server. The
     // flush is fire-and-forget under the same 5s force-exit guard below so a
     // hung fsync can't wedge shutdown.
+    voiceRelay.destroyAll();
     void Promise.all([flushPoolTokens(), debugStore.flush()]).finally(() => {
       server.close(() => process.exit(0));
     });
@@ -5421,6 +5468,12 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
     close: () => new Promise<void>((resolve) => {
       clearInterval(presenceInterval);
       clearInterval(refreshInterval);
+      // Upgraded sockets are detached from the http server: server.close()
+      // waits for the listener to drain and never reaches them, and
+      // closeAllConnections() does not either. Without this, close() resolves
+      // only after the user stops talking — the same straggler that wedges
+      // socks5-bridge.ts if its tunnel set is not destroyed.
+      voiceRelay.destroyAll();
       server.close(() => resolve());
     }),
   };

@@ -172,6 +172,27 @@ So the moment any upstream response bills to something other than your subscript
 
 ---
 
+## Voice dictation
+
+Claude Code's `/voice` opens a WebSocket to `/api/ws/speech_to_text/voice_stream`. It does **not** build that URL from `ANTHROPIC_BASE_URL`. It builds it from CC's OAuth config, which is hardcoded to `api.anthropic.com` and overridable only against a first-party allowlist dario is not on. So voice behind dario has never been broken — it bypasses dario entirely, and the socket carries your own OAuth access token straight off the box, which is the one credential the rest of your setup routes through the proxy to avoid exposing.
+
+One environment variable redirects it. CC reads it verbatim, with no allowlist:
+
+```sh
+VOICE_STREAM_BASE_URL=ws://127.0.0.1:3456 claude
+```
+
+dario answers the upgrade, swaps the `Authorization` header for a pool token, dials Anthropic, and relays bytes. It never parses a frame, so compression, fragmentation and any future frame type pass through untouched — and dario sees no transcripts, no audio, no usage. The socket gets a log line at close and nothing else.
+
+Two gates stay on CC's side and dario cannot move them:
+
+- **Voice is unavailable when CC resolves its credentials from `ANTHROPIC_API_KEY` or an `apiKeyHelper`.** Anthropic's own docs say the same. If that's your setup, `/voice` is off before dario is involved — use `ANTHROPIC_AUTH_TOKEN` instead, and note that CC will then hold two different credentials at once (dario's key for inference, its own OAuth token for the voice handshake).
+- **`allow_voice_mode` is a remote gate.** It can be off for your account for reasons neither CC nor dario controls.
+
+Two more limits worth knowing. The socket is pinned to the pool's primary seat rather than routed: the upgrade carries none of the headers session affinity keys on, so there is nothing to be sticky about, and scattering voice sockets across seats that have nothing to do with the session doing the talking would only be confusing. And with `--egress-proxy` set, dario **declines** the upgrade instead of relaying it — the relay dials with `node:https`, which the egress wrapper does not cover, and silently sending one socket direct while everything else tunnels is worse than saying no.
+
+---
+
 ## Staying current: dario tracks a moving target
 
 Claude Code's request shape changes between releases — new betas, tool renames, per-model thinking configs — usually with no subscriber-facing note. dario doesn't *guess* that shape: it captures it live from your own installed `claude` binary on every startup, diffs it against each upstream release, and replays it byte-for-byte. That's why your subscription routes the same through dario as it does through Claude Code itself — the request that leaves your machine *is* the shape your plan expects. Details: [`docs/wire-fidelity.md`](./docs/wire-fidelity.md) · [#13](https://github.com/askalf/dario/discussions/13) · [#14](https://github.com/askalf/dario/discussions/14).
@@ -210,6 +231,7 @@ The split isn't live, but it was announced once on short notice and could return
 - **Headless admin API (`DARIO_ADMIN=1`).** Provision and manage pool accounts entirely over HTTP — start with zero accounts, `POST /admin/login/start`, paste the code back, routable the moment the `200` lands (live hot-reload, no restart). Token-gated even on loopback, audit-logged, rate-limited. Built for Docker / k8s / Pi. → [`docs/admin-api.md`](./docs/admin-api.md)
 - **Runs any agent.** A 64-entry schema-verified `TOOL_MAP` pre-maps Cline, Roo, Kilo, Cursor, Windsurf, Continue, Copilot, OpenHands, OpenClaw, Hermes, and [hands](https://github.com/askalf/hands) tool names to CC's native set — no flag, no validator errors. MCP tools (`mcp__server__tool`) forward verbatim. [Compatibility matrix](./docs/integrations/compat-matrix.md) · [agent-compat.md](./docs/integrations/agent-compat.md).
 - **Behavioral stealth (`--stealth`).** Adds *when* a request arrives to *what* it looks like — response-length-correlated think time and session-start latency. → [`docs/wire-fidelity.md`](./docs/wire-fidelity.md)
+- **Voice dictation through dario (`VOICE_STREAM_BASE_URL`).** CC's `/voice` socket does not follow `ANTHROPIC_BASE_URL` — it goes straight to Anthropic carrying your own OAuth token, whatever your proxy is set to. Point it at dario and the socket gets a pool credential instead. → [Voice dictation](#voice-dictation)
 - **VPN / egress routing.** Route dario's upstream traffic through a VPN or SOCKS5 proxy without putting the whole host on one. → [`docs/vpn-routing.md`](./docs/vpn-routing.md)
 - **Run it as a service.** User-scope systemd unit, installed and removed by one script. → [`docs/systemd.md`](./docs/systemd.md)
 - **Recover output (`--system-prompt=partial`).** Strips CC's tone/verbosity constraints for 1.2–2.8× more output on open-ended work, without changing which pool you bill to. [#183](https://github.com/askalf/dario/discussions/183) · [`docs/system-prompt.md`](./docs/system-prompt.md)
