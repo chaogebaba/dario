@@ -14,6 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: askalf/checkout-with-retry@115a6407547e9711edbc2e915838d495cad9583f  # v1.1.0
+      # These two scripts ran under `node` before the Bun migration, and node
+      # is preinstalled on ubuntu-latest, so the rewrite to `bun` left a job
+      # that shells out to a binary nothing installed. Every other job in this
+      # file gained a setup step; this one did not, and it gates the rest.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
       - name: package.json is valid JSON and canonically formatted
         run: bun scripts/check-package-json.mjs
 
