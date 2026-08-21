@@ -14,7 +14,7 @@ import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, hasCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
-import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, utilFreshness, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
+import { AccountPool, TOKEN_EXPIRY_MARGIN_MS, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, utilFreshness, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinitySignals, selectSessionAffinitySignal, type ClaudeSessionIdentitySource, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, withoutRequestPreviews, type RequestRecord } from './analytics.js';
@@ -39,7 +39,11 @@ const ANTHROPIC_API = 'https://api.anthropic.com';
 const DEFAULT_PORT = 3456;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — generous for large prompts, prevents abuse
 const UPSTREAM_TIMEOUT_MS = 300_000; // 5 min — matches Anthropic SDK default
-const BODY_READ_TIMEOUT_MS = 30_000; // 30s — prevents slow-loris on body reads
+// 30s — prevents slow-loris on body reads. Capped at the pool's token-expiry
+// margin, and not independently tunable: the bearer is captured at selection
+// and never re-read, so a body read allowed to run longer than the margin can
+// finish holding a token that has since expired. See TOKEN_EXPIRY_MARGIN_MS.
+const BODY_READ_TIMEOUT_MS = Math.min(30_000, TOKEN_EXPIRY_MARGIN_MS);
 const DEFAULT_HOST = '127.0.0.1';
 
 /** Parse an upstream Retry-After header into bounded milliseconds. */

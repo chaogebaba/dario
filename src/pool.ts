@@ -214,6 +214,22 @@ export function isInAuthCooldown(account: EligibilityFields, now: number = Date.
  * cause an operator can act on, and it is upstream of the auth cool-down that
  * the first doomed request provokes, so it is reported in preference to it.
  */
+/**
+ * How much life a token must have left for the router to select against it.
+ *
+ * This is a floor on the whole request, not just on selection: proxy.ts reads
+ * the bearer off the account it picks and does not look at the account again,
+ * so everything between selection and the outbound header has to fit inside
+ * this budget. Today the only unbounded thing in that gap is the request-body
+ * read, and BODY_READ_TIMEOUT_MS is set to exactly this value — which is what
+ * keeps a slow uploader from draining the margin, and is enforced there rather
+ * than assumed. Raising the body timeout above this number, or lowering this
+ * number below it, sends expired bearers upstream on slow uploads; Anthropic
+ * 401s, dario books an auth failure, and a seat with sound credentials lands in
+ * auth cool-down.
+ */
+export const TOKEN_EXPIRY_MARGIN_MS = 30_000;
+
 export type IneligibleReason = 'disabled' | 'expired' | 'auth-cooldown' | 'rate-limited';
 
 export function ineligibleReason(
@@ -222,7 +238,7 @@ export function ineligibleReason(
   family?: string | null,
 ): IneligibleReason | null {
   if (account.enabled === false) return 'disabled';
-  if (account.expiresAt <= now + 30_000) return 'expired';
+  if (account.expiresAt <= now + TOKEN_EXPIRY_MARGIN_MS) return 'expired';
   if (isInAuthCooldown(account, now)) return 'auth-cooldown';
   if (isInRateLimitCooldown(account, family, now)) return 'rate-limited';
   return null;
