@@ -15,6 +15,7 @@ interface AccountsEndpoint {
     status?: string;
     enabled?: boolean;
     refreshError?: string;
+    lastObservedAt?: number | null;
     measuredAt?: number;
   }>;
 }
@@ -320,6 +321,7 @@ async function loadAccounts(
           status: account.status,
           enabled: account.enabled !== false,
           refreshError: account.refreshError,
+          lastObservedAt: account.lastObservedAt,
           measuredAt: account.measuredAt,
           ...(quota.entries.has(account.alias) ? { quota: quota.entries.get(account.alias)! } : {}),
         })),

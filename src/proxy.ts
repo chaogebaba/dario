@@ -14,7 +14,7 @@ import { darioVersion } from './version.js';
 import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, hasCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
-import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
+import { AccountPool, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, utilFreshness, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinitySignals, selectSessionAffinitySignal, type ClaudeSessionIdentitySource, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, withoutRequestPreviews, type RequestRecord } from './analytics.js';
@@ -889,6 +889,12 @@ export function sanitizeMessages(
   const messages = body.messages as Array<{ role: string; content: unknown }> | undefined;
   if (!messages) return;
   const patterns = orchestrationPatternsFor(preserveTags);
+  // Snapshot the tail turn before scrubbing. If the scrub empties it and the
+  // drop below would expose an assistant turn, we put the original content
+  // back rather than ship a prefill (dario#1033) — see the guard after the
+  // filter for the reasoning.
+  const tail = messages.length > 0 ? messages[messages.length - 1] : undefined;
+  const tailContentBeforeScrub = tail ? tail.content : undefined;
   for (const msg of messages) {
     if (typeof msg.content === 'string') {
       msg.content = sanitizeContent(msg.content, patterns);
@@ -919,11 +925,50 @@ export function sanitizeMessages(
   // The message carried nothing for the model, so removing it is the same
   // decision the block filter already made, applied one level up. String
   // content scrubbed to '' is the same case in its other shape.
-  body.messages = messages.filter((m) => {
+  const kept = messages.filter((m) => {
     if (Array.isArray(m.content)) return m.content.length > 0;
     if (typeof m.content === 'string') return m.content !== '';
     return true;
   });
+
+  // Invariant: the scrub must never turn a request that ended on a USER turn
+  // into one that ends on an ASSISTANT turn. Anthropic reads a trailing
+  // assistant turn as a prefill ("continue from this text") and Opus 4.6 under
+  // adaptive thinking + the claude-code beta rejects it outright:
+  //   400 "This model does not support assistant message prefill.
+  //        The conversation must end with a user message."
+  //
+  // CC emits standalone `<system-reminder>` / `<task_metadata>` user turns —
+  // notably right after a Task (sub-agent) result is folded back into the
+  // parent transcript. Both tags are in ORCHESTRATION_TAG_NAMES, so that turn
+  // scrubs to empty, the filter above drops it, and a valid CC request leaves
+  // as a prefill (dario#1033).
+  //
+  // The fix restores the turn's PRE-SCRUB content instead of dropping it. The
+  // orchestration tag survives in this one position only, which is the right
+  // trade in both directions: for a CC client the tag is CC's own injection,
+  // so keeping it is *more* wire-faithful, not less; for a non-CC client a
+  // lone tag as the final turn is the actual prompt, and forwarding it beats
+  // a hard 400. Every other position still scrubs exactly as before.
+  const tailWasDropped = tail !== undefined && kept[kept.length - 1] !== tail;
+  const tailHadContent = Array.isArray(tailContentBeforeScrub)
+    ? tailContentBeforeScrub.length > 0
+    : typeof tailContentBeforeScrub === 'string'
+      ? tailContentBeforeScrub !== ''
+      : tailContentBeforeScrub != null;
+  if (
+    tail !== undefined &&
+    tailWasDropped &&
+    tail.role === 'user' &&
+    tailHadContent &&
+    kept.length > 0 &&
+    kept[kept.length - 1]!.role === 'assistant'
+  ) {
+    tail.content = tailContentBeforeScrub;
+    kept.push(tail);
+  }
+
+  body.messages = kept;
 }
 
 /**
@@ -1688,7 +1733,7 @@ export function adminAccountSnapshot(
     snap.set(a.alias, {
       util5h: a.rateLimit.util5h,
       util7d: a.rateLimit.util7d,
-      measuredAt: a.rateLimit.updatedAt,
+      ...utilFreshness(a.rateLimit, now),
       claim: a.rateLimit.claim,
       status: availability.status,
       serving: availability.serving,

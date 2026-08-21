@@ -141,6 +141,18 @@ export interface PoolDerivedStatus {
   accounts: number;
 }
 
+/**
+ * Reason -> operator-facing summary. Keyed by `accountIneligibility()`'s return
+ * values; declared here rather than imported so this module stays free of pool
+ * machinery (see the file header). An unrecognised reason falls through to a
+ * generic line rather than being dropped.
+ */
+const POOL_DEAD_SUMMARY: Record<string, string> = {
+  'rate-limited': 'all accounts rate-limited',
+  'token-expired': 'all tokens expired — run `dario login`',
+  'auth-cooldown': 'all accounts in auth-cooldown',
+};
+
 function formatMsLeft(ms: number): string {
   const clamped = Math.max(0, ms);
   return `${Math.floor(clamped / 3_600_000)}h ${Math.floor((clamped % 3_600_000) / 60_000)}m`;

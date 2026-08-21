@@ -221,7 +221,17 @@ interface PricingEntry extends Rate {
   intro?: Rate & { until: string }; // 'YYYY-MM-DD'
 }
 
-const PRICING: Record<string, PricingEntry> = {
+/**
+ * Published per-1M-token rates, keyed by dario's model id.
+ *
+ * EXPORTED so scripts/check-pricing-drift.mjs can diff it against Anthropic's
+ * published table. These are external facts with no natural expiry: an entry
+ * that is correct today goes wrong the moment Anthropic changes it, and
+ * nothing in this repo would notice. That has happened twice — Sonnet 5's
+ * cancelled cutover (#1047) and Haiku 4.5 carrying Haiku 3.5's rates — which
+ * is why the watcher exists (#1048).
+ */
+export const PRICING: Record<string, PricingEntry> = {
   // Fable 5 — official pricing (published with the 2026-07-01 redeploy):
   // $10/$50 per 1M in/out, 5m cache-write $12.50, cache-read $1 (platform docs).
   // Was previously assumed at the opus-4-8 rate ($5/$25) — corrected here.
@@ -234,15 +244,21 @@ const PRICING: Record<string, PricingEntry> = {
   'claude-opus-4-7': { input: 5, output: 25, cacheRead: 0.5, cacheCreate: 6.25 },
   // Opus 4.6 is $5/$25 (same as 4.7/4.8), not the old $15/$75 Opus-4.1 rate.
   'claude-opus-4-6': { input: 5, output: 25, cacheRead: 0.5, cacheCreate: 6.25 },
-  // Sonnet 5 standard $3/$15; launch intro $2/$10 through 2026-08-31, then
-  // standard. Cache rates follow Anthropic's usual 0.1x-read / 1.25x-write of
-  // input. Date-modeled below (was a flat display estimate before).
-  'claude-sonnet-5': {
-    input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75,
-    intro: { input: 2, output: 10, cacheRead: 0.2, cacheCreate: 2.5, until: '2026-08-31' },
-  },
+  // Sonnet 5 is $2/$10 — PERMANENTLY. This shipped as "introductory pricing
+  // through 2026-08-31, then $3/$15", and was modeled here as a dated cutover.
+  // Anthropic has since cancelled that increase and made $2/$10 the standard
+  // price, so the cutover must NOT stay: on 2026-09-01 it would have silently
+  // started pricing every Sonnet 5 record 50% high, with no error and nothing
+  // in the output to suggest the number had moved.
+  //
+  // Left as a flat rate rather than an `intro` whose `until` sits far in the
+  // future — a date nobody is watching is exactly what caused this.
+  'claude-sonnet-5': { input: 2, output: 10, cacheRead: 0.2, cacheCreate: 2.5 },
   'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75 },
-  'claude-haiku-4-5': { input: 0.8, output: 4, cacheRead: 0.08, cacheCreate: 1 },
+  // Haiku 4.5 is $1/$5. This carried $0.80/$4 — Haiku 3.5's row, copied
+  // wholesale including its cache rates — so every Haiku 4.5 cost read ~20%
+  // LOW. Found by check-pricing-drift.mjs on its very first run (#1048).
+  'claude-haiku-4-5': { input: 1, output: 5, cacheRead: 0.1, cacheCreate: 1.25 },
 };
 
 /**
@@ -265,7 +281,8 @@ export function pricingRateFor(model: string, atMs: number): Rate {
 
 function estimateCost(record: RequestRecord): number {
   // Price each record at the rate effective at ITS OWN timestamp, so a window
-  // that spans a pricing cutover (e.g. Sonnet 5's intro ending 2026-08-31)
+  // that spans a pricing cutover (no model currently has one — Sonnet 5's
+  // scheduled increase was cancelled and its $2/$10 made permanent)
   // estimates each side correctly rather than repricing history at today's rate.
   const p = pricingRateFor(record.model, record.timestamp);
   return (

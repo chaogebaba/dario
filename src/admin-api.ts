@@ -91,13 +91,16 @@ export interface AdminAccountLive {
   util5h: number;
   util7d: number;
   /**
-   * When `util5h` / `util7d` were last measured from an upstream response,
-   * 0 when never. dario only learns utilization as a side effect of serving
-   * traffic, so a freshly started proxy reports zeros that mean "not yet
-   * observed" rather than "quota untouched" — this is the field that tells
-   * them apart.
+   * When `util5h` / `util7d` were last observed, epoch ms — or `null` if this
+   * account has never served a response. The utilisation figures are a
+   * snapshot of the last response the account served, not a live gauge: while
+   * an account is parked nothing refreshes them, so without a timestamp a
+   * consumer cannot tell a current reading from one frozen minutes ago
+   * (dario#1032).
    */
-  measuredAt: number;
+  lastObservedAt: number | null;
+  /** Age of that reading in ms, or `null` when never observed. */
+  utilAgeMs: number | null;
   claim: string;
   status: string;
   /**
@@ -540,7 +543,8 @@ export async function handleAdminRequest(
           ...(l ? {
             util5h: l.util5h,
             util7d: l.util7d,
-            measured_at: l.measuredAt,
+            last_observed_at: l.lastObservedAt,
+            util_age_ms: l.utilAgeMs,
             claim: l.claim,
             status: l.status,
             serving: l.serving,

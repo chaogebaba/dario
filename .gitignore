@@ -1,4 +1,8 @@
-node_modules/
+node_modules
+# ^ no trailing slash: dario offloads node_modules to a symlink on another
+# volume, and `node_modules/` matches only a real directory. The symlink was
+# therefore untracked-but-not-ignored, and a `git add -A` committed it as a
+# mode-120000 blob that dangles on CI — `bun install` then fails with ENOENT.
 dist
 dist/
 *.tgz

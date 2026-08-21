@@ -295,7 +295,11 @@ function meter(remainingPercent: number | null, width: number): string {
 }
 
 function isMeasured(account: AccountRow): boolean {
+  if (account.lastObservedAt !== undefined) return account.lastObservedAt !== null;
+  // A proxy predating the #1032 rename sends `measuredAt`, where 0 is "never".
   if (account.measuredAt !== undefined) return account.measuredAt > 0;
+  // Older still: no freshness field at all. Blanking every column for a proxy
+  // that simply cannot say is worse than showing the reading it does send.
   return account.util5h !== undefined;
 }
 

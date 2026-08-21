@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { isValidAccountAlias } from './account-alias.js';
 import { removeAccount, renameAccountWithResult, setAccountEnabled, toggleAccountEnabled, type RenameAccountResult } from './account-store.js';
-import { accountAvailability, authCooldownMs, isInAuthCooldown, type AccountPool } from './pool.js';
+import { accountAvailability, authCooldownMs, isInAuthCooldown, utilFreshness, type AccountPool } from './pool.js';
 import { fetchQuota, type QuotaSnapshot } from './quota.js';
 
 // Two routes read a body now — rename and the explicit enabled-state set —
@@ -147,7 +147,7 @@ function accountStatus(pool: AccountPool): Record<string, unknown> {
       expiresAt: account.expiresAt,
       enabled: account.enabled,
       ...(account.refreshError ? { refreshError: account.refreshError } : {}),
-      measuredAt: account.rateLimit.updatedAt,
+      ...utilFreshness(account.rateLimit, now),
       ...(inCooldown || quotaCooldowns.length > 0
         ? {
             cooldownMs,

@@ -340,6 +340,93 @@ header('loadTemplate — reads fresh live cache in preference to bundled');
 }
 
 // ======================================================================
+//  loadTemplate - superset rule applies to a LIVE capture too (#1035)
+// ======================================================================
+header('loadTemplate - restores preserved tools a headless live capture omitted');
+{
+  // A capture spawns CC headlessly, so it does not see the interactive tools
+  // (CC v2.1.187+ drops them under --print) and sees the Task* four only when
+  // CC's remote config happens to advertise them. The bake re-adds both sets
+  // from the previous bundle; loadTemplate did not, so every install with CC
+  // present degraded its own tool set within the 24h cache TTL - and CI never
+  // caught it because CI has no live cache.
+  mkdirSync(dirname(LIVE_CACHE), { recursive: true });
+  const degraded = {
+    _version: '99.99.99-degraded-capture',
+    _captured: new Date().toISOString(),
+    _source: 'live',
+    _schemaVersion: CURRENT_SCHEMA_VERSION,
+    agent_identity: 'FAKE LIVE IDENTITY',
+    system_prompt: 'FAKE LIVE SYSTEM PROMPT',
+    // Exactly what a headless capture yields: real tools, none of the
+    // interactive or config-scoped ones.
+    tools: [
+      { name: 'Bash', description: '', input_schema: {} },
+      { name: 'Read', description: '', input_schema: {} },
+    ],
+    tool_names: ['Bash', 'Read'],
+  };
+  writeFileSync(LIVE_CACHE, JSON.stringify(degraded));
+
+  const loaded = loadTemplate({ silent: true });
+  const names = loaded.tools.map((t) => t.name);
+
+  check('live cache still preferred', loaded._version === '99.99.99-degraded-capture');
+  check('captured tools kept', names.includes('Bash') && names.includes('Read'));
+
+  for (const t of ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode']) {
+    check(`interactive-only tool restored: ${t}`, names.includes(t));
+  }
+  for (const t of ['TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate']) {
+    check(`config-scoped tool restored: ${t}`, names.includes(t));
+  }
+  if (process.platform !== 'win32') {
+    check('other-platform tool restored: PowerShell', names.includes('PowerShell'));
+  }
+
+  // tool_names === tools.map(name) is the contract everywhere; the bake shipped
+  // artifacts where a merge broke it, so assert it explicitly here.
+  check('tool_names re-derived after the merge',
+    JSON.stringify(loaded.tool_names) === JSON.stringify(names));
+
+  // CC sends tools alphabetically - preserved entries must insert at their
+  // natural position, not append at the end.
+  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  check('merged tool array kept in CC alphabetical order',
+    JSON.stringify(names) === JSON.stringify(sorted));
+
+  // The rule must not INVENT tools: a name in NEITHER the bundle nor the
+  // capture stays absent. dario merged upstream's assertion here as
+  // `!names.includes('WebSearch')` — a name absent from the capture and from
+  // the three scoped sets — and that is the one form of this invariant dario
+  // does not hold, deliberately.
+  //
+  // Upstream restores only what preservedToolReason() classifies. Measured
+  // against the CC 2.1.236 headless capture in test/lib/headless-live-cache.mjs,
+  // that rule preserves 10 of the 24 tools such a capture drops and loses the
+  // other 14: CronCreate/CronDelete/CronList, DesignSync, EnterWorktree,
+  // ExitWorktree, Monitor, NotebookEdit, PushNotification, SendMessage,
+  // TaskOutput, TaskStop, WebFetch and WebSearch. TaskOutput and TaskStop are
+  // the tell — CONFIG_SCOPED_TOOLS registers the other four Task tools and
+  // omits those two on the grounds that they "stayed put", which was true of
+  // the capture upstream measured and is not true of 2.1.236. The allowlist is
+  // maintained by hand and rots against the thing it tracks.
+  //
+  // Losing a tool is the expensive direction, and upstream's own docstring says
+  // so: CC_NATIVE_NAMES_UNION derives from the loaded template, so a client that
+  // declares WebSearch stops identity-mapping and has its history renamed onto a
+  // fallback slot with junk arguments — the v4.8.93 regression. dario unions the
+  // bundle whole, which needs no allowlist and cannot rot. The cost is a tool CC
+  // has genuinely retired lingering until the next bake.
+  const bundled = JSON.parse(readFileSync(
+    new URL('../dist/cc-template-data.json', import.meta.url), 'utf-8',
+  )).tools.map((x) => x.name);
+  const invented = names.filter((n) => !bundled.includes(n) && !degraded.tool_names.includes(n));
+  check('no tool is invented from nothing', invented.length === 0, invented.join(', '));
+  check('a bundle tool outside every scoped set is still restored', names.includes('WebSearch'));
+}
+
+// ======================================================================
 //  loadTemplate — rejects cache without _schemaVersion (pre-v3.17 shape)
 // ======================================================================
 header('loadTemplate — rejects cache with missing or mismatched _schemaVersion');

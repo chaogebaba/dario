@@ -17,6 +17,13 @@ export interface AccountRow {
   status?: string;
   enabled?: boolean;
   refreshError?: string;
+  /**
+   * Epoch ms of the last utilisation reading, or null if this account has
+   * never served a response (#1032). `measuredAt` is the same value in the
+   * encoding dario used before the merge with upstream — 0 for "never" — and
+   * is read only when talking to a proxy that predates the rename.
+   */
+  lastObservedAt?: number | null;
   measuredAt?: number;
   quota?: AccountQuota;
 }
