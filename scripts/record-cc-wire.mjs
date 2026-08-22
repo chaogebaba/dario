@@ -240,6 +240,15 @@ writeFileSync(join(CFG, '.claude.json'), JSON.stringify(onboarding, null, 2));
 const WORK = mkdtempSync(join(tmpdir(), 'dario-wire-work-'));
 spawnSync('git', ['init', '-q'], { cwd: WORK });
 writeFileSync(join(WORK, 'README.md'), 'wire recording sandbox\n');
+// --seed-agent <file.md> plants a sub-agent definition in the sandbox. The
+// question it exists to answer is where CC puts an OPERATOR-authored prompt in
+// the system array, which decides whether isGenuineCCClient can be fooled by
+// what a user wrote in ~/.claude/agents. Guessing at that from CC's own agents
+// is not evidence: they are all written by Anthropic.
+for (const src of args.reduce((acc, a, i) => (a === '--seed-agent' ? [...acc, args[i + 1]] : acc), [])) {
+  mkdirSync(join(CFG, 'agents'), { recursive: true });
+  copyFileSync(src, join(CFG, 'agents', src.split('/').pop()));
+}
 
 const childEnv = {
   HOME, PATH: process.env.PATH, TERM: MODE === 'interactive' ? 'xterm-256color' : 'dumb',

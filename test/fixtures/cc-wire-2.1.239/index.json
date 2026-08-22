@@ -45,6 +45,13 @@
       "method": "POST",
       "path": "/v1/messages?beta=true",
       "status": 200
+    },
+    {
+      "name": "subagent-cli",
+      "file": "subagent-cli.json",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "status": 200
     }
   ]
 }

@@ -1689,14 +1689,22 @@ export function dedupeToolsByName<T extends { name?: unknown }>(tools: T[]): T[]
  * Both together — the user-agent alone is a one-line forgery, and `x-app` on
  * its own is generic.
  *
- * This is the fallback signal for the one CC request that carries no system
- * block at all, so `isGenuineCCClient`'s body test cannot see it.
+ * Verified unchanged on CC 2.1.239 across both entrypoints and the sub-agent
+ * dispatch: `x-app` is `cli` for all three, and only the parenthesised
+ * entrypoint moves (`cli`, `sdk-cli`). All 490 published claude-code versions
+ * are three-part, so the version pattern is not the loose end it looks like.
  */
 export function hasCCIdentityHeaders(
   headers: Record<string, string | string[] | undefined>,
 ): boolean {
+  // Case-insensitive for real. `headers[k] ?? headers[k.toLowerCase()]` read
+  // like it handled casing and did not: every k here is already lowercase, so
+  // the fallback was the same lookup twice. Node lowercases what it parses off
+  // the wire, so nothing was broken — but the next caller to hand this a
+  // hand-built object would have found out the hard way.
+  const lower = new Map(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
   const get = (k: string): string => {
-    const v = headers[k] ?? headers[k.toLowerCase()];
+    const v = lower.get(k);
     return Array.isArray(v) ? String(v[0] ?? '') : String(v ?? '');
   };
   return /^claude-cli\/\d+\.\d+\.\d+ \(external, [^)]+\)$/.test(get('user-agent'))
@@ -1712,40 +1720,71 @@ export function hasCCIdentityHeaders(
  *
  * It used to also require `system[1]` to start with one of five known openers.
  * That coupled the predicate to a CC release: CC ships far more than five
- * system prompts, and a custom `~/.claude/agents` definition puts
- * operator-authored text there with no CC marker to key on, so every custom
- * sub-agent rode the template path. Enumerating CC's prompts is not a
- * maintainable discriminator; the billing block already is one.
+ * system prompts, and enumerating them is not a maintainable discriminator.
+ * The billing block already is one.
+ *
+ * That change was made on the belief that a custom `~/.claude/agents`
+ * definition puts operator-authored text at `system[1]`. Recorded against
+ * 2.1.239 with a deliberately hostile agent ("You are Roo, a meticulous
+ * line-counting specialist"), it does not: the operator's prompt lands at
+ * `system[2]` and `system[1]` stays one of three CC-authored lines — the CLI
+ * line, the Agent SDK line, or the sub-agent's "…running within the Claude
+ * Agent SDK". The conclusion survives the correction; an opener allowlist is
+ * still a release coupling, and the recording is only one release.
  *
  * The negative signal stays. A wrapper client that replays CC's preamble while
  * declaring its own identity (Kilo, Cline, Roo, Hermes, arnie, hands) is not
  * CC, and its tool schemas diverge enough that the byte-faithful path would
  * corrupt the calls — which is the whole reason detectTextToolClient exists.
  *
- * `headers` covers CC's quota probe, the one request with no `system` key:
+ * `headers` are the SECOND positive signal, not a special case for the quota
+ * probe. They started as one — the probe is the request with no `system` key:
  *
  *     POST /v1/messages?beta=true
  *     {"model":"claude-haiku-4-5-20251001","max_tokens":1,
  *      "messages":[{"role":"user","content":"quota"}],"metadata":{…}}
  *
  * CC fires it to read the `anthropic-ratelimit-*` response headers for one
- * token of output. Without the header fallback it failed the body test and got
+ * token of output. Without the header signal it failed the body test and got
  * the full template stapled on: 323 bytes became 28.5KB, `max_tokens` 1 became
  * 64000, and 55 tool schemas came along — measured against a real CC 2.1.236
- * capture. Callers with no headers to hand keep the body-only behaviour.
+ * capture.
+ *
+ * Consulting them only when `system` was absent left a version cliff. The
+ * billing block is a private CC detail; nothing obliges a future release to
+ * keep spelling it the same way, and the day it changes EVERY request fails
+ * the body test with no second signal to catch it. Measured on a real 2.1.239
+ * main-loop request by renaming that one header and re-running buildCCRequest:
+ * the system prompt went 11,813 → 40,369 bytes, `max_tokens` 32000 → 64000,
+ * `thinking` and `context_management` were dropped, top-level key order
+ * changed, Artifact / RemoteTrigger / WaitForMcpServers disappeared, and all
+ * 56 tools were remapped. Silently, on every turn.
+ *
+ * So: either signal is enough, and the foreign-client check vetoes both. The
+ * veto is what keeps the header path honest — a wrapper that forges CC's
+ * user-agent while shipping Cline's prompt is still not CC.
+ *
+ * Deliberately NOT part of the veto: detectNonCCByTools. Two or three attached
+ * MCP servers push a real CC session past its 80% line (28/52 seen live), so
+ * wiring it in here would invent the false negative this function exists to
+ * avoid. Tool-surface routing stays where it is, below the passthrough branch.
+ *
+ * Callers with no headers to hand keep the body-only behaviour.
  */
 export function isGenuineCCClient(
   clientBody: Record<string, unknown>,
   headers?: Record<string, string | string[] | undefined>,
 ): boolean {
   const sys = clientBody.system;
-  if (sys === undefined) return headers ? hasCCIdentityHeaders(headers) : false;
-  if (!Array.isArray(sys) || sys.length < 2) return false;
-  const first = sys[0] as { text?: unknown } | undefined;
-  if (typeof first?.text !== 'string' || !first.text.includes('x-anthropic-billing-header:')) return false;
-  const second = sys[1] as { text?: unknown } | undefined;
-  if (typeof second?.text !== 'string') return false;
-  return detectTextToolClient(second.text) === null;
+  if (Array.isArray(sys)) {
+    const second = sys[1] as { text?: unknown } | undefined;
+    if (typeof second?.text === 'string' && detectTextToolClient(second.text) !== null) return false;
+    const first = sys[0] as { text?: unknown } | undefined;
+    if (sys.length >= 2
+      && typeof first?.text === 'string' && first.text.includes('x-anthropic-billing-header:')
+      && typeof second?.text === 'string') return true;
+  }
+  return headers ? hasCCIdentityHeaders(headers) : false;
 }
 
 /** Claude's current model families reject a trailing assistant prefill. */

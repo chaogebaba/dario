@@ -43,6 +43,11 @@ function scrub(value) {
     s = s.replace(/\/tmp\/dario-live-cc-[A-Za-z0-9]+/g, '/tmp/work');
     s = s.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, PLACEHOLDER.session_id);
     s = s.replace(/[0-9a-f]{64}/g, PLACEHOLDER.device_id);
+    // x-claude-code-agent-id on a sub-agent dispatch: 17 hex, so neither the
+    // uuid nor the 64-hex rule above sees it. Ephemeral rather than account-
+    // scoped, but it is still an id off a real session and a fixture is a
+    // public file. Length is shape and is preserved.
+    s = s.replace(/\b[0-9a-f]{17}\b/g, 'a'.repeat(17));
     s = s.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, 'user@example.com');
     s = s.replace(/sk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-REDACTED');
     s = s.replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer REDACTED');
