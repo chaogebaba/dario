@@ -47,6 +47,14 @@ jobs:
       version: ${{ steps.probe.outputs.version }}
       should_run: ${{ steps.gate.outputs.should_run }}
     steps:
+      # Sparse: the gate needs exactly one constant out of master, and cloning
+      # the tree to read it would cost more than the check it feeds.
+      - name: Check out the pinned range
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: src/live-fingerprint.ts
+          sparse-checkout-cone-mode: false
+
       - name: Fetch CC latest version from npm registry
         id: probe
         run: |
@@ -78,13 +86,50 @@ jobs:
           path: .cc-version-sentinel
           key: cc-drift-checked-${{ steps.probe.outputs.version }}
 
+      - name: Read the maxTested already on master
+        id: pinned
+        run: |
+          set -eo pipefail
+          MAX=$(sed -n "s/^  maxTested: '\\([0-9.]*\\)',$/\\1/p" src/live-fingerprint.ts | head -1)
+          if [ -z "$MAX" ]; then
+            echo "could not read SUPPORTED_CC_RANGE.maxTested — treating as uncovered" >&2
+            MAX=0.0.0
+          fi
+          echo "maxTested on master: $MAX"
+          echo "max_tested=$MAX" >> "$GITHUB_OUTPUT"
+
       - name: Gate — run full check only when version changed (or --force)
         id: gate
+        env:
+          PROBED: ${{ steps.probe.outputs.version }}
+          MAX_TESTED: ${{ steps.pinned.outputs.max_tested }}
         run: |
           FORCED='${{ inputs.force }}'
+          # Does master already claim this version? A maintainer who bumps
+          # maxTested by hand as part of a rebake has done the bot's job, and
+          # the bot has no way to know from its cache — the sentinel is keyed
+          # on versions IT checked, so a hand-landed bump always looked new and
+          # always drafted a PR proposing a value already on master. That
+          # collision is why CLAUDE.md tells contributors not to touch
+          # maxTested. Reading the constant instead of the cache removes the
+          # rule's reason to exist.
+          COVERED=$(node -e '
+            const cmp = (a, b) => {
+              const x = String(a).split(".").map(Number), y = String(b).split(".").map(Number);
+              for (let i = 0; i < Math.max(x.length, y.length); i++) {
+                const d = (x[i] ?? 0) - (y[i] ?? 0);
+                if (d) return d < 0 ? -1 : 1;
+              }
+              return 0;
+            };
+            process.stdout.write(cmp(process.env.MAX_TESTED, process.env.PROBED) >= 0 ? "yes" : "no");
+          ')
           if [ "$FORCED" = "true" ]; then
             echo "Manual --force=true — running full check regardless of cache."
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$COVERED" = "yes" ]; then
+            echo "master already tests CC v$MAX_TESTED, which covers v$PROBED. Nothing to draft."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.version_cache.outputs.cache-hit }}" = "true" ]; then
             echo "CC v${{ steps.probe.outputs.version }} already full-checked (cache hit). Skipping."
             echo "should_run=false" >> "$GITHUB_OUTPUT"

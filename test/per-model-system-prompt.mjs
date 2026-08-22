@@ -33,7 +33,12 @@ header('systemPromptForModel — selection by family');
   check('fable-5 → variant', systemPromptForModel('claude-fable-5') === CC_SYSTEM_PROMPT_FABLE);
   check('fable-5[1m] → variant', systemPromptForModel('claude-fable-5[1m]') === CC_SYSTEM_PROMPT_FABLE);
   check('opus-4-8 → base', systemPromptForModel('claude-opus-4-8') === CC_SYSTEM_PROMPT);
-  check('haiku → base', systemPromptForModel('claude-haiku-4-5') === CC_SYSTEM_PROMPT);
+  // Was `haiku → base` until the bundle carried a haiku variant. It could not
+  // before: the bake ran `claude --print` under a placeholder API key, and the
+  // haiku capture kept coming back as the base. An interactive capture on the
+  // operator's own subscription produces one, so the family routes to it now
+  // and `awaitingFirstBake` is retired.
+  check('haiku → variant', systemPromptForModel('claude-haiku-4-5') !== CC_SYSTEM_PROMPT);
   check('undefined → base', systemPromptForModel(undefined) === CC_SYSTEM_PROMPT);
   check('case-insensitive Fable → variant', systemPromptForModel('Claude-FABLE-5') === CC_SYSTEM_PROMPT_FABLE);
   // --system-prompt override strips the model-appropriate base

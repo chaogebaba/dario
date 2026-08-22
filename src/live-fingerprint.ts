@@ -270,7 +270,7 @@ export const VARIANT_FAMILIES: readonly VariantFamily[] = [
   // with its own cutoff (February 2025, against the base's January 2026).
   // Matched on the family word rather than a pinned version so 4.5 and any
   // later haiku both land here — the capture model is what decides the text.
-  { key: 'haiku', captureModel: 'claude-haiku-4-5-20251001', matches: (m) => m.includes('haiku'), awaitingFirstBake: true },
+  { key: 'haiku', captureModel: 'claude-haiku-4-5-20251001', matches: (m) => m.includes('haiku') },
 ];
 
 /**
@@ -2320,7 +2320,7 @@ export function detectDrift(t: TemplateData, installedOverride?: string | null):
  */
 export const SUPPORTED_CC_RANGE = {
   min: '1.0.0',
-  maxTested: '2.1.238',
+  maxTested: '2.1.239',
 } as const;
 
 /**
