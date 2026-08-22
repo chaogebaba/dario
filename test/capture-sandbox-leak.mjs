@@ -140,5 +140,41 @@ header('4. the shipped bundle carries no memory path');
   check('no bundled prompt trips the user-path gate', prompts.every((p) => findUserPathHits(p).length === 0));
 }
 
+// ======================================================================
+header('a session budget never becomes a template constant');
+{
+  // `<total_tokens>N tokens left</total_tokens>` shows up when CC is running
+  // against a token budget. None of the 21 real 2.1.239 requests recorded from
+  // fresh sessions carried one, so a bundle that does is describing one
+  // operator's session rather than the client. And it cannot be fixed at serve
+  // time the way `# Environment` is: rewriting a section CC always sends is
+  // fidelity, inventing one it usually omits is a tell.
+  const withBudget = [
+    '# Harness',
+    'stuff',
+    '',
+    '<total_tokens>15000000 tokens left</total_tokens>',
+    '',
+    '# Context management',
+    'more',
+  ].join('\n');
+  const out = scrubTemplate({
+    _version: '2.1.239', _captured: '2026-08-22T00:00:00.000Z', _source: 'live',
+    agent_identity: 'You are Claude Code', system_prompt: withBudget, tools: [], tool_names: [],
+  });
+  check('the tag is stripped', !/total_tokens/.test(out.system_prompt), out.system_prompt);
+  check('and the sections around it survive',
+    /# Harness/.test(out.system_prompt) && /# Context management/.test(out.system_prompt));
+  check('a bundle carrying one is a gate failure',
+    findUserPathHits(withBudget).some((h) => /frozen token budget/.test(h)),
+    findUserPathHits(withBudget).join(', '));
+  const shipped = JSON.parse(
+    await (await import('node:fs/promises')).readFile(new URL('../src/cc-template-data.json', import.meta.url), 'utf-8'),
+  );
+  const shippedPrompts = [shipped.system_prompt, ...Object.values(shipped.system_prompt_variants ?? {})];
+  check('the shipped bundle carries none',
+    shippedPrompts.every((p) => !/total_tokens/.test(p)));
+}
+
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -219,12 +219,38 @@ const HOST_CONTEXT_SECTION_HEADINGS = [
   'Scratchpad Directory',
 ] as const;
 
+/**
+ * Strip CC's remaining-budget tag.
+ *
+ * `<total_tokens>N tokens left</total_tokens>` is session state, not template.
+ * It appears when a session is running against a token budget and is absent
+ * from every one of the 21 real 2.1.239 requests recorded from fresh sessions,
+ * so the honest thing for a bundle is not to carry one.
+ *
+ * Two ways to get this wrong, and dario has been at risk of both. Baking it
+ * freezes one session's number into every prompt dario serves, which is a
+ * fingerprint on its own: no real session sits at exactly the cap forever.
+ * Synthesising one at serve time from the pool account's remaining quota —
+ * the obvious "rewrite, never invent" move, and what environment-block.ts
+ * correctly does for `# Environment` — would be the opposite error, because
+ * unlike the environment section this one is not always there to rewrite.
+ * Adding a field real CC omits is the same tell as dropping one it sends.
+ *
+ * So: strip, and do not replace. The tag is gone from the current bundle
+ * because an interactive capture in a fresh session never produced one; this
+ * is what stops a bake run inside a budgeted session from putting it back.
+ */
+function removeTokenBudgetTag(systemPrompt: string): string {
+  return systemPrompt.replace(/[ \t]*<total_tokens>[^<]*<\/total_tokens>[ \t]*\r?\n?/g, '');
+}
+
 function removeHostContextSections(systemPrompt: string): string {
   let out = systemPrompt;
   for (const name of HOST_CONTEXT_SECTION_HEADINGS) {
     out = removeSection(out, name);
   }
   out = removeGitStatusBlock(out);
+  out = removeTokenBudgetTag(out);
   return out;
 }
 
@@ -378,6 +404,13 @@ export function findUserPathHits(text: string): string[] {
   {
     const m = text.match(/[^\s`'")\]]*dario-(?:capture|live-cc)-[A-Za-z0-9]+[^\s`'")\]]*/g);
     if (m) hits.push(...new Set(m.map((h) => `${h} (capture sandbox path)`)));
+  }
+  // A frozen token budget. See removeTokenBudgetTag: the bundle must carry no
+  // remaining-budget tag at all, because real CC only sends one when the
+  // session has a budget and a baked number can never be right twice.
+  {
+    const m = text.match(/<total_tokens>[^<]*<\/total_tokens>/g);
+    if (m) hits.push(...new Set(m.map((h) => `${h} (frozen token budget)`)));
   }
   // A scratchpad path, wherever it appears, for the same reason the memory
   // detector above exists: independent of the heading list, so a rename shows
