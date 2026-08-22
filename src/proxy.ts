@@ -17,6 +17,7 @@ import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion }
 import { AccountPool, TOKEN_EXPIRY_MARGIN_MS, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, utilFreshness, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
 import { extractSessionAffinitySignals, selectSessionAffinitySignal, type ClaudeSessionIdentitySource, type SessionAffinitySignal } from './session-affinity.js';
 import { RoutingTraceStore, type RoutingTraceHandle, type RoutingReleaseReason } from './routing-trace.js';
+import { beginCapture, captureDir, isUpstreamErrorEvent, type MidstreamCapture } from './midstream-error-capture.js';
 import { Analytics, billingBucketFromClaim, formatUsageLogLine, SUBSCRIPTION_CLAIMS, withoutRequestPreviews, type RequestRecord } from './analytics.js';
 import { OverageGuard, buildHaltErrorBody, type HaltState } from './overage-guard.js';
 import { notify as osNotify } from './notify.js';
@@ -4757,7 +4758,31 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
         const streamPreview = new StreamingTextPreview();
         const analyticsDecoder = analytics ? new TextDecoder() : null;
         let analyticsBuffer = '';
+        // Answering the open question at the abnormal-exit path below: whether
+        // api.anthropic.com sends a message_stop of its own after a mid-stream
+        // `error`. Disarmed unless DARIO_CAPTURE_MIDSTREAM_ERRORS names a dir.
+        let upstreamEventsSeen = 0;
+        let midstreamCapture: MidstreamCapture | null = null;
+
         const consumeAnalyticsEvent = (part: string): void => {
+          const dir = captureDir();
+          if (dir) {
+            if (midstreamCapture) {
+              // Recording: every event after the error is the evidence.
+              midstreamCapture.event(part);
+            } else if (isUpstreamErrorEvent(part)) {
+              midstreamCapture = beginCapture(dir, part, {
+                requestId: String(upstream.headers.get('request-id') ?? ''),
+                model: String(requestModel ?? ''),
+                precedingEvents: upstreamEventsSeen,
+              }, Date.now());
+              if (midstreamCapture) {
+                console.error(`[dario] mid-stream upstream error captured → ${midstreamCapture.path}`);
+              }
+            }
+          }
+          upstreamEventsSeen++;
+
           const dataLine = part.split('\n').find(l => l.startsWith('data: '));
           if (!dataLine) return;
           try {
@@ -4850,12 +4875,16 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
          * Other gateways append one; dario deliberately does not, because
          * inventing framing upstream never sent is the failure this whole
          * response path exists to remove, and the error event alone is enough
-         * for an SDK to raise a typed error. What would settle it: a MITM
-         * capture of a genuine `overloaded_error` mid-stream — the same rig
-         * that produced test/fixtures/cc-wire-2.1.236/. If such a recording
-         * shows a trailing `message_stop`, add it here and drop the
-         * "does not invent a message_stop" assertion that guards this choice
-         * in test/stream-fault-injection.mjs.
+         * for an SDK to raise a typed error. What would settle it: a capture of
+         * a genuine `overloaded_error` mid-stream. That is now armed rather
+         * than waited for — set DARIO_CAPTURE_MIDSTREAM_ERRORS to a directory
+         * and midstream-error-capture.ts records every event from an upstream
+         * `error` to the end of that stream, off the SSE reassembly this path
+         * already does for analytics. An overloaded_error cannot be scheduled
+         * and is over in milliseconds, so being armed is the only way to catch
+         * one. If such a recording shows a trailing `message_stop`, add it here
+         * and drop the "does not invent a message_stop" assertion that guards
+         * this choice in test/stream-fault-injection.mjs.
          *
          * Inert on a healthy stream: only the abnormal-exit path calls this,
          * so the byte-for-byte passthrough cc-wire-fidelity asserts is
@@ -4944,8 +4973,10 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
             const tail = streamMapper.end();
             if (tail.length > 0) writeToClient(tail);
           }
+          (midstreamCapture as MidstreamCapture | null)?.finish(upstreamAbortReason === null ? 'upstream closed the stream normally' : `aborted: ${upstreamAbortReason}`);
           streamCompleted = upstreamAbortReason === null;
         } catch (err) {
+          (midstreamCapture as MidstreamCapture | null)?.finish(`threw: ${sanitizeError(err)}`);
           streamError = sanitizeError(err);
           if (verbose) console.error('[dario] Stream error:', sanitizeError(err));
           // Tear down the upstream body reader deterministically on an abnormal
