@@ -101,6 +101,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homeDir } from './home-dir.js';
+import { stripCaptureSandboxPaths } from './scrub-template.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -747,9 +748,14 @@ export async function refreshLiveFingerprintAsync(options?: {
     if (Object.keys(variants).length > 0) {
       live.system_prompt_variants = { ...(live.system_prompt_variants ?? {}), ...variants };
     }
-    writeLiveCache(live);
-    log(`live fingerprint refreshed from CC ${live._version}`);
-    return live;
+    // Return what was CACHED, not the raw capture. Both callers discard the
+    // value today, so this is a landmine rather than a live bug — but handing
+    // back an object that differs from the one on disk is exactly how the next
+    // caller ends up serving the sandbox paths the write path just removed.
+    const cached = withoutCaptureSandboxPaths(live);
+    writeLiveCache(cached);
+    log(`live fingerprint refreshed from CC ${cached._version}`);
+    return cached;
   } catch (err) {
     log(`live fingerprint refresh failed: ${(err as Error).message}`);
     return null;
@@ -946,7 +952,34 @@ export function _atomicWriteJsonForTest(targetPath: string, data: unknown): void
 }
 
 function writeLiveCache(data: TemplateData): void {
-  atomicWriteJson(liveCachePath(), data);
+  atomicWriteJson(liveCachePath(), withoutCaptureSandboxPaths(data));
+}
+
+/**
+ * Strip dario's throwaway capture sandbox out of a capture before it is cached.
+ *
+ * Applied at the WRITE, not the read, so a cache already on disk is repaired by
+ * the next refresh rather than on every module init, and so there is exactly one
+ * choke point — `refreshLiveFingerprintAsync` merges the variant sweep in after
+ * the base capture, and each variant is captured in its own sandbox with its own
+ * nonce, so no single earlier point sees them all.
+ */
+function withoutCaptureSandboxPaths(data: TemplateData): TemplateData {
+  const variants = data.system_prompt_variants;
+  return {
+    ...data,
+    system_prompt: stripCaptureSandboxPaths(data.system_prompt),
+    ...(variants
+      ? {
+          system_prompt_variants: Object.fromEntries(
+            Object.entries(variants).map(([k, v]) => [k, stripCaptureSandboxPaths(v)]),
+          ),
+        }
+      : {}),
+    ...(typeof data.system_prompt_fable === 'string'
+      ? { system_prompt_fable: stripCaptureSandboxPaths(data.system_prompt_fable) }
+      : {}),
+  };
 }
 
 interface CapturedRequest {

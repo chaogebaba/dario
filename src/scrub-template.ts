@@ -110,6 +110,22 @@ const CLAUDE_PROJECT_PATH =
 const CAPTURE_SANDBOX_PROJECT_PATH =
   /[^\s`'")\]]*[\\/]dario-capture-[A-Za-z0-9]+[\\/]projects[\\/][^\s`'")\]]*/g;
 
+/**
+ * Remove dario's OWN capture-sandbox paths, and nothing else.
+ *
+ * `scrubText` is off-limits to the live path on purpose (see findUserPathHits):
+ * a live capture keeps host context so `environment-block.ts` has a real shape
+ * to rewrite. But the `dario-capture-XXXXXX` temp dir is not host context — it
+ * is an artifact dario manufactured, deleted before the first request is ever
+ * served, and named with a fresh nonce on every capture. Replaying it told
+ * every served model its memory directory was a path that does not exist,
+ * under an instruction that states the directory definitely does, and churned
+ * the `cache_control: ephemeral` prefix on each refresh for no reason.
+ */
+export function stripCaptureSandboxPaths(text: string): string {
+  return canonicalizeProjectPath(text, CAPTURE_SANDBOX_PROJECT_PATH);
+}
+
 function canonicalizeClaudeProjectPaths(text: string): string {
   return canonicalizeProjectPath(
     canonicalizeProjectPath(text, CLAUDE_PROJECT_PATH),
@@ -183,7 +199,16 @@ const USER_PATH_PATTERNS: Array<[RegExp, string]> = [
  */
 const HOST_CONTEXT_SECTION_HEADINGS = [
   'Environment',
+  // CC writes the memory section under TWO names, chosen by prompt family:
+  // the long-form prompts (sonnet-5, haiku) say `# auto memory`, the short-form
+  // ones (the base, fable, opus-5) say `# Memory`. Only the first was listed,
+  // so every bake since the memory feature shipped published the section for
+  // three of the four families — masked by the path rules below, which is the
+  // LAST line of defense doing the section remover's job. `# Memory` measured
+  // against CC 2.1.239; both spellings stay listed because a capture of either
+  // family must strip.
   'auto memory',
+  'Memory',
   'claudeMd',
   'userEmail',
   'currentDate',
@@ -313,9 +338,30 @@ export function findUserPathHits(text: string): string[] {
     const matches = text.match(re);
     if (matches) hits.push(...matches);
   }
-  // A host-context section still present here means removeSection failed to
-  // strip it (e.g. a CRLF capture or a renamed heading). Flag it so the drift-
-  // gate fails the release rather than shipping the leak (#642-audit).
+  // The memory path, matched on CC's PROSE rather than on a heading.
+  //
+  // The loop below cannot catch a renamed heading even though its comment
+  // claims to: it iterates the very list removeSection uses, so a section CC
+  // renames is invisible to the remover and to its own guard at the same
+  // instant. That is not hypothetical — `# auto memory` became `# Memory` on
+  // three of the four prompt families and neither noticed. This detector is
+  // deliberately independent of the list: it keys on the sentence CC writes,
+  // and fires on any path that is not the canonical placeholder, under any
+  // root. An operator with CLAUDE_CONFIG_DIR off `$HOME` (a shared runner, a
+  // container) leaks both the real config root and the working-directory slug
+  // past every rule above, and did so silently.
+  {
+    // Anchored on `file-based memory` plus the first backticked path after it,
+    // not on the full sentence: CC words it two ways for the two prompt
+    // families ("a persistent file-based memory at" on the short form, "a
+    // persistent, file-based memory system at" on the long one), and a
+    // detector that had to match either sentence whole would be the list trap
+    // again, one rewording from silent.
+    const m = /file-based memory[^`\n]*`([^`]*)`/.exec(text);
+    if (m && !m[1].startsWith(CANONICAL_PROJECT_DIR)) {
+      hits.push(`${m[1]} (memory path not canonicalized)`);
+    }
+  }
   for (const name of HOST_CONTEXT_SECTION_HEADINGS) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (new RegExp(`\\r?\\n# ${esc}[ \\t]*\\r?\\n`).test(text)) {

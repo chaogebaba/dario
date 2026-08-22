@@ -37,6 +37,7 @@ process.env.DARIO_LIVE_TEMPLATE_CACHE = join(work, 'cc-template.live.json');
 
 const { refreshLiveFingerprintAsync, _resetClaudeBinCacheForTest } =
   await import('../dist/live-fingerprint.js');
+const { stripCaptureSandboxPaths } = await import('../dist/scrub-template.js');
 
 let pass = 0, fail = 0;
 function check(label, cond, extra) {
@@ -106,7 +107,22 @@ async function refresh() {
   const before = new Set(readdirSync(tmpdir()).filter((d) => d.startsWith('dario-capture-')));
   const returned = await refreshLiveFingerprintAsync({ force: true, silent: true, timeoutMs: 15_000 });
   const written = existsSync(cachePath) ? JSON.parse(readFileSync(cachePath, 'utf-8')) : null;
-  const after = readdirSync(tmpdir()).filter((d) => d.startsWith('dario-capture-') && !before.has(d));
+  // Poll rather than read once. The sweep is deliberately NOT synchronous with
+  // the returned promise: settle() SIGKILLs a still-running child and hangs the
+  // rmSync off its `exit`, because racing the child for the directory is what
+  // left three stale dirs per proxy start behind a 2s sweep. So "no dir left"
+  // is a post-condition of the child being reaped, not of the refresh
+  // resolving, and asserting it on the same tick only passed because the reap
+  // usually beats the assertion. It stopped beating it at --test-concurrency=6
+  // — 3 runs out of 3 — while a serial run still passed, which is the signature
+  // of a timing assumption, not of a leak.
+  const stranded = () => readdirSync(tmpdir()).filter((d) => d.startsWith('dario-capture-') && !before.has(d));
+  const deadline = Date.now() + 5_000;
+  let after = stranded();
+  while (after.length > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    after = stranded();
+  }
   return { returned, written, strandedDirs: after };
 }
 
@@ -166,6 +182,32 @@ header('what the child actually received');
     unexpected.length === 0);
   check('--print is on the argv, which is what keeps CC out of its OAuth flow',
     seen.argv.includes('--print'), seen.argv.join(' '));
+}
+
+// ======================================================================
+header('the capture sandbox does not ride the capture out');
+{
+  // CC composes its memory path under CLAUDE_CONFIG_DIR, which for a capture is
+  // the throwaway `dario-capture-XXXXXX` dir — deleted before the first request
+  // is ever served, and renamed on every refresh. Replaying it told every model
+  // its memory directory was a path that does not exist, under an instruction
+  // saying it definitely does. The write path canonicalizes it; this proves the
+  // whole refresh does, on disk AND in the value handed back.
+  const sandboxPath = '/tmp/dario-capture-Zq7x1A/projects/-tmp-dario-capture-Zq7x1A/memory/';
+  const withMemory = bundle.system_prompt
+    + '\n\n# Memory\n\nYou have a persistent file-based memory at `' + sandboxPath + '`.\n';
+  installStub('sandbox-memory', ccBody({ prompt: withMemory }));
+  const { returned, written } = await refresh();
+  check('the capture is accepted', returned !== null && written !== null);
+  check('the cached prompt carries no sandbox path', !/dario-capture-Zq7x1A/.test(JSON.stringify(written)));
+  check('it is canonicalized, not deleted', written.system_prompt.includes('/home/user/.claude/projects/project/memory/'));
+  check('the returned value matches the cached one', JSON.stringify(returned) === JSON.stringify(written));
+  // The `# Environment` cwd is the SAME sandbox and is deliberately kept: it is
+  // the only shape environment-block.ts has to rewrite at serve time, and it is
+  // replaced with the serving host's own cwd before anything goes on the wire.
+  check('a sandbox cwd outside a project path is left for environment-block to rewrite',
+    stripCaptureSandboxPaths('Primary working directory: /tmp/dario-capture-Zq7x1A')
+      === 'Primary working directory: /tmp/dario-capture-Zq7x1A');
 }
 
 // ======================================================================
