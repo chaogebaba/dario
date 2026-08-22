@@ -93,7 +93,7 @@
  * the right piece without re-deriving the threat model.
  */
 
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
@@ -1040,11 +1040,50 @@ export function isOwnCaptureRequest(url: string | undefined, nonce: string): boo
  *
  * Returns null on timeout or spawn failure. Does not throw.
  */
+/**
+ * How the capture child authenticates and which entrypoint it runs as.
+ *
+ * Both axes change what CC sends, independently, and the default for both is
+ * the wrong one for a proxy that fronts an OAuth subscription. Measured on
+ * 2.1.239, same model and sandbox, only the named axis moved:
+ *
+ *   headless + api key   28 tools   the bake's default, and the worst corner
+ *   headless + oauth     29 tools   + RemoteTrigger, + oauth-2025-04-20,
+ *                                   + extended-cache-ttl-2025-04-11
+ *   interactive + key    28 tools
+ *   interactive + oauth  33 tools   + Artifact, AskUserQuestion, EnterPlanMode,
+ *                                   ExitPlanMode, + redact-thinking-2026-02-12
+ *
+ * The api-key corner is also where the template's `header_order` learns
+ * `x-api-key` and never learns `authorization` — a slot every proxied request
+ * needs and none of them found, until the genuine-CC path stopped consulting
+ * the template for its order at all.
+ *
+ * Runtime capture keeps the defaults: it has no interactive terminal to drive
+ * and no business reading the operator's credentials. The bake, run
+ * deliberately on a machine that is already logged in, takes both.
+ */
+export interface CaptureOptions {
+  /**
+   * Hand the child `CLAUDE_CODE_OAUTH_TOKEN` instead of the placeholder API
+   * key. The token reaches nothing but dario's own loopback listener, which
+   * answers canned — the capture is unbilled either way.
+   */
+  oauthToken?: string;
+  /**
+   * Drive a real interactive session under tmux rather than `claude --print`.
+   * `--print` announces `cc_entrypoint=sdk-cli` and a different identity line,
+   * so a template baked from it describes a client dario never proxies.
+   */
+  interactive?: boolean;
+}
+
 export async function captureLiveTemplateAsync(
   timeoutMs: number = 10_000,
   model?: string,
+  opts: CaptureOptions = {},
 ): Promise<TemplateData | null> {
-  const captured = await runCapture(timeoutMs, model);
+  const captured = await runCapture(timeoutMs, model, opts);
   if (!captured) return null;
   return extractTemplate(captured);
 }
@@ -1341,7 +1380,122 @@ export function _seedCaptureRepoForTest(home: string): void {
   seedCaptureRepo(home);
 }
 
-async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRequest | null> {
+/**
+ * Run an interactive Claude Code under tmux until it sends a request.
+ *
+ * `claude --print` cannot produce the interactive shape at all: it announces
+ * `cc_entrypoint=sdk-cli`, sends the Agent SDK identity line rather than the
+ * CLI one, and — measured on 2.1.239 — omits AskUserQuestion, EnterPlanMode,
+ * ExitPlanMode and Artifact. The bake papered over three of those by carrying
+ * them forward from the previous bundle, a workaround that only ever moved the
+ * staleness somewhere less visible.
+ *
+ * tmux rather than a pty library: a native `node-pty` dependency for a
+ * developer script is a poor trade, and `script(1)` is not installed on every
+ * host (this one, Fedora, has no /usr/bin/script). tmux is a soft dependency —
+ * absent, this returns null and the caller falls back.
+ *
+ * The gate loop is not decoration. An interactive CC stops for things `--print`
+ * never sees: the trust prompt, external-import consent, and — when a custom
+ * API key is in the environment — "Do you want to use this API key?", whose
+ * default is No. An unanswered gate looks exactly like a capture that never
+ * sent.
+ *
+ * Returns a killer for the session, or null if tmux is unusable.
+ */
+function driveInteractiveCC(
+  session: string,
+  claudeBin: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  done: () => boolean,
+  timeoutMs: number,
+  onPromptSent: () => void,
+): (() => void) | null {
+  const tmux = (...a: string[]) => spawnSync('tmux', a, { encoding: 'utf8', timeout: 10_000 });
+  if (tmux('-V').status !== 0) {
+    console.error('[dario] interactive capture needs tmux on PATH; falling back.');
+    return null;
+  }
+  const envPrefix = Object.entries(env)
+    .filter(([, v]) => typeof v === 'string')
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+    .join(' ');
+  // A wide pane: CC reflows its gates to the terminal width, and a narrow one
+  // wraps the very strings the loop below matches on.
+  const started = tmux('new-session', '-d', '-s', session, '-x', '200', '-y', '50',
+    'sh', '-c', `cd ${JSON.stringify(cwd)} && env ${envPrefix} ${JSON.stringify(claudeBin)}`);
+  if (started.status !== 0) {
+    console.error(`[dario] interactive capture: tmux new-session failed: ${started.stderr?.trim()}`);
+    return null;
+  }
+  // Keep the last pane around. When an interactive capture fails, the reason is
+  // almost always a gate this loop did not recognise, and the pane is the only
+  // place that says which one — without it the failure is indistinguishable
+  // from every other "no request arrived".
+  let lastPane = '';
+  const kill = () => {
+    if (!done() && !lastPane.trim()) {
+      console.error('[dario] interactive capture: the tmux session painted nothing before it '
+        + 'ended. CC exited on startup rather than opening a session.');
+    }
+    if (!done() && lastPane.trim()) {
+      console.error('[dario] interactive capture: last terminal state was:\n'
+        + lastPane.split('\n').filter((l) => l.trim()).slice(-12).join('\n'));
+    }
+    tmux('kill-session', '-t', session);
+  };
+
+  let sentPrompt = false;
+  let stopped = false;
+  const MAX_TURNS = 6;
+  const TURN_GAP_MS = 5_000;
+  let turns = 0;
+  let nextPromptAt = 0;
+  const deadline = Date.now() + timeoutMs;
+  // A self-rescheduling timeout, not setInterval. Two reasons, one of them
+  // measured: each pass shells out to tmux three times, and a chain cannot
+  // overlap itself the way an interval can when those calls run long. And
+  // under Bun the interval fired exactly once here and then stopped — the
+  // capture looked like a hang, with the first gate answered and nothing ever
+  // advancing past it.
+  const step = () => {
+    if (stopped) return;
+    if (done() || Date.now() > deadline) return;
+    let pane = '';
+    try {
+      pane = tmux('capture-pane', '-p', '-t', session).stdout ?? '';
+      if (pane.trim()) lastPane = pane;
+      // Every gate CC puts up shares the same footer, so match that rather
+      // than enumerating prompts that change between releases. The API-key
+      // gate is the one exception worth naming: its default is the answer we
+      // do not want, so move the selection before confirming.
+      if (/Do you want to use this API key\?/.test(pane)) {
+        tmux('send-keys', '-t', session, 'Up');
+        tmux('send-keys', '-t', session, 'Enter');
+      } else if (/Enter to confirm/.test(pane)) {
+        tmux('send-keys', '-t', session, 'Enter');
+      } else if (/for shortcuts|Try "|Welcome to/.test(pane) && Date.now() >= nextPromptAt && turns < MAX_TURNS) {
+        // More than one turn on purpose. Which tools CC declares is not stable
+        // across the turns of a single session: Artifact, RemoteTrigger and
+        // the plan-mode pair appear on some and not others, apparently
+        // gated on a capability probe that may or may not have landed. Three
+        // consecutive one-turn captures of the same CC and model gave 28, 28
+        // and 33 tools. The caller keeps the richest it sees, so asking a few
+        // times converges on the superset instead of sampling the race.
+        turns++;
+        nextPromptAt = Date.now() + TURN_GAP_MS;
+        if (!sentPrompt) { sentPrompt = true; onPromptSent(); }
+        tmux('send-keys', '-t', session, 'hi', 'Enter');
+      }
+    } catch { /* tmux went away; the deadline will settle this */ }
+    if (!stopped) setTimeout(step, 1_200);
+  };
+  setTimeout(step, 1_200);
+  return () => { stopped = true; kill(); };
+}
+
+async function runCapture(timeoutMs: number, model?: string, opts: CaptureOptions = {}): Promise<CapturedRequest | null> {
   const managed = managedSettingsHijack();
   if (managed) {
     console.log(
@@ -1354,12 +1508,42 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
   const nonce = `dario-capture-${randomBytes(12).toString('hex')}`;
   return new Promise((resolve) => {
     let captured: CapturedRequest | null = null;
+    // How long to wait for a richer request after one already qualified. Long
+    // enough to cover the opening burst of an interactive session, short
+    // enough that `--print` — which sends one request and exits — is not slowed
+    // by it, since its child exit settles first either way.
+    const QUIET_MS = opts.interactive ? 9_000 : 500;
+    let quiet: ReturnType<typeof setTimeout> | undefined;
+    // Interactive only: ignore everything CC sends before the prompt is typed.
+    // A session opens with a burst — title generation, a structured-output
+    // turn, and a main loop that fires before the UI has finished deciding
+    // which tools it has. Three consecutive captures of the same CC and model
+    // produced 24, 30 and 33 tools from that burst. The turn that answers a
+    // typed prompt is the one shape worth baking, and it is the only one this
+    // waits for.
+    let promptSent = false;
+    const toolUnion = new Map<string, unknown>();
     let settled = false;
     let foreign = 0;
-    const settle = (result: CapturedRequest | null) => {
+    const settle = (raw: CapturedRequest | null) => {
       if (settled) return;
       settled = true;
+      // The representative request's own order first, then anything only other
+      // requests declared. Order is part of the fingerprint, so the tools CC
+      // actually sent together stay in the sequence it sent them.
+      const result = raw && toolUnion.size > 0
+        ? (() => {
+            const own = (raw.body as { tools?: Array<{ name?: unknown }> }).tools ?? [];
+            const seen = new Set(own.map((t) => (typeof t?.name === 'string' ? t.name : '')));
+            const extra = [...toolUnion.entries()].filter(([n]) => !seen.has(n)).map(([, t]) => t);
+            return extra.length === 0
+              ? raw
+              : { ...raw, body: { ...raw.body, tools: [...own, ...extra] } };
+          })()
+        : raw;
       try { server.close(); } catch { /* noop */ }
+      if (quiet) clearTimeout(quiet);
+      try { killInteractive?.(); } catch { /* the session is already gone */ }
       // Positive assertion, and the only check that is sound across every
       // override channel. A path-scanning guard cannot be completed — settings
       // can be overridden from the user config, a project `.claude/`, a managed
@@ -1460,13 +1644,55 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
             if (typeof v === 'string') headers[k] = v;
             else if (Array.isArray(v)) headers[k] = v.join(',');
           }
-          captured = {
-            method: req.method ?? 'POST',
-            path: (req.url ?? '/v1/messages').replace(`/${nonce}`, ''),
-            headers,
-            rawHeaders: Array.isArray(req.rawHeaders) ? [...req.rawHeaders] : [],
-            body,
-          };
+          // Not every /v1/messages carries a template. Under OAuth the FIRST
+          // one never does: CC opens with a quota probe — no `system`, no
+          // `tools`, `max_tokens: 1` — fired to read the ratelimit response
+          // headers. Capturing it settled the run in under two seconds with a
+          // body extractTemplate then rejected, which surfaced as the same
+          // "capture returned null" a missing binary produces. Keep looking
+          // until a request arrives with the thing being captured in it.
+          const hasTemplate = Array.isArray(body?.system) && body.system.length > 0
+            && Array.isArray(body?.tools) && body.tools.length > 0;
+          // Take the RICHEST request of the session, not the first one that
+          // qualifies. A session opens with several: a title generator, a
+          // structured-output turn, the main loop. They carry different tool
+          // subsets, and which one arrives first is a race — three consecutive
+          // interactive captures of the same CC and model produced 24, 30 and
+          // 33 tools. A bundle whose tool list is decided by that race is not a
+          // fingerprint of anything. The main loop is the superset, so the most
+          // tools wins and the debounce below waits out the burst.
+          // Union the tool schemas across every qualifying request of the
+          // session, and keep the richest single request as the representative
+          // for everything else.
+          //
+          // CC 2.1.239 does not declare a fixed tool set. It DEFERS schemas:
+          // some requests carry all of them, others carry a subset and name
+          // the rest in a system-reminder for the model to fetch. Which
+          // requests get which is not stable — the same CC, model and prompt
+          // produced 28, 28 and 33 tools on consecutive captures, with
+          // Artifact, RemoteTrigger and the plan-mode pair being the ones that
+          // came and went. Picking any one request therefore bakes a random
+          // subset, and the bundle is supposed to be a SUPERSET of what a
+          // capture sees. The union is the only reading of that rule which
+          // survives deferral.
+          if (hasTemplate) {
+            for (const tool of body.tools as Array<{ name?: unknown }>) {
+              const name = typeof tool?.name === 'string' ? tool.name : '';
+              if (name && !toolUnion.has(name)) toolUnion.set(name, tool);
+            }
+          }
+          const eligible = hasTemplate && (!opts.interactive || promptSent);
+          const richer = eligible
+            && body.tools.length > ((captured?.body as { tools?: unknown[] } | undefined)?.tools?.length ?? 0);
+          if (richer) {
+            captured = {
+              method: req.method ?? 'POST',
+              path: (req.url ?? '/v1/messages').replace(`/${nonce}`, ''),
+              headers,
+              rawHeaders: Array.isArray(req.rawHeaders) ? [...req.rawHeaders] : [],
+              body,
+            };
+          }
         } catch {
           // Captured body was not JSON — leave captured null, respond anyway.
         }
@@ -1516,8 +1742,23 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
         ].join('');
         res.end(sse);
 
-        // Give CC a beat to read the response before we kill it.
-        setTimeout(() => settle(captured), 500);
+        // Give CC a beat to read the response before we kill it — but only
+        // once there is something to settle WITH. This used to fire after any
+        // request at all, which was safe while the child was `claude --print`
+        // under an API key: the first request it sent was the one being
+        // captured. Under OAuth the first request is the quota probe, so the
+        // run ended 500ms in with `captured` still null and reported the same
+        // "capture returned null" that a missing binary produces. When nothing
+        // has been captured yet, keep listening; the child's exit and the hard
+        // timeout are still the backstops.
+        // Debounced, and reset by every request: the settle must come after the
+        // opening burst, or the richest-wins rule above never sees the request
+        // it is there to prefer. Restarted rather than extended, so a chatty
+        // session still ends promptly once it goes quiet.
+        if (captured) {
+          if (quiet) clearTimeout(quiet);
+          quiet = setTimeout(() => settle(captured), QUIET_MS);
+        }
       });
     });
 
@@ -1566,6 +1807,16 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
         captureHome = mkdtempSync(join(tmpdir(), 'dario-capture-'));
         trackCaptureHome(captureHome);
         seedCaptureRepo(captureHome);
+        if (opts.interactive) {
+          // `--print` never asks; an interactive CC with no onboarding state
+          // opens the theme picker and then the login flow, and neither ever
+          // sends a request. CLAUDE_CONFIG_DIR is the whole config root for
+          // this child, so this is the only file that decides it.
+          try {
+            writeFileSync(join(captureHome, '.claude.json'),
+              JSON.stringify({ hasCompletedOnboarding: true, theme: 'dark' }, null, 2));
+          } catch { /* the capture will fail visibly a moment later */ }
+        }
         // Allowlist, not `{...process.env}` minus a denylist: every variable
         // that can redirect the child is absent because it was never copied.
         // See CAPTURE_ENV_ALLOW_POSIX for what survives and why.
@@ -1576,7 +1827,14 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
           // authenticates nothing, so inheriting one bought nothing and put a
           // live credential in a child we are deliberately pointing at a
           // socket. Captures on hosts with no key set have always used this.
-          ANTHROPIC_API_KEY: 'sk-dario-fingerprint-capture',
+          // OAuth when the caller supplied a token, placeholder key otherwise.
+          // Not both: CC prompts before using a custom API key on the
+          // interactive path ("Do you want to use this API key?"), and an
+          // unanswered gate is indistinguishable from a capture that never
+          // sent.
+          ...(opts.oauthToken
+            ? { CLAUDE_CODE_OAUTH_TOKEN: opts.oauthToken }
+            : { ANTHROPIC_API_KEY: 'sk-dario-fingerprint-capture' }),
           // Pin the base-prompt model. An unpinned `claude --print` uses the
           // user's DEFAULT model, which made the captured base machine-specific.
           // The `model` argument wins, then the environment: the runtime variant
@@ -1584,12 +1842,30 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
           // ANTHROPIC_MODEL around each of its own captures. Read here rather
           // than inherited, so the allowlist does not have to carry it.
           ANTHROPIC_MODEL: model ?? process.env.ANTHROPIC_MODEL ?? TEMPLATE_BASE_MODEL,
-          // Belt and braces. `--print` is what actually keeps CC out of its
-          // interactive UI and OAuth flow; this name appears nowhere in the
-          // 2.1.235 binary, so it is inert today and costs nothing to keep.
-          CLAUDE_NONINTERACTIVE: '1',
+          // Belt and braces on the headless path. `--print` is what actually
+          // keeps CC out of its interactive UI and OAuth flow; this name
+          // appeared nowhere in the 2.1.235 binary, so it was inert and cost
+          // nothing to keep. Not inert for an interactive capture, which wants
+          // exactly the mode it suppresses — and the failure is silent: the
+          // tmux session dies before painting anything, so the pane the driver
+          // reports on is empty and the whole run looks like "no request
+          // arrived" with nothing to go on.
+          ...(opts.interactive ? {} : { CLAUDE_NONINTERACTIVE: '1' }),
         });
 
+        if (opts.interactive) {
+          // No `child` to own: tmux daemonises the session and returns. The
+          // session name is the nonce, so a stranded one is traceable to the
+          // capture that left it and two concurrent captures cannot collide.
+          killInteractive = driveInteractiveCC(nonce, claudeBin, env, captureHome,
+            () => Boolean(captured), timeoutMs, () => { promptSent = true; }) ?? undefined;
+          if (!killInteractive) {
+            settle(null);
+            return;
+          }
+          childSpawned = true;
+          return;
+        }
         child = spawn(claudeBin, ['--print', '-p', 'hi'], {
           env,
           // Run in the throwaway dir, not wherever the proxy happens to be
@@ -1618,6 +1894,7 @@ async function runCapture(timeoutMs: number, model?: string): Promise<CapturedRe
     });
 
     let child: ReturnType<typeof spawn> | undefined;
+    let killInteractive: (() => void) | undefined;
     let captureHome: string | undefined;
     // Only true once the spawn actually succeeded. Without it, "no claude
     // binary on PATH" would trip the billed-request warning above.

@@ -44,7 +44,8 @@
  *       version is written to `label-target.txt` for the workflow to consume.
  */
 
-import { writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -89,19 +90,71 @@ const BASE_MODEL = TEMPLATE_BASE_MODEL;
 // from at runtime — a family added there is captured here with no second
 // hand-maintained list to forget (the tool_names ≠ tools divergence class).
 const VARIANT_MODELS = VARIANT_FAMILIES.map((f) => ({ key: f.key, model: f.captureModel }));
+/**
+ * The bake captures as the client dario actually proxies: an interactive
+ * session, authenticated with the operator's subscription.
+ *
+ * It used to capture `claude --print` under a placeholder API key, which is
+ * the wrong client on both axes at once. Measured on 2.1.239, same model and
+ * sandbox, only the named axis moving:
+ *
+ *   headless + api key   28 tools      what this script baked
+ *   headless + oauth     29 tools      + RemoteTrigger
+ *   interactive + key    28 tools
+ *   interactive + oauth  33 tools      + Artifact, AskUserQuestion,
+ *                                        EnterPlanMode, ExitPlanMode
+ *
+ * and on the beta list, `oauth-2025-04-20` and `extended-cache-ttl-2025-04-11`
+ * ride on the auth axis while `redact-thinking-2026-02-12` rides on the
+ * entrypoint. The header order learned `x-api-key` and never learned
+ * `authorization`, a slot every proxied request needs.
+ *
+ * The token goes to the loopback MITM, which answers canned, so the capture
+ * stays unbilled. `--headless` and `--api-key-capture` back out of either
+ * axis; both make the bundle describe a client this proxy does not serve, so
+ * they exist for diagnosis rather than for use.
+ */
+function operatorOAuthToken() {
+  if (process.argv.includes('--api-key-capture')) return undefined;
+  const envToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (envToken) return envToken;
+  const creds = join(homedir(), '.claude', '.credentials.json');
+  if (!existsSync(creds)) return undefined;
+  try {
+    return JSON.parse(readFileSync(creds, 'utf-8'))?.claudeAiOauth?.accessToken || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const OAUTH_TOKEN = operatorOAuthToken();
+const INTERACTIVE_CAPTURE = !process.argv.includes('--headless');
+if (!OAUTH_TOKEN) {
+  log('warning: no subscription token found (~/.claude/.credentials.json or '
+    + 'CLAUDE_CODE_OAUTH_TOKEN). Capturing under a placeholder API key, which omits '
+    + 'RemoteTrigger, oauth-2025-04-20 and extended-cache-ttl-2025-04-11.');
+}
+log(`capture mode: ${INTERACTIVE_CAPTURE ? 'interactive (tmux)' : 'headless --print'}, `
+  + `auth ${OAUTH_TOKEN ? 'oauth' : 'placeholder api key'}`);
+
 async function captureForModel(model, label) {
   const saved = process.env.ANTHROPIC_MODEL;
   process.env.ANTHROPIC_MODEL = model;
   try {
     log(`spawning CC (${label}: ${model}) against loopback MITM to capture /v1/messages...`);
-    return await captureLiveTemplateAsync(20_000);
+    // Interactive needs longer: the session has gates to answer and a UI to
+    // paint before it will accept a prompt, where `--print` sends on startup.
+    return await captureLiveTemplateAsync(INTERACTIVE_CAPTURE ? 90_000 : 20_000, undefined, {
+      oauthToken: OAUTH_TOKEN,
+      interactive: INTERACTIVE_CAPTURE,
+    });
   } finally {
     if (saved === undefined) delete process.env.ANTHROPIC_MODEL; else process.env.ANTHROPIC_MODEL = saved;
   }
 }
 const captured = await captureForModel(BASE_MODEL, 'base');
 if (!captured) {
-  log('error: capture timed out or CC did not send a /v1/messages request within 20s.');
+  log(`error: capture timed out or CC did not send a /v1/messages request within ${INTERACTIVE_CAPTURE ? 90 : 20}s.`);
   process.exit(1);
 }
 

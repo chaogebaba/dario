@@ -212,6 +212,11 @@ const HOST_CONTEXT_SECTION_HEADINGS = [
   'claudeMd',
   'userEmail',
   'currentDate',
+  // Per-session and machine-specific: CC writes the absolute path of a
+  // scratchpad under the host's temp root, which during a bake is the capture
+  // sandbox itself. Caught the first time an interactive capture ran, because
+  // `--print` had never been given one.
+  'Scratchpad Directory',
 ] as const;
 
 function removeHostContextSections(systemPrompt: string): string {
@@ -361,6 +366,29 @@ export function findUserPathHits(text: string): string[] {
     if (m && !m[1].startsWith(CANONICAL_PROJECT_DIR)) {
       hits.push(`${m[1]} (memory path not canonicalized)`);
     }
+  }
+  // The capture sandbox's own directory name, wherever it appears.
+  //
+  // This is the one detector that cannot be defeated by a rename, because it
+  // does not key on a heading or a sentence — only on a string that dario
+  // itself generated and that has no business surviving into a bundle. Both
+  // leaks found so far (the memory path, then the scratchpad path) were CC
+  // putting a sandbox path in a section nobody had listed yet; the next one
+  // will be too, and it will land here first.
+  {
+    const m = text.match(/[^\s`'")\]]*dario-(?:capture|live-cc)-[A-Za-z0-9]+[^\s`'")\]]*/g);
+    if (m) hits.push(...new Set(m.map((h) => `${h} (capture sandbox path)`)));
+  }
+  // A scratchpad path, wherever it appears, for the same reason the memory
+  // detector above exists: independent of the heading list, so a rename shows
+  // up here rather than shipping. Keyed on a BACKTICKED path containing
+  // "scratchpad" rather than on the sentence around it — CC's own wording
+  // ("instead of `/tmp` or other system temp directories:") puts a different
+  // backticked token first, and the Artifact tool's description discusses the
+  // scratchpad in prose without naming one.
+  {
+    const m = text.match(/`((?:[A-Za-z]:[\\/]|\/)[^`\n]*scratchpad[^`\n]*)`/gi);
+    if (m) hits.push(...new Set(m.map((h) => `${h.slice(1, -1)} (scratchpad path not stripped)`)));
   }
   for (const name of HOST_CONTEXT_SECTION_HEADINGS) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

@@ -35,7 +35,11 @@ const check = (name, cond) => {
 const spawnIdx = src.indexOf("spawn(claudeBin, ['--print', '-p', 'hi']");
 check('capture still spawns the CC binary with a trivial prompt', spawnIdx > 0);
 
-const spawnBlock = src.slice(Math.max(0, spawnIdx - 2600), spawnIdx + 900);
+// Wide enough to hold the whole env build. It was 2600 back, which fit until
+// the interactive branch landed between the environment and the spawn and
+// silently pushed CLAUDE_CONFIG_DIR out of the window — four isolation
+// assertions started failing on a change that touched none of them.
+const spawnBlock = src.slice(Math.max(0, spawnIdx - 5200), spawnIdx + 900);
 
 // The core guarantee: settings.json must not be in scope for the child.
 check(
@@ -76,6 +80,30 @@ check(
   'the child gets the placeholder API key, never the operator\'s',
   /ANTHROPIC_API_KEY: 'sk-dario-fingerprint-capture'/.test(spawnBlock)
   && !/ANTHROPIC_API_KEY: process\.env\.ANTHROPIC_API_KEY/.test(spawnBlock),
+);
+// The one credential that may reach the child is the one a CALLER passed in,
+// and only because a capture under a placeholder key describes a different
+// client: measured on 2.1.239, an api-key capture omits RemoteTrigger,
+// oauth-2025-04-20 and extended-cache-ttl-2025-04-11, and teaches the header
+// order `x-api-key` in the slot every proxied request needs for
+// `authorization`. It still only ever reaches the loopback MITM.
+check(
+  'an OAuth token is opt-in, never read from the environment here',
+  /opts\.oauthToken\s*$/m.test(spawnBlock)
+  && !/CLAUDE_CODE_OAUTH_TOKEN: process\.env/.test(src),
+);
+check(
+  'and it replaces the placeholder rather than joining it',
+  /\?\s*\{ CLAUDE_CODE_OAUTH_TOKEN: opts\.oauthToken \}\s*\n\s*:\s*\{ ANTHROPIC_API_KEY: 'sk-dario-fingerprint-capture' \}/.test(spawnBlock),
+);
+// The runtime path must not quietly become interactive: it has no terminal to
+// drive, and driving one would mean reading credentials it has no business
+// reading. Interactive is a caller's explicit choice, which in practice is the
+// bake and nothing else.
+check(
+  'interactive capture is opt-in, defaulting to --print',
+  /if \(opts\.interactive\) \{/.test(spawnBlock)
+  && /spawn\(claudeBin, \['--print', '-p', 'hi'\]/.test(spawnBlock),
 );
 
 // CLAUDE_CONFIG_DIR cannot relocate the machine-level policy file, whose env
