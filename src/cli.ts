@@ -563,6 +563,8 @@ async function proxy() {
   // only speaks http:/https: proxies.
   // See docs/vpn-routing.md for the full setup options.
   let outboundProxy: OutboundProxyConfig | null = null;
+  // Carries the proxy credential — passed to startProxy, never logged.
+  let egressConnectProxyUrl: string | undefined;
   try {
     outboundProxy = parseOutboundProxy(resolveEgressProxyFlag(args, process.env, fileCfg.egressProxy));
   } catch (err) {
@@ -576,6 +578,13 @@ async function proxy() {
     const directFetch = globalThis.fetch;
     try {
       const bridge = await installEgressProxy(outboundProxy);
+      // The voice relay dials with node:https, which the fetch-only egress
+      // wrapper does not cover, so it needs a CONNECT tunnel of its own. A
+      // SOCKS egress already has one — the bridge — and an http/https egress
+      // speaks CONNECT itself.
+      egressConnectProxyUrl = bridge
+        ? bridge.proxyUrl
+        : (outboundProxy.scheme === 'http' || outboundProxy.scheme === 'https' ? outboundProxy.url : undefined);
       if (bridge) {
         console.error(`[dario] SOCKS5 bridge listening on ${bridge.url} (loopback only)`);
         // The listener is unref'd and the token dies with the process, so
@@ -792,7 +801,7 @@ async function proxy() {
   // error instead, which is the whole point: exiting 0 for an occupied port
   // made an entire suite score green having run nothing.
   try {
-    await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, sessionAffinity, sessionAffinityTtlMs, sessionAffinityClaudeSource, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat, egressProxyConfigured: outboundProxy !== null });
+    await startProxy({ port, host, verbose, verboseBodies, model, fastModel, noClaudeAuth, passthrough, preserveTools, hybridTools, mergeTools, noAutoDetect, strictTls, pacingMinMs, pacingJitterMs, thinkTimeBaseMs, thinkTimePerTokenMs, thinkTimeJitterMs, thinkTimeMaxMs, sessionStartMinMs, sessionStartJitterMs, stealth, drainOnClose, sessionIdleRotateMs, sessionRotateJitterMs, sessionMaxAgeMs, sessionPerClient, preserveOrchestrationTags, noLiveCapture, strictTemplate, maxConcurrent, maxQueued, queueTimeoutMs, poolStrategy, sessionAffinity, sessionAffinityTtlMs, sessionAffinityClaudeSource, effort, maxTokens, poolFallbackModel, modelAliases, logFile, passthroughBetas, skipFields, systemPrompt, overageGuardEnabled, overageGuardBehavior, overageGuardCooldownMs, overageGuardNotifyOs, honorClientThinking, preserveOutputFormat, egressProxyConfigured: outboundProxy !== null, egressConnectProxyUrl });
   } catch (err) {
     if (!(err instanceof ProxyBindError)) throw err;
     if (err.darioAlreadyRunning) {

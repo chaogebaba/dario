@@ -1207,6 +1207,14 @@ interface ProxyOptions {
    * everything else tunnels.
    */
   egressProxyConfigured?: boolean;
+  /**
+   * A CONNECT-speaking HTTP proxy the voice relay can tunnel through when an
+   * egress proxy is set — socks5-bridge.ts's `proxyUrl` for a SOCKS egress, or
+   * the proxy itself for an http/https one. Without it the relay declines the
+   * upgrade rather than leaving by the default route. Carries a credential;
+   * never log it.
+   */
+  egressConnectProxyUrl?: string;
   /** Max concurrent in-flight requests. Default 10. dario#80. */
   maxConcurrent?: number;
   /** Max requests buffered waiting for a concurrency slot. Default 128. dario#80. */
@@ -5308,6 +5316,7 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
   const voiceRelay = attachVoiceRelay(server, {
     upstream: { host: new URL(ANTHROPIC_API).hostname, port: 443, tls: true, ...opts.voiceUpstream },
     egressProxyConfigured: opts.egressProxyConfigured,
+    egressConnectProxyUrl: opts.egressConnectProxyUrl,
     verbose,
     // CC hardcodes `Authorization: Bearer <its own OAuth token>` on this socket,
     // so it can never present dario's key and `checkAuth` can never pass for a

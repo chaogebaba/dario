@@ -49,10 +49,12 @@
 // it and go direct. An operator who configured egress routing on purpose must
 // not get a silent bypass on one socket, so the relay declines instead.
 
-import type { Server, IncomingMessage } from 'node:http';
+import type { Server, IncomingMessage, RequestOptions } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { request as httpRequest } from 'node:http';
 import { pipeline, type Duplex } from 'node:stream';
+import { connect as netConnect, type Socket } from 'node:net';
+import { connect as tlsConnect } from 'node:tls';
 
 /** The only path this relay will upgrade. Anything else is refused. */
 export const VOICE_WS_PATH = '/api/ws/speech_to_text/voice_stream';
@@ -111,6 +113,20 @@ export interface VoiceRelayDeps {
   upstream: { host: string; port: number; tls: boolean };
   /** True when --egress-proxy is configured; the relay declines rather than bypassing it. */
   egressProxyConfigured?: boolean;
+  /**
+   * An HTTP proxy that speaks CONNECT, used to carry the voice socket when an
+   * egress proxy is configured. For a SOCKS egress this is socks5-bridge.ts's
+   * own `proxyUrl` — the bridge exists precisely because Bun's fetch cannot
+   * speak SOCKS either, and a CONNECT tunnel is the shape both need. For an
+   * http/https egress it is that proxy directly, which speaks CONNECT natively.
+   *
+   * Without this the relay has no way to honour the egress proxy: it dials with
+   * node:https, and installOutboundProxyWrapper only wraps globalThis.fetch. It
+   * declines rather than bypassing, because a voice socket leaving by the
+   * default route while every other upstream call went through the proxy is the
+   * one failure the operator explicitly configured against.
+   */
+  egressConnectProxyUrl?: string;
   /** Whether the caller cleared dario's inbound auth. */
   authorize: (req: IncomingMessage) => boolean;
   log?: (message: string) => void;
@@ -194,6 +210,67 @@ function relayRefusal(socket: Duplex, status: number, message: string, headers: 
  * still get that 404, which is correct: without the upgrade there is nothing to
  * relay.
  */
+
+/**
+ * Open a CONNECT tunnel through `proxyUrl` to `host:port` and hand back the
+ * tunnelled socket.
+ *
+ * Deliberately hand-rolled rather than routed through an agent library: this is
+ * one CONNECT, once per voice socket, and the relay's whole design is to touch
+ * as little of the byte stream as possible. Any leftover the proxy sends in the
+ * same packet as its 200 is returned alongside the socket — dropping it would
+ * eat the first bytes of the TLS handshake, which is the same trap
+ * socks5-bridge.ts documents and the 101 path below hits again.
+ */
+function connectThroughProxy(
+  proxyUrl: string,
+  host: string,
+  port: number,
+  timeoutMs: number,
+): Promise<{ socket: Socket; head: Buffer }> {
+  return new Promise((resolve, reject) => {
+    let url: URL;
+    try { url = new URL(proxyUrl); } catch { reject(new Error(`unparseable egress proxy URL`)); return; }
+    const socket = netConnect({
+      host: url.hostname,
+      port: Number(url.port) || (url.protocol === 'https:' ? 443 : 80),
+    });
+    let settled = false;
+    const done = (err: Error | null, head?: Buffer): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.removeListener('data', onData);
+      if (err) { socket.destroy(); reject(err); } else resolve({ socket, head: head ?? Buffer.alloc(0) });
+    };
+    const timer = setTimeout(() => done(new Error(`egress proxy did not answer CONNECT within ${timeoutMs / 1000}s`)), timeoutMs);
+    let buf = Buffer.alloc(0);
+    const onData = (chunk: Buffer): void => {
+      buf = Buffer.concat([buf, chunk]);
+      const end = buf.indexOf('\r\n\r\n');
+      if (end === -1) {
+        // A proxy that never sends a complete header line is handled by `timer`.
+        if (buf.length > 64 * 1024) done(new Error('egress proxy sent an oversized CONNECT response'));
+        return;
+      }
+      const statusLine = buf.slice(0, buf.indexOf('\r\n')).toString('latin1');
+      const code = Number(/^HTTP\/1\.[01] (\d{3})/.exec(statusLine)?.[1]);
+      if (code !== 200) { done(new Error(`egress proxy refused CONNECT: ${statusLine.trim() || 'no status line'}`)); return; }
+      done(null, buf.slice(end + 4));
+    };
+    socket.on('data', onData);
+    socket.once('error', (e) => done(e));
+    socket.once('close', () => done(new Error('egress proxy closed the connection during CONNECT')));
+    socket.once('connect', () => {
+      const auth = url.username
+        ? `Proxy-Authorization: Basic ${Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString('base64')}\r\n`
+        : '';
+      const target = `${host}:${port}`;
+      socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n${auth}\r\n`);
+    });
+  });
+}
+
 export function attachVoiceRelay(server: Server, deps: VoiceRelayDeps): VoiceRelay {
   const log = deps.log ?? ((m: string) => console.log(m));
   const sockets = new Set<Duplex>();
@@ -231,20 +308,22 @@ export function attachVoiceRelay(server: Server, deps: VoiceRelayDeps): VoiceRel
       return;
     }
 
-    if (deps.egressProxyConfigured) {
+    if (deps.egressProxyConfigured && !deps.egressConnectProxyUrl) {
       refuse(clientSocket, 502, 'Bad Gateway',
-        'dario declines voice relaying while --egress-proxy is set: the relay dials with node:https,\n'
-        + 'which the egress wrapper (globalThis.fetch only) does not cover. Relaying anyway would send\n'
-        + 'this socket direct while every other upstream call honoured the proxy.\n');
+        'dario declines voice relaying while --egress-proxy is set and no CONNECT tunnel is available:\n'
+        + 'the relay dials with node:https, which the egress wrapper (globalThis.fetch only) does not\n'
+        + 'cover. Relaying anyway would send this socket direct while every other upstream call\n'
+        + 'honoured the proxy.\n');
       log('[dario] voice: declined an upgrade — --egress-proxy is set and the relay cannot honour it');
       return;
     }
 
     const tried = new Set<string>();
 
-    const dial = (): void => {
+    const dial = (tunnel?: { socket: Socket; head: Buffer }): void => {
       const account = deps.selectAccount(tried);
       if (!account) {
+        tunnel?.socket.destroy();
         refuse(clientSocket, 503, 'Service Unavailable', 'No account available to carry the voice stream\n');
         return;
       }
@@ -253,13 +332,27 @@ export function attachVoiceRelay(server: Server, deps: VoiceRelayDeps): VoiceRel
       const hostHeader = deps.upstream.port === (deps.upstream.tls ? 443 : 80)
         ? deps.upstream.host
         : `${deps.upstream.host}:${deps.upstream.port}`;
-      const options = {
+      const options: RequestOptions & { createConnection?: () => Socket } = {
         host: deps.upstream.host,
         port: deps.upstream.port,
         path: req.url,                    // query string byte-identical, order intact
         method: 'GET',
         headers: buildUpstreamHeaders(req.headers, account.accessToken, hostHeader),
       };
+      if (tunnel) {
+        // Hand node:https a socket that is already on the far side of the
+        // egress proxy. TLS is negotiated over the tunnel with the upstream's
+        // real hostname, so certificate validation and SNI are unaffected by
+        // the hop — the proxy saw a CONNECT and nothing else.
+        // TLS over the tunnel when the origin is https, with the origin's own
+        // hostname for SNI and certificate validation — the proxy saw a CONNECT
+        // and nothing more. A plaintext origin (the suite's fake) rides the
+        // tunnel bare; wrapping it would negotiate TLS against a server that
+        // does not speak it.
+        options.createConnection = () => (deps.upstream.tls
+          ? tlsConnect({ socket: tunnel.socket, servername: deps.upstream.host })
+          : tunnel.socket) as unknown as Socket;
+      }
       const upstreamReq = deps.upstream.tls ? httpsRequest(options) : httpRequest(options);
 
       const timer = setTimeout(() => {
@@ -320,7 +413,9 @@ export function attachVoiceRelay(server: Server, deps: VoiceRelayDeps): VoiceRel
         // a real credential problem, not a stale seat.
         if ((status === 401 || status === 403) && !settled && tried.size === 1) {
           log(`[dario] voice: ${status} on ${account.alias}, trying the next account`);
-          dial();
+          // A fresh tunnel: the first one is spent, and its TLS session is
+          // bound to the request that just failed.
+          void startDial();
           return;
         }
         settled = true;
@@ -339,7 +434,40 @@ export function attachVoiceRelay(server: Server, deps: VoiceRelayDeps): VoiceRel
       upstreamReq.end();
     };
 
-    dial();
+    /**
+     * Open the egress tunnel if one is configured, then dial. Split from
+     * `dial` so the 401 failover can take a fresh tunnel rather than reusing a
+     * spent one, and so a tunnel failure refuses the upgrade with the reason
+     * instead of surfacing as a bare socket error.
+     */
+    const startDial = async (): Promise<void> => {
+      if (!deps.egressConnectProxyUrl) { dial(); return; }
+      try {
+        const tunnel = await connectThroughProxy(
+          deps.egressConnectProxyUrl, deps.upstream.host, deps.upstream.port, CONNECT_TIMEOUT_MS);
+        if (clientSocket.destroyed) { tunnel.socket.destroy(); return; }
+        if (tunnel.head.length) {
+          // The proxy should send nothing after its 200 before we speak, and
+          // every proxy measured does exactly that. If one ever does, those
+          // bytes are the start of the TLS handshake and there is no way to
+          // push them back into the socket ahead of tlsConnect — so refuse
+          // loudly rather than negotiate TLS against a truncated stream.
+          tunnel.socket.destroy();
+          refuse(clientSocket, 502, 'Bad Gateway',
+            'The egress proxy sent data immediately after CONNECT; refusing to relay a voice socket\n'
+            + 'whose TLS handshake would start mid-stream.\n');
+          return;
+        }
+        dial(tunnel);
+      } catch (err) {
+        if (clientSocket.destroyed) return;
+        if (deps.verbose) log(`[dario] voice: egress tunnel failed: ${(err as Error).message}`);
+        refuse(clientSocket, 502, 'Bad Gateway',
+          `Failed to open an egress tunnel for the voice socket: ${(err as Error).message}\n`);
+      }
+    };
+
+    void startDial();
   });
 
   return {
