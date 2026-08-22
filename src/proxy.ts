@@ -11,7 +11,7 @@ import { egressIsNotChangingIp, getEgressSnapshot, refreshEgressIpIfStale } from
 import { fetchPlan } from './quota.js';
 import { getServingProbe } from './serving-probe.js';
 import { darioVersion } from './version.js';
-import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, hasCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
+import { buildCCRequest, applyCcPromptCaching, parseEffortSuffix, reverseMapResponse, createStreamingReverseMapper, orderHeadersForOutbound, clientHeaderOrder, overlayTemplateHeaderValues, forwardClientCCIdentityHeaders, isGenuineCCClient, hasCCIdentityHeaders, isMcpToolName, CC_TEMPLATE, CC_CACHE_CONTROL, effectiveCacheControl, withForced1hBeta, type ToolMapping, type RequestContext, type EffortValue } from './cc-template.js';
 import { stampCch, hasCchSeed } from './cch.js';
 import { describeTemplate, detectDrift, checkCCCompat, probeInstalledCCVersion } from './live-fingerprint.js';
 import { AccountPool, TOKEN_EXPIRY_MARGIN_MS, parseRateLimits, modelFamily, isInAuthCooldown, authCooldownMs, reconcilePoolAccounts, resolvePoolStrategy, poolVerdict, blockedSummary, accountAvailability, utilFreshness, type EligibilityFields, type PoolAccount, type PoolStrategy, type StickyLease } from './pool.js';
@@ -4204,9 +4204,19 @@ export async function startProxy(opts: ProxyOptions = {}): Promise<ProxyHandle> 
       dispatchLoop: while (true) {
         // Reorder outbound headers to match CC's captured header sequence
         // when the live template recorded one. No-op on bundled-only installs.
-        // Skipped in passthrough mode — passthrough means "don't shape the
-        // request to look like CC," and reordering is a form of shaping.
-        const outboundHeaders = passthrough ? headers : orderHeadersForOutbound(headers);
+        //
+        // When the client owns its own header set — genuine CC, passthrough,
+        // count_tokens carrying CC identity — its OWN order wins over the
+        // template's. Same argument as the beta list two hundred lines up: the
+        // template is for synthesising CC's shape for a client that has none,
+        // and imitating a sequence we were handed is strictly worse than
+        // replaying it. Measured before this against real 2.1.239: dario put
+        // `authorization` LAST on every request, because the bake captures
+        // with an API key so the template's order carries `x-api-key` and no
+        // `authorization` slot to land in. CC sends it second.
+        const outboundHeaders = clientOwnsItsHeaders
+          ? orderHeadersForOutbound(headers, clientHeaderOrder(req.rawHeaders))
+          : orderHeadersForOutbound(headers);
         const observedRejectionEpoch = poolAccount?.rejectionEpoch;
         observedAuthFailureEpoch = poolAccount?.authFailureEpoch;
         upstreamAttempts++;

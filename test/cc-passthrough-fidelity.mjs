@@ -29,6 +29,7 @@ import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect as netConnect } from 'node:net';
 
 const home = await mkdtemp(join(tmpdir(), 'dario-passthrough-'));
 process.on('exit', () => rmSync(home, { recursive: true, force: true }));
@@ -135,13 +136,47 @@ function reconstruct(fx) {
       default: body[key] = r[key];
     }
   }
-  // Header order as recorded, minus the hop-by-hop ones a client library owns.
-  const headers = {};
+  // Header order as recorded. `host` and `content-length` are rebuilt at send
+  // time — their VALUES belong to this connection — but they keep the slots CC
+  // put them in, because the point of the exercise is the sequence.
+  const headers = [];
   for (const h of r.headerOrder) {
-    if (['host', 'content-length', 'connection', 'accept-encoding'].includes(h)) continue;
-    if (r.headers[h] !== undefined) headers[h] = r.headers[h];
+    if (h === 'host' || h === 'content-length') { headers.push([h, null]); continue; }
+    if (r.headers[h] !== undefined) headers.push([h, r.headers[h]]);
   }
   return { path: r.path, headers, body };
+}
+
+/**
+ * Write the request onto a socket byte by byte, in CC's header order.
+ *
+ * `fetch()` cannot do this job. It owns the header sequence it emits, so a
+ * harness that sends through it is asserting the runtime's ordering, not
+ * dario's — and the thing under test here is precisely whether dario replays
+ * the sequence it was handed. Node's http server preserves what arrives in
+ * `rawHeaders`, so a hand-written request is the only way the client's order
+ * reaches the code that has to honour it.
+ */
+function sendRaw(port, sent) {
+  const bodyBuf = Buffer.from(JSON.stringify(sent.body));
+  const lines = sent.headers.map(([k, v]) => {
+    if (k === 'host') return `host: 127.0.0.1:${port}`;
+    if (k === 'content-length') return `content-length: ${bodyBuf.length}`;
+    return `${k}: ${v}`;
+  });
+  const head = `POST ${sent.path} HTTP/1.1\r\n${lines.join('\r\n')}\r\n\r\n`;
+  return new Promise((resolve) => {
+    const sock = netConnect(port, '127.0.0.1', () => { sock.write(head); sock.write(bodyBuf); });
+    let buf = '';
+    const done = () => { try { sock.destroy(); } catch { /* already gone */ } resolve(buf); };
+    const timer = setTimeout(done, 8000); timer.unref?.();
+    sock.on('data', (d) => {
+      buf += d.toString('latin1');
+      if (/\r\n0\r\n\r\n$|message_stop/.test(buf)) { clearTimeout(timer); done(); }
+    });
+    sock.on('error', () => { clearTimeout(timer); done(); });
+    sock.on('close', () => { clearTimeout(timer); done(); });
+  });
 }
 
 /** Send one reconstructed request through dario; return what dario sent on. */
@@ -183,16 +218,11 @@ async function throughDario(fx) {
   });
   const sent = reconstruct(fx);
   try {
-    const res = await fetch(`http://127.0.0.1:${proxy.port}${sent.path}`, {
-      method: 'POST',
-      headers: { ...sent.headers, 'content-type': 'application/json' },
-      body: JSON.stringify(sent.body),
-    });
-    await res.text();
+    await sendRaw(proxy.port, sent);
   } finally {
     await proxy.close?.();
   }
-  return { sent, seen };
+  return { sent, seen: { ...seen, headerOrder: seen ? Object.keys(seen.headers) : [] } };
 }
 
 // ======================================================================
@@ -215,7 +245,8 @@ header('dario recognises every real 2.1.239 shape as genuine CC');
 {
   const { isGenuineCCClient } = await import('../dist/cc-template.js');
   for (const fx of POSTS) {
-    const { headers, body } = reconstruct(fx);
+    const { headers: pairs, body } = reconstruct(fx);
+    const headers = Object.fromEntries(pairs.filter(([, v]) => v !== null));
     // A miss here is the expensive failure: dario would start rewriting a real
     // CC request as if it were a foreign client — remapping tool names,
     // substituting its own system prompt, scrubbing orchestration tags.
@@ -225,7 +256,9 @@ header('dario recognises every real 2.1.239 shape as genuine CC');
   // all, so the body test alone reads it as foreign and only the headers save it.
   const probe = POSTS.find((p) => p.name === 'quota-probe');
   if (probe) check('the quota probe has no system block at all, and is still recognised',
-    probe.request.systemBlocks === null && isGenuineCCClient(reconstruct(probe).body, reconstruct(probe).headers));
+    probe.request.systemBlocks === null && isGenuineCCClient(
+      reconstruct(probe).body,
+      Object.fromEntries(reconstruct(probe).headers.filter(([, v]) => v !== null))));
 }
 
 // ======================================================================
@@ -246,10 +279,10 @@ for (const fx of POSTS) {
     `sent ${Object.keys(sent.body).join(',')}\n       got  ${Object.keys(seen.body ?? {}).join(',')}`);
 
   const hdrDiff = [];
-  for (const k of Object.keys(sent.headers)) {
-    if (ALLOWED.headers[k]) continue;
+  for (const [k, v] of sent.headers) {
+    if (v === null || ALLOWED.headers[k]) continue;
     const got = seen.headers[k.toLowerCase()];
-    if (got !== sent.headers[k]) hdrDiff.push(`${k}: sent ${sent.headers[k]} / got ${got}`);
+    if (got !== v) hdrDiff.push(`${k}: sent ${v} / got ${got}`);
   }
   check(`${fx.name}: no unlisted header changed`, hdrDiff.length === 0, hdrDiff.join('\n       '));
 
@@ -259,9 +292,17 @@ for (const fx of POSTS) {
   // emits whatever its own insertion order was. Compared over the headers CC
   // actually sent, in CC's own sequence, ignoring the hop-by-hop ones the
   // outbound client owns.
-  const HOP = new Set(['host', 'content-length', 'connection', 'accept-encoding', 'authorization', 'x-api-key']);
+  //
+  // `authorization` is in scope here even though dario replaces its VALUE.
+  // Position and value are separate claims, and leaving it out of the order
+  // check is what hid the defect this assertion now guards: the template's
+  // captured order was recorded with an API key, so it had no `authorization`
+  // slot and every genuine request went out with the bearer appended last
+  // instead of second. Only the headers a client library genuinely owns —
+  // framing and transport — stay excluded.
+  const HOP = new Set(['host', 'content-length', 'connection', 'accept-encoding']);
   const wantOrder = fx.request.headerOrder.filter((h) => !HOP.has(h) && seen.headers[h] !== undefined);
-  const gotOrder = Object.keys(seen.headers).filter((h) => wantOrder.includes(h));
+  const gotOrder = seen.headerOrder.filter((h) => wantOrder.includes(h));
   check(`${fx.name}: header order preserved (${wantOrder.length} headers)`,
     JSON.stringify(wantOrder) === JSON.stringify(gotOrder),
     `CC   ${wantOrder.join(' ')}\n       got  ${gotOrder.join(' ')}`);

@@ -485,6 +485,43 @@ export function overlayTemplateHeaderValues(
  * @param headers outbound headers the proxy built
  * @param overrideHeaderOrder test-only override; production callers pass nothing
  */
+/**
+ * The order the client actually sent its headers in, read off `rawHeaders`.
+ *
+ * For a genuine CC client this is the authority, the same way its beta list
+ * is: the template's `header_order` is a synthesised imitation for callers
+ * that have no CC-shaped header set of their own, and here we hold the real
+ * one. Getting this from the template instead was a live 1:1 defect on every
+ * request. The bake captures with `ANTHROPIC_API_KEY`, so the recorded order
+ * carries `x-api-key` at position 16 and no `authorization` at all — while
+ * real OAuth CC sends `authorization` at position 2. Every genuine request
+ * therefore had its bearer appended at the TAIL, twenty places from where CC
+ * puts it. Sub-agent dispatches lost `x-claude-code-agent-id` the same way:
+ * CC sends it after `x-app`, the template has never seen it, so it went last.
+ *
+ * `x-api-key` maps onto the `authorization` slot rather than being dropped —
+ * a client authenticating to dario with a key still gets its bearer put where
+ * that client puts its credential, instead of at the tail. That substitution
+ * is the whole bug this function exists to fix; reintroducing it here for the
+ * key case would be an odd thing to do knowingly.
+ */
+export function clientHeaderOrder(rawHeaders: readonly string[] | undefined): string[] | undefined {
+  if (!Array.isArray(rawHeaders) || rawHeaders.length < 2) return undefined;
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < rawHeaders.length - 1; i += 2) {
+    const name = String(rawHeaders[i]).toLowerCase();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    order.push(name);
+  }
+  if (!seen.has('authorization')) {
+    const keyAt = order.indexOf('x-api-key');
+    if (keyAt !== -1) order[keyAt] = 'authorization';
+  }
+  return order.length > 0 ? order : undefined;
+}
+
 export function orderHeadersForOutbound(
   headers: Record<string, string>,
   overrideHeaderOrder?: string[] | undefined,
