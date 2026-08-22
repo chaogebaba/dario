@@ -178,7 +178,7 @@ header('a never-used account reports "no idea", not "0% used"');
   const snap = pool.get('fresh').rateLimit;
 
   check('starts unmeasured', snap.measured === false);
-  check('with updatedAt 0 — the field /accounts publishes as measuredAt',
+  check('with updatedAt 0 — the field /accounts publishes as lastObservedAt',
     snap.updatedAt === 0);
   check('status is unknown, not allowed', snap.status === 'unknown');
 
@@ -194,7 +194,7 @@ header('a never-used account reports "no idea", not "0% used"');
   const idle = idlePool.get('idle').rateLimit;
 
   check('a measured-idle account has the same zeros', idle.util5h === snap.util5h);
-  check('but a nonzero measuredAt distinguishes it', idle.updatedAt > 0 && snap.updatedAt === 0);
+  check('but a nonzero lastObservedAt distinguishes it', idle.updatedAt > 0 && snap.updatedAt === 0);
 }
 
 // ======================================================================

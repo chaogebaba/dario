@@ -11,6 +11,11 @@ checklist.
 
 ## [Unreleased]
 
+- **The container image is pinned by digest again.** The Dockerfile read `oven/bun:canary-alpine` for as long as bun 1.4.0 was unreleased — `bun.lock` needs 1.4.x to parse, `oven/bun:1.4.0-alpine` 404'd, and the image could not otherwise be built at all. 1.4.0 has since shipped, so that workaround is retired: the base is `oven/bun:1.4.0-alpine@sha256:07235578…`, which restores a reproducible build, removes the risk of a canary regression breaking releases, and gives Dependabot's `docker` ecosystem entry something it can actually watch. It stays a bun image rather than upstream's `node:26-alpine`, because bun is dario's runtime and not just its build tool.
+
+- **`docs/admin-api.md` describes the fields the API now sends.** It still documented `measured_at`, renamed to `last_observed_at` / `util_age_ms` in the upstream merge, and still described "never observed" as `0` when it is now `null`.
+
+
 - **The `message_stop` question is now armed instead of waited for.** dario's abnormal-exit path writes an `error` event and stops, deliberately inventing no `message_stop` behind it — but whether `api.anthropic.com` sends one of its own after a mid-stream `error` has never been verified. The streaming docs show the error event in isolation, other gateways append one, and no fixture has ever caught a real one. It cannot be caught on demand either: an `overloaded_error` on an already-200 stream arrives when Anthropic is busy, which is not schedulable, and it is over in milliseconds. So `DARIO_CAPTURE_MIDSTREAM_ERRORS=<dir>` now records every event from an upstream `error` to the end of that stream, riding the SSE reassembly this path already performs for analytics — no second parse and no cost on a healthy stream. Whenever the next one lands, the file says whether a `message_stop` followed, and the comment at the emit site points at it. Opt-in, because it writes upstream bytes to disk: it starts recording at the error event and never before it, ignores an error that arrives as the FIRST event (that is an ordinary error, not the case in question), and writes nothing at all on a healthy stream — all four asserted, since a rig that leaked generated text would be a worse problem than the question it answers.
 
 

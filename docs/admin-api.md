@@ -114,12 +114,20 @@ whatever upstream last said about quota. A cool-down scoped to a single
 model family leaves `serving` true, because the account still serves every
 other model; `GET /accounts` names the blocked family in `cooldownScopes`.
 
-Read `measured_at` before you trust `util5h` / `util7d`. dario learns
+Read `last_observed_at` before you trust `util5h` / `util7d`. dario learns
 utilization only from the rate-limit headers on responses it proxies, so an
 account it has not served yet reports `0` meaning "not looked", not "quota
-untouched" — `measured_at: 0` says so, and any other value is the unix-ms
-timestamp of the reading. A proxy that has just restarted reports zeros for
-every seat until traffic flows.
+untouched" — `last_observed_at: null` says so, and any other value is the
+unix-ms timestamp of the reading. `util_age_ms` carries the same fact as an
+age, and is null for the same reason. A proxy that has just restarted reports
+zeros for every seat until traffic flows.
+
+These two were `measured_at` until dario merged upstream v5.5.43, which had
+shipped the same field under its own name. Upstream's is the pair with a
+published contract, so it won. The encoding of "never observed" changed with
+the name: it was `0`, and it is now `null`. A consumer testing `measured_at >
+0` and finding the field absent reads `undefined > 0` as false and happens to
+stay correct; one testing `!== 0` does not.
 
 For a reading that does not depend on traffic, use `GET /quota` (proxy-key
 gated, not admin-token gated). It calls Anthropic's `/api/oauth/usage` and

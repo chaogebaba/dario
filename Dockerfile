@@ -1,9 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
-# `canary`, not 1.4.0: bun.lock needs 1.4.x to parse and 1.4.0 has never been
-# released, so oven/bun:1.4.0-alpine 404s and this image could not be built at
-# all. Move to the release tag once 1.4.0 ships.
-FROM oven/bun:canary-alpine AS build
+# Pinned by digest, and it has to be a bun image rather than upstream's node
+# one: bun.lock needs bun 1.4.x to parse, and bun IS the runtime here -- dario
+# depends on it for the Claude Code TLS fingerprint and for fetch's proxy
+# option. This read `canary` for as long as 1.4.0 was unreleased and
+# oven/bun:1.4.0-alpine 404'd; 1.4.0 has since shipped, so the moving tag is
+# gone and with it a build that was not reproducible and could break on any
+# canary regression. Dependabot's docker ecosystem watches this directory and
+# can now see the pin.
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS build
 WORKDIR /app
 COPY package.json bun.lock tsconfig.json ./
 RUN bun install --frozen-lockfile
@@ -17,7 +22,7 @@ COPY src ./src
 COPY scripts/stamp-build.mjs scripts/src-hash.mjs ./scripts/
 RUN bun run build
 
-FROM oven/bun:canary-alpine AS runtime
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS runtime
 
 # su-exec is the alpine package that lets the entrypoint drop privileges
 # from root → dario after the volume self-heal. ~10KB; no shell, no PAM.
