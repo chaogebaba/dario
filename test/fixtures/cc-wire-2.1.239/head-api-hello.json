@@ -1,0 +1,37 @@
+{
+  "name": "head-api-hello",
+  "recordedFrom": "2026-08-22T04-49-17-388Z-interactive-clean",
+  "request": {
+    "method": "HEAD",
+    "path": "/api/hello",
+    "headerOrder": [
+      "connection",
+      "user-agent",
+      "accept",
+      "host",
+      "accept-encoding"
+    ],
+    "headers": {
+      "user-agent": "Bun/1.4.0",
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate, br, zstd"
+    },
+    "bodyKeyOrder": null
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json",
+      "content-length": "20",
+      "connection": "keep-alive",
+      "server-timing": "x-originResponse;dur=",
+      "server": "cloudflare",
+      "cf-cache-status": "DYNAMIC",
+      "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+      "x-robots-tag": "none"
+    },
+    "sseEvents": null,
+    "sseLast": null,
+    "body": ""
+  }
+}

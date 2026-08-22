@@ -1,0 +1,50 @@
+{
+  "ccVersion": "2.1.239",
+  "recordedAt": "2026-08-22",
+  "how": "MITM reverse proxy on ANTHROPIC_BASE_URL with real subscription credentials, sandboxed HOME + CLAUDE_CONFIG_DIR + off-$HOME cwd; interactive sessions driven under tmux. Recorded by scripts/record-cc-wire.mjs, shaped by scripts/shape-cc-wire.mjs.",
+  "scrubbed": "device_id, account_uuid, session ids, request ids, absolute paths, email, tokens. Message and system-prompt CONTENT is reduced to block type + length; only the billing header and the short identity line are kept verbatim, because those are shape.",
+  "captures": [
+    {
+      "name": "head-api-hello",
+      "file": "head-api-hello.json",
+      "method": "HEAD",
+      "path": "/api/hello",
+      "status": 200
+    },
+    {
+      "name": "quota-probe",
+      "file": "quota-probe.json",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "status": 429
+    },
+    {
+      "name": "structured-output-cli",
+      "file": "structured-output-cli.json",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "main-loop-cli",
+      "file": "main-loop-cli.json",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "structured-output-sdk-cli",
+      "file": "structured-output-sdk-cli.json",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "status": 200
+    },
+    {
+      "name": "main-loop-sdk-cli",
+      "file": "main-loop-sdk-cli.json",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "status": 200
+    }
+  ]
+}
